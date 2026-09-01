@@ -130,7 +130,32 @@ public enum AppInventory {
                 into: &bundleURLs, seenPaths: &seenPaths, isComplete: &isComplete
             )
         }
-        let apps = bundleURLs.compactMap { readAppInfo(at: $0) }
+
+        // Codex Gate-U finding A (second re-check loop): a `compactMap` here would silently drop
+        // any `.app` directory this scan found but could not fully turn into an `InstalledApp` —
+        // an unreadable/missing `Info.plist`, most commonly — while leaving `isComplete == true`.
+        // That is exactly the same hole as an unreadable root: some other installed app could be
+        // sitting at that exact path, and this scan would have no way to prove otherwise. Every
+        // entry `collectAppBundles` handed back is either fully resolved into the result, or it
+        // flips `isComplete`; none is ever quietly skipped.
+        var apps: [InstalledApp] = []
+        apps.reserveCapacity(bundleURLs.count)
+        for bundleURL in bundleURLs {
+            guard let app = readAppInfo(at: bundleURL) else {
+                isComplete = false
+                continue
+            }
+            if app.bundleIdentifier == nil {
+                // Still listed (existing contract — `InstalledApp.bundleIdentifier`'s own doc
+                // comment: "such apps can still be listed"), but a bundle with no readable
+                // `CFBundleIdentifier` can never be exact-bundle-id matched by `LeftoverMatcher`,
+                // so it is invisible to the one ambiguous-ownership check that matters most for
+                // Gate U's "no sibling consumer exists" proof. The scan cannot claim completeness
+                // while it contains an app it could not fully identify.
+                isComplete = false
+            }
+            apps.append(app)
+        }
         return AppInventoryScan(apps: apps, isComplete: isComplete)
     }
 
@@ -173,15 +198,29 @@ public enum AppInventory {
         for entry in entries {
             guard !entry.lastPathComponent.hasPrefix(".") else { continue }
 
+            // The `.app` check is a pure extension test — deliberately made *before* the identity
+            // read below, so an existing `.app`-named entry whose identity cannot be read is never
+            // mistaken for "genuinely non-app noise" and quietly skipped (Codex Gate-U finding A,
+            // second re-check loop).
+            let isAppShaped = entry.pathExtension == "app"
+
             // `lstat`, never `stat`/`fileExists` (finding #10): reports the entry itself, never
             // follows a trailing symlink. A symlink FILE always reports its own containing
             // directory's device via `lstat` regardless of what it points to, so this does not
             // reject the legitimate macOS 26 case (a dot-less `.app`-extension symlink into a
             // cryptex mount) — it only rejects a REAL directory substituted by a different-device
             // mount, or a device mismatch that should never occur for an ordinary symlink/file.
-            guard let identity = FileIdentityReader.lstatIdentity(at: entry), identity.device == rootDevice else { continue }
+            guard let identity = FileIdentityReader.lstatIdentity(at: entry), identity.device == rootDevice else {
+                if isAppShaped {
+                    // Finding A: this scan cannot vouch that no other installed app lives at this
+                    // exact `.app` path — it cannot even read what is sitting there — so it must
+                    // never silently claim completeness the way skipping unreadable noise does.
+                    isComplete = false
+                }
+                continue
+            }
 
-            if entry.pathExtension == "app" {
+            if isAppShaped {
                 // Terminal regardless of symlink status: macOS 26 legitimately relocates some
                 // system apps (Safari confirmed on this machine) to a dot-less symlink pointing
                 // into a cryptex mount, and `Bundle(url:)` in `readAppInfo` below correctly

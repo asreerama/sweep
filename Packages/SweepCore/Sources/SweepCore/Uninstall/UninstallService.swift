@@ -291,9 +291,34 @@ public enum UninstallService {
             let bundlePlan = DeletionPlan(operationID: UUID(), items: [plan.bundle.deletionItem])
             do {
                 let bundleReport = try await coordinator.execute(bundlePlan)
-                allResults.append(contentsOf: bundleReport.results)
-                committed = bundleReport.committed
+                // Codex Gate-U finding B (second re-check loop): `bundleReport.committed` only
+                // says the coordinator finished writing its WAL records without a quarantine-
+                // lifecycle degradation — it says nothing about whether the one item in this plan
+                // actually got trashed. A settled (never-thrown) failure for the bundle item
+                // itself — identity changed since authorization, policy denial, a filesystem
+                // error — still comes back as `committed == true`, and before this fix that
+                // settled failure was appended to the report as-is while every leftover already
+                // trashed during the phase above was left gone for good. The single source of
+                // truth for "did the bundle actually get removed" is the item's own outcome, not
+                // the report-level commit flag.
+                let bundleItemSucceeded = bundleReport.results.first?.outcome == .succeeded
+                if bundleItemSucceeded {
+                    allResults.append(contentsOf: bundleReport.results)
+                    committed = bundleReport.committed
+                } else {
+                    allResults = await restoreLeftoversAfterBundleRefusal(leftoverResults, journal: journal, operationID: leftoverPlanOperationID)
+                    allResults.append(contentsOf: bundleReport.results)
+                    committed = false
+                }
             } catch {
+                // Codex Gate-U finding B: a *thrown* bundle-phase failure is just as much "the
+                // bundle did not succeed" as a settled one — the leftovers already trashed during
+                // the phase above must be restored before this propagates, exactly like the
+                // settled-failure and pre-mutation-revalidation-refusal branches above already do.
+                // The restored report is never surfaced (this still throws, unchanged from
+                // before), but the real filesystem and WAL correction this performs is not
+                // optional.
+                _ = await restoreLeftoversAfterBundleRefusal(leftoverResults, journal: journal, operationID: leftoverPlanOperationID)
                 await journal.close()
                 throw error
             }
@@ -356,6 +381,17 @@ public enum UninstallService {
     /// Moves a trashed leftover back to its original location and verifies it actually landed —
     /// never trusting `FileManager.moveItem`'s own success return alone, the same discipline
     /// every mutation in this codebase already follows.
+    ///
+    /// Codex Gate-U finding B (second re-check loop): "landed" used to mean only
+    /// `FileManager.fileExists(atPath:)` — true for *anything at all* sitting at the original
+    /// path, not specifically the object this operation trashed. That accepts a same-named decoy
+    /// silently substituted for the real object (most plausibly by something replacing whatever
+    /// sits at `trashURL` before this runs, so `moveItem` genuinely, successfully moves the wrong
+    /// object into place) as a clean restore. The only proof that matters is the same one every
+    /// other mutation in this codebase already requires: re-`lstat` the result and compare
+    /// device/inode/type against the identity captured *before* this item was ever trashed
+    /// (`result.item.identity`, read by `AuthorizedUninstallPlan.authorizeLeftovers` at
+    /// authorization time) — `FileIdentity.isSameFile(as:)`'s own contract.
     private static func restoreFromTrash(_ result: DeletionItemResult) -> (ItemOutcome, ItemFailureReason, String) {
         let originalPath = result.item.url.path
         guard let trashURL = result.trashURL else {
@@ -381,16 +417,27 @@ public enum UninstallService {
                     + "(\(error)); manual recovery required, item left at \(trashURL.path)"
             )
         }
-        guard FileManager.default.fileExists(atPath: originalPath) else {
+        guard let restoredIdentity = try? FileIdentity.read(at: result.item.url) else {
             return (
                 .movedRecoveryRequired, .rollbackFailed,
-                "restore move reported success but \(originalPath) is not present afterward; manual recovery required"
+                "restore move reported success but \(originalPath) could not be read back afterward; manual "
+                    + "recovery required"
+            )
+        }
+        guard restoredIdentity.isSameFile(as: result.item.identity) else {
+            return (
+                .movedRecoveryRequired, .rollbackFailed,
+                "restore move reported success, but the object now at \(originalPath) (dev \(restoredIdentity.deviceID)/"
+                    + "ino \(restoredIdentity.inode)) does not match the object this operation trashed (dev "
+                    + "\(result.item.identity.deviceID)/ino \(result.item.identity.inode)); manual recovery required, "
+                    + "the genuine trashed object may still be reachable via a Trash lifecycle scan"
             )
         }
         return (
             .skipped, .notAuthorized,
             "restored: bundle authorization was refused immediately before bundle staging, after this leftover "
-                + "had already reached the Trash; moved back from \(trashURL.path)"
+                + "had already reached the Trash; moved back from \(trashURL.path); restored identity verified "
+                + "against the object trashed (dev \(restoredIdentity.deviceID)/ino \(restoredIdentity.inode))"
         )
     }
 

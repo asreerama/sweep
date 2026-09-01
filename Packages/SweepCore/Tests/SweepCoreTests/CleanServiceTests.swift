@@ -101,13 +101,28 @@ final class CleanServiceTests: XCTestCase {
         XCTAssertTrue(home.exists("Library/Logs/CautionApp/junk.log"), "a caution-tier item is never touched")
     }
 
-    func testDeleteActionRuleIsSkippedWithAReportedOutcomeNeverExecuted() async throws {
+    /// Gate 2 (PLAN §6): with the gate closed (the default — this test does not inject
+    /// `gate2Open: true`), a `delete`-action rule no longer gets skipped the way it did before
+    /// Gate 2 existed; it falls back to trash instead, so the item is actually cleaned rather than
+    /// silently ignored, while Gate 1's trash-only safety posture (nothing irreversible) is
+    /// unchanged. `CleanServiceGate2Tests` covers the direct-delete branch itself.
+    func testDeleteActionRuleFallsBackToTrashWhileGate2IsClosed() async throws {
         let home = try FixtureHome("cs-delete-action")
         try home.write("Library/Logs/DeleteApp/junk.log")
+
+        var probe: NSURL?
+        let probeFile = try home.write("probe.bin")
+        do {
+            try FileManager.default.trashItem(at: probeFile, resultingItemURL: &probe)
+            if let probe = probe as URL? { try? FileManager.default.removeItem(at: probe) }
+        } catch {
+            throw XCTSkip("FileManager.trashItem unavailable here: \(error.localizedDescription)")
+        }
+
         let rule = Rule(
             id: "test.userlogs.deleteaction", title: "Delete action", group: .systemJunk, root: .userLogs,
-            pattern: "*", itemTypes: [.directory], tier: .safe, action: .delete, undo: .none,
-            rationale: "exercises the action hard filter"
+            pattern: "*", itemTypes: [.directory], tier: .safe, action: .delete, undo: .regenerated,
+            rationale: "exercises the gate-2-closed fallback"
         )
         try BundledCatalogFixture.install(RuleCatalog(rules: [rule]), atRoot: home.root)
         let receipt = try home.receipt(at: "Library/Logs/DeleteApp", ruleID: rule.id)
@@ -116,10 +131,17 @@ final class CleanServiceTests: XCTestCase {
         let events = try await Self.collect(CleanService.runPipeline(request))
         let report = try XCTUnwrap(Self.finishedReport(in: events))
 
-        XCTAssertEqual(report.skippedCount, 1)
-        XCTAssertEqual(report.succeededCount, 0)
-        XCTAssertEqual(report.outcomes.first?.failureReason, .actionNotPermitted)
-        XCTAssertTrue(home.exists("Library/Logs/DeleteApp/junk.log"), "a delete-action rule is never executed in Gate 1")
+        XCTAssertEqual(report.succeededCount, 1, "\(report.outcomes)")
+        XCTAssertEqual(report.skippedCount, 0)
+        let outcome = try XCTUnwrap(report.outcomes.first)
+        XCTAssertEqual(outcome.requestedAction, .delete, "the rule's own action is still reported honestly")
+        XCTAssertEqual(outcome.executedAction, .trash, "gate 2 closed: it ran as a trash, never a delete")
+        XCTAssertNotNil(outcome.trashURL, "a real trash happened, so a restore handle exists")
+        XCTAssertFalse(home.exists("Library/Logs/DeleteApp"), "the item is gone from its original location")
+        if let trashURL = outcome.trashURL {
+            XCTAssertTrue(FileManager.default.fileExists(atPath: trashURL.path), "recoverable: it is really in the Trash")
+            try? FileManager.default.removeItem(at: trashURL)
+        }
     }
 
     func testUnresolvableSelectedIDProducesAReportedOutcome() async throws {

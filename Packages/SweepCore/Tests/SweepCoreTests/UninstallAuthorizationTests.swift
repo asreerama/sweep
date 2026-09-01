@@ -327,6 +327,59 @@ final class UninstallAuthorizationTests: XCTestCase {
         XCTAssertNotNil(override)
     }
 
+    /// Codex Gate-U finding A (second re-check loop): an existing `.app` sibling whose
+    /// `Info.plist` cannot be read at all must never be silently dropped by the completeness
+    /// scan — dropping it via `compactMap` left `isComplete == true` even though the scan could
+    /// not prove that unreadable app is not itself a consumer of the leftover being evidenced.
+    /// Exercised end to end through `AuthorizedUninstallPlan.authorize`, not merely against
+    /// `AppInventory.scanReportingCompleteness` directly, so a regression here is caught exactly
+    /// where it would actually matter: capping otherwise-auto-selectable exact-bundle-id evidence
+    /// down to manual review.
+    func testAppSiblingWithUnreadableInfoPlistCapsExactBundleIDLeftoverToManualReview() throws {
+        let home = try FixtureHome("gateU-unreadable-sibling")
+        let bundle = try home.makeAppBundle(bundleIdentifier: "com.example.UnreadableSibling", codeSign: true)
+        let leftover = try home.makeLeftover(root: .applicationSupport, name: "com.example.UnreadableSibling")
+
+        // A second, genuinely existing `.app`-extensioned entry next to the real one — a plain
+        // regular file, not a real bundle directory. `Bundle(url:)` returns `nil` for this (empirically
+        // verified: unlike a malformed `Info.plist`, which `Bundle` tolerates as an empty
+        // dictionary, a non-directory `.app` path fails outright), so `AppInventory`'s internal
+        // `readAppInfo` returns `nil` for it — exactly the "dropped via compactMap" case this
+        // finding closed. No reliance on POSIX permission bits (which a root-run test environment
+        // could ignore).
+        let brokenApp = home.applicationsDirectory.appending(path: "Broken.app")
+        try Data("not a bundle".utf8).write(to: brokenApp)
+
+        // Sanity check on the underlying signal itself, so a failure here points straight at
+        // `AppInventory` rather than only showing up two layers away in authorization.
+        let scan = AppInventory.scanReportingCompleteness(directories: [home.applicationsDirectory])
+        XCTAssertFalse(scan.isComplete, "an .app sibling that cannot be turned into an InstalledApp must mark the scan incomplete")
+        XCTAssertFalse(scan.apps.contains { $0.bundlePath.path == brokenApp.path }, "the unreadable sibling itself is never listed as a resolved app")
+
+        let request = Self.request(
+            home: home, bundlePath: bundle, expectedBundleIdentifier: "com.example.UnreadableSibling",
+            selectedLeftoverPaths: [leftover.path]
+        )
+        let refusedPlan = try Self.authorize(request: request, isRunning: { _ in false })
+        guard case .leftoverManualConfirmationRequired = refusedPlan.unresolvedLeftovers.first?.error else {
+            return XCTFail("expected leftoverManualConfirmationRequired, got \(refusedPlan.unresolvedLeftovers)")
+        }
+        XCTAssertTrue(refusedPlan.leftovers.isEmpty, "an unreadable app sibling must cap even exact-bundle-id evidence to manual review")
+
+        // With an explicit override the same evidence is still admitted — capped, never refused.
+        let overriddenRequest = Self.request(
+            home: home, bundlePath: bundle, expectedBundleIdentifier: "com.example.UnreadableSibling",
+            selectedLeftoverPaths: [leftover.path], manualOverrideConfirmedPaths: [leftover.path]
+        )
+        let admittedPlan = try Self.authorize(request: overriddenRequest, isRunning: { _ in false })
+        let admitted = try XCTUnwrap(admittedPlan.leftovers.first)
+        guard case .leftover(let evidence, let override) = admitted.role else {
+            return XCTFail("expected a leftover role, got \(admitted.role)")
+        }
+        XCTAssertTrue(evidence.contains(.exactBundleID))
+        XCTAssertNotNil(override)
+    }
+
     // MARK: - Bundle-object validation (Codex Gate-U finding #5)
 
     /// A planted symlink standing in the Applications directory, pointing at a real bundle

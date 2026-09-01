@@ -448,7 +448,7 @@ func outcome(for reason: ItemFailureReason) -> ItemOutcome {
     switch reason {
     case .identityChanged: .changed
     case .vanished, .policyDenied, .outsideFixtureRoot, .tierViolation, .notAttempted,
-         .outsideAuthorizedRoot, .actionNotPermitted, .notAuthorized:
+         .outsideAuthorizedRoot, .actionNotPermitted, .notAuthorized, .directDeleteRequirementNotMet:
         .skipped
     case .permissionDenied, .filesystemError, .journalUnavailable: .failed
     // Review finding #5: a real mutation happened (the item left its original location) and

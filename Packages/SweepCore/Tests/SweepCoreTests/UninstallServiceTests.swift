@@ -214,6 +214,10 @@ final class UninstallServiceTests: XCTestCase {
         try TrashAvailabilityProbe.skipIfUnavailable(near: home.url("probe"))
         let bundle = try home.makeAppBundle(bundleIdentifier: "com.example.LateRefusal", codeSign: true)
         let leftover = try home.makeLeftover(root: .applicationSupport, name: "com.example.LateRefusal")
+        // Captured before the pipeline ever runs — Codex Gate-U finding B's own regression: the
+        // restore used to verify only that *something* existed at the original path afterward,
+        // never that it was the same inode that was actually trashed.
+        let preTrashIdentity = try FileIdentity.read(at: leftover)
 
         // Calls 1–2 ("not running") satisfy the quit-verification preflight and `authorizeBundle`'s
         // own running check, both of which happen BEFORE the leftover phase ever runs. Every call
@@ -251,6 +255,17 @@ final class UninstallServiceTests: XCTestCase {
         let leftoverOutcome = try XCTUnwrap(report.outcomes.first { $0.detail?.contains("restored:") == true })
         XCTAssertEqual(leftoverOutcome.outcome, .skipped)
         XCTAssertNil(leftoverOutcome.trashURL, "a restored item's outcome must not still advertise a live Trash handle")
+
+        // Codex Gate-U finding B: identity-verified, not merely presence-verified. The object now
+        // sitting at the original path must be the exact same device/inode/type that was trashed —
+        // a mere `fileExists` check would also have passed for a same-named decoy substituted in
+        // its place.
+        let restoredIdentity = try FileIdentity.read(at: leftover)
+        XCTAssertTrue(
+            restoredIdentity.isSameFile(as: preTrashIdentity),
+            "restored dev \(restoredIdentity.deviceID)/ino \(restoredIdentity.inode) must match the trashed "
+                + "dev \(preTrashIdentity.deviceID)/ino \(preTrashIdentity.inode)"
+        )
 
         // The WAL's final recorded state for the restored leftover must match reality (restored),
         // never the transient "succeeded" state it passed through on the way there. The

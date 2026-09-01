@@ -41,6 +41,12 @@ public struct DeletionItem: Sendable, Equatable, Identifiable {
     /// needed manual review. Carried through to ``JournalItem`` so the `planned` WAL record proves
     /// *why* a manual-review item was authorized, not just that it moved.
     public let manualConsentProvenance: ManualConsentProvenance?
+    /// Gate 2 (PLAN §6): the rule's undo capability, carried through so
+    /// ``DeletionCoordinator``'s `directDelete` mode can re-check — independently of
+    /// ``CleanService``'s own hard filter — that a `delete`-action item it is about to unlink
+    /// really did come from a rule declaring `undo == .regenerated`. `nil` for every Gate 1 item
+    /// (nothing here ever sets it) and for any journal written before this field existed.
+    public let undo: RuleUndo?
 
     public var id: String { "\(identity.deviceID):\(identity.inode):\(url.path)" }
 
@@ -52,7 +58,8 @@ public struct DeletionItem: Sendable, Equatable, Identifiable {
         tier: Tier,
         allocatedSize: Int64,
         ruleID: String? = nil,
-        manualConsentProvenance: ManualConsentProvenance? = nil
+        manualConsentProvenance: ManualConsentProvenance? = nil,
+        undo: RuleUndo? = nil
     ) {
         self.url = url
         self.identity = identity
@@ -62,6 +69,7 @@ public struct DeletionItem: Sendable, Equatable, Identifiable {
         self.allocatedSize = allocatedSize
         self.ruleID = ruleID
         self.manualConsentProvenance = manualConsentProvenance
+        self.undo = undo
     }
 
     init(candidate: ScanCandidate, action: DeletionAction, tier: Tier) {
@@ -97,7 +105,8 @@ public struct DeletionItem: Sendable, Equatable, Identifiable {
             action: DeletionAction(plan.action) ?? .trash,
             tier: plan.tier,
             allocatedSize: plan.candidate.allocatedSize,
-            ruleID: plan.ruleID
+            ruleID: plan.ruleID,
+            undo: plan.undo
         )
     }
 
@@ -110,7 +119,8 @@ public struct DeletionItem: Sendable, Equatable, Identifiable {
             tier: tier,
             allocatedSize: allocatedSize,
             ruleID: ruleID,
-            manualConsentProvenance: manualConsentProvenance
+            manualConsentProvenance: manualConsentProvenance,
+            undo: undo
         )
     }
 }

@@ -25,6 +25,11 @@ public struct DeletionMode: Sendable, Equatable {
     enum Kind: Sendable, Equatable {
         case fixtureOnly(URL)
         case trashOnly([TrashOnlyAnchor])
+        /// Gate 2 (PLAN §6, not yet open — `CleanService.gate2Open` stays `false`): the mirror
+        /// image of `trashOnly`. Every path must sit under one of a fixed set of
+        /// authorization-derived real roots, and only the delete verb is reachable — the
+        /// executor for this mode, ``DirectDeleteExecutor``, has no trash method at all.
+        case directDelete([TrashOnlyAnchor])
         case live
     }
 
@@ -45,6 +50,15 @@ public struct DeletionMode: Sendable, Equatable {
     /// proved (``AuthorizedCleanPlan``).
     static func trashOnly(anchors: [TrashOnlyAnchor]) -> DeletionMode {
         DeletionMode(kind: .trashOnly(anchors))
+    }
+
+    /// Gate 2 (PLAN §6, not yet open): confines the coordinator to the given
+    /// authorization-derived roots, delete verb only. Mirrors `trashOnly(anchors:)` exactly with
+    /// the verb swapped — reached today only from inside this package (``CleanService``'s
+    /// gate-2-open branch, and this package's own tests), never from outside it, same as
+    /// `trashOnly` itself.
+    static func directDelete(anchors: [TrashOnlyAnchor]) -> DeletionMode {
+        DeletionMode(kind: .directDelete(anchors))
     }
 
     static func live(_ token: LiveExecutionToken) -> DeletionMode {
@@ -95,6 +109,14 @@ public enum DeletionError: Error, Equatable, CustomStringConvertible {
     /// time-of-check/time-of-use gap the leaf-level descriptor descent already closes, applied
     /// to the root itself.
     case anchorIdentityChanged(String)
+    /// Gate 2 (PLAN §6): the mirror image of `actionNotPermittedInTrashOnlyMode` — a
+    /// `directDelete` plan's item requests an action other than `delete`. Structurally backstopped
+    /// the same way trash-only mode is: ``DirectDeleteExecutor`` has no trash method at all.
+    case actionNotPermittedInDirectDeleteMode(path: String, action: DeletionAction)
+    /// Gate 2's requirement beyond Gate 1: a `directDelete` item's rule did not declare
+    /// `undo == .regenerated`. Direct deletion is unrecoverable, so this is required and checked
+    /// independently of the tier check every mode already applies.
+    case undoNotRegeneratedForDirectDelete(path: String)
 
     public var description: String {
         switch self {
@@ -120,6 +142,10 @@ public enum DeletionError: Error, Equatable, CustomStringConvertible {
             "cannot anchor an authorized root: \(reason)"
         case .anchorIdentityChanged(let reason):
             "an authorized root changed identity before it could be anchored: \(reason)"
+        case .actionNotPermittedInDirectDeleteMode(let path, let action):
+            "refused: \(path) requests action=\(action.rawValue), but direct-delete mode never runs anything but delete"
+        case .undoNotRegeneratedForDirectDelete(let path):
+            "refused: \(path)'s rule does not declare undo == regenerated; direct delete requires it"
         }
     }
 }
@@ -139,7 +165,16 @@ public actor DeletionCoordinator {
     private let mode: DeletionMode
     private let journal: any JournalWriting
     private let extraDenials: DenyCheck
-    private let executor: any TrashCapable
+    /// `nil` only for Gate 2's `directDelete` mode, which has no trash-capable executor at all —
+    /// mirrors `directDeleteExecutor` below being `nil` for every other mode.
+    private let executor: (any TrashCapable)?
+    /// Gate 2 (PLAN §6, not yet open): populated only for `directDelete` mode. Deliberately not
+    /// unified with `executor` above — `DirectDeleteCapable` does not conform to `TrashCapable`,
+    /// so the two stored properties are the type-level proof that a `directDelete` coordinator
+    /// instance is holding something with no trash method to call, the same way `executor` being
+    /// a `TrashOnlyFileDescriptorExecutor` in `trashOnly` mode is the proof there is no delete
+    /// method to call.
+    private let directDeleteExecutor: (any DirectDeleteCapable)?
     /// Descriptor opened once, at init, on the fixture root. Held for the coordinator's life:
     /// every mutation is resolved relative to this inode, not to the pathname it was opened from.
     /// `nil` for `trashOnly` (which holds its descriptors inside `executor` instead, one per
@@ -200,6 +235,34 @@ public actor DeletionCoordinator {
                 queue: queue
             )
 
+        case .directDelete(let anchors):
+            // Mirrors the `trashOnly` case above exactly, verb swapped: the same per-root
+            // descriptor open plus identity re-check (review finding #2's discipline applied to
+            // the root itself), duplicated deliberately rather than shared, so Gate 1's audited
+            // anchor-opening loop is never touched by Gate 2's addition.
+            var opened: [TrashAnchorKey: OpenDirectory] = [:]
+            for directDeleteAnchor in anchors {
+                let directory: OpenDirectory
+                do {
+                    directory = try OpenDirectory.openRoot(directDeleteAnchor.url)
+                } catch {
+                    throw DeletionError.anchorUnavailable(String(describing: error))
+                }
+                guard let actual = try? directory.identity(), actual.pathIdentity == directDeleteAnchor.identity else {
+                    throw DeletionError.anchorIdentityChanged(directDeleteAnchor.url.path)
+                }
+                opened[directDeleteAnchor.key] = directory
+            }
+            self.init(
+                mode: mode,
+                journal: journal,
+                additionalDenials: additionalDenials,
+                executor: nil,
+                directDeleteExecutor: DirectDeleteExecutor(anchors: opened, queue: queue),
+                anchor: nil,
+                queue: queue
+            )
+
         case .live:
             self.init(
                 mode: mode,
@@ -220,7 +283,8 @@ public actor DeletionCoordinator {
         mode: DeletionMode,
         journal: any JournalWriting,
         additionalDenials: DenyCheck = .none,
-        executor: any TrashCapable,
+        executor: (any TrashCapable)? = nil,
+        directDeleteExecutor: (any DirectDeleteCapable)? = nil,
         anchor: OpenDirectory? = nil,
         queue: BlockingIOQueue = BlockingIOQueue(label: "com.sweep.deletion.io")
     ) {
@@ -228,6 +292,7 @@ public actor DeletionCoordinator {
         self.journal = journal
         self.extraDenials = additionalDenials
         self.executor = executor
+        self.directDeleteExecutor = directDeleteExecutor
         self.anchor = anchor
         self.queue = queue
     }
@@ -282,7 +347,7 @@ public actor DeletionCoordinator {
                 // on is not, so the operation stops here rather than mutating anything else
                 // against a journal that just proved it cannot keep up. Never reported as a
                 // clean commit.
-                await executor.finishOperation(plan.operationID)
+                if let executor { await executor.finishOperation(plan.operationID) }
                 return DeletionReport(
                     operationID: plan.operationID, results: results, committed: false, journalingDegraded: true
                 )
@@ -298,8 +363,9 @@ public actor DeletionCoordinator {
         // Best-effort hygiene, after the operation is durably committed: an empty per-operation
         // quarantine directory (review finding #3) is removed rather than left to accumulate
         // forever. A directory that still holds a stranded slot is never touched here — that is
-        // exactly what `QuarantineRecovery` exists to surface.
-        await executor.finishOperation(plan.operationID)
+        // exactly what `QuarantineRecovery` exists to surface. `directDelete` mode has no
+        // quarantine directory at all (nothing was ever staged), so there is nothing to finish.
+        if let executor { await executor.finishOperation(plan.operationID) }
 
         return DeletionReport(operationID: plan.operationID, results: results, committed: true)
     }
@@ -329,6 +395,26 @@ public actor DeletionCoordinator {
                 // (see `perform`, step 5).
                 guard item.action == .trash else {
                     throw DeletionError.actionNotPermittedInTrashOnlyMode(path: item.url.path, action: item.action)
+                }
+            }
+
+        case .directDelete(let anchors):
+            // Gate 2 (PLAN §6): the mirror image of `trashOnly` above, verb swapped, plus the
+            // extra requirement direct deletion carries beyond Gate 1 (unrecoverable, so the
+            // rule must have declared `undo == .regenerated`, re-checked here independently of
+            // whatever `CleanService` already decided when it chose this mode for the item).
+            for item in plan.items {
+                guard Self.matchingAnchor(for: item.url, among: anchors) != nil else {
+                    throw DeletionError.outsideAuthorizedRoots(path: item.url.path)
+                }
+                // First of two independent gates against a trash reaching direct-delete mode;
+                // the second is that `DirectDeleteExecutor` has no trash method at all (see
+                // `perform`, step 5).
+                guard item.action == .delete else {
+                    throw DeletionError.actionNotPermittedInDirectDeleteMode(path: item.url.path, action: item.action)
+                }
+                guard item.undo == .regenerated else {
+                    throw DeletionError.undoNotRegeneratedForDirectDelete(path: item.url.path)
                 }
             }
         }
@@ -408,6 +494,43 @@ public actor DeletionCoordinator {
                     outcome: .skipped,
                     failureReason: .actionNotPermitted,
                     detail: "action \(item.action.rawValue) is not reachable in trash-only mode"
+                )
+            }
+            components = resolved
+            anchorRoot = matched.key
+            anchorRootPath = matched.url.path
+
+        case .directDelete(let anchors):
+            guard let matched = Self.matchingAnchor(for: item.url, among: anchors),
+                  let resolved = FileDescriptorPath.relativeComponents(of: item.url, under: matched.url)
+            else {
+                return DeletionItemResult(
+                    item: item,
+                    outcome: .skipped,
+                    failureReason: .outsideAuthorizedRoot,
+                    detail: "not under any root this operation authorized"
+                )
+            }
+            // Second, independent gate (the first is plan-level `validate`): even if a trash
+            // item somehow reached this point, the executor for this mode has no trash method
+            // to call it with (see step 5).
+            guard item.action == .delete else {
+                return DeletionItemResult(
+                    item: item,
+                    outcome: .skipped,
+                    failureReason: .actionNotPermitted,
+                    detail: "action \(item.action.rawValue) is not reachable in direct-delete mode"
+                )
+            }
+            // Gate 2's requirement beyond Gate 1, re-checked here as well as in plan-level
+            // `validate`: direct deletion is unrecoverable, so it is refused unless the rule
+            // declared `undo == .regenerated`.
+            guard item.undo == .regenerated else {
+                return DeletionItemResult(
+                    item: item,
+                    outcome: .skipped,
+                    failureReason: .directDeleteRequirementNotMet,
+                    detail: "direct delete requires the rule's undo capability to be regenerated"
                 )
             }
             components = resolved
@@ -503,6 +626,20 @@ public actor DeletionCoordinator {
         do {
             switch item.action {
             case .trash:
+                // `executor` is `nil` only for Gate 2's `directDelete` mode, which plan-level
+                // `validate` (and the step-1 re-check above) already refuse a `.trash` item from
+                // ever reaching — this guard is the second, independent gate, and a type fact
+                // (there is no trash-capable executor to call) rather than a checked flag. Placed
+                // before anything is journaled, so an (unreachable in practice) miss here never
+                // writes a stagePlanned record for a slot that will never be used.
+                guard let executor else {
+                    return DeletionItemResult(
+                        item: item,
+                        outcome: .skipped,
+                        failureReason: .actionNotPermitted,
+                        detail: "this mode's executor cannot trash"
+                    )
+                }
                 // Review finding #5: a record identifying the deterministic slot this item is
                 // about to be renamed into is made durable *before* the executor ever runs —
                 // closing "the item is renamed into quarantine before any record identifies its
@@ -588,8 +725,16 @@ public actor DeletionCoordinator {
                     throw descriptorError
                 }
             case .delete:
-                // `executor` is typed `any TrashCapable`; only a `FileMutating` conformer (the
-                // fixture/gate-2 executor) can also delete. `TrashOnlyFileDescriptorExecutor`
+                // Gate 2 (PLAN §6): `directDelete` mode's executor is checked first. It has no
+                // trash method at all (`DirectDeleteCapable` does not conform to `TrashCapable`),
+                // so this is the only route into it; `directDeleteExecutor` is `nil` for every
+                // other mode, so this branch is simply never taken outside `directDelete`.
+                if let directDeleteExecutor {
+                    try await directDeleteExecutor.delete(request)
+                    return DeletionItemResult(item: item, outcome: .succeeded)
+                }
+                // `executor` is typed `(any TrashCapable)?`; only a `FileMutating` conformer (the
+                // fixture-mode executor) can also delete. `TrashOnlyFileDescriptorExecutor`
                 // never conforms to `FileMutating` — it has no delete method — so this cast
                 // fails for every instance of it, unconditionally. Plan-level `validate` already
                 // refuses a delete item in trash-only mode before this line is ever reached; this

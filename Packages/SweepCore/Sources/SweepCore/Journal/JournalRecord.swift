@@ -52,6 +52,11 @@ public enum ItemFailureReason: String, Sendable, Codable, CaseIterable {
     /// ever called: no staging, no rename, nothing touched. A mutation must never proceed
     /// without a durable slot record already on disk to recover it by.
     case journalUnavailable
+    /// Gate 2 (PLAN §6): a `directDelete`-mode item whose rule did not declare
+    /// `undo == .regenerated`. Distinct from ``tierViolation`` so the journal and UI can tell
+    /// "not safe tier" apart from "safe tier, but not proven regenerable" — direct deletion is
+    /// unrecoverable, so this requirement is stricter than anything Gate 1 ever checked.
+    case directDeleteRequirementNotMet
 }
 
 /// One item as recorded in the log: the identity is the record, the path is a label.
@@ -71,6 +76,11 @@ public struct JournalItem: Sendable, Equatable, Codable {
     /// other item, and for any journal written before this field existed (`decodeIfPresent`
     /// semantics via the compiler-synthesized `Decodable` conformance below).
     public let manualConsentProvenance: ManualConsentProvenance?
+    /// Gate 2 (PLAN §6): the rule's undo capability at plan time, so a recovery pass over the log
+    /// can tell a direct-delete item's rule really did declare `undo == .regenerated` without
+    /// re-consulting the catalog. `nil` for every Gate 1 item and for any journal written before
+    /// this field existed.
+    public let undo: RuleUndo?
 
     public init(
         path: String,
@@ -80,7 +90,8 @@ public struct JournalItem: Sendable, Equatable, Codable {
         tier: Tier,
         allocatedSize: Int64,
         ruleID: String? = nil,
-        manualConsentProvenance: ManualConsentProvenance? = nil
+        manualConsentProvenance: ManualConsentProvenance? = nil,
+        undo: RuleUndo? = nil
     ) {
         self.path = path
         self.identity = identity
@@ -90,6 +101,7 @@ public struct JournalItem: Sendable, Equatable, Codable {
         self.allocatedSize = allocatedSize
         self.ruleID = ruleID
         self.manualConsentProvenance = manualConsentProvenance
+        self.undo = undo
     }
 }
 

@@ -106,6 +106,14 @@ public struct CleanItemOutcome: Sendable, Equatable, Identifiable {
     public let quarantineLocation: URL?
     public let allocatedSize: Int64
     public let detail: String?
+    /// Gate 2 (PLAN §6): what actually ran, as opposed to ``requestedAction`` (the rule's declared
+    /// action). `nil` whenever the item never reached a coordinator at all (an unresolved id, an
+    /// authorization failure, or a hard-filter skip) — there is nothing to distinguish trashed
+    /// from deleted for an item that was never executed. When gate 2 is closed (or an item does
+    /// not meet its stricter requirement), a `delete`-action rule's `requestedAction` stays
+    /// `.delete` while `executedAction` reads `.trash`: the report tells the two apart per item
+    /// rather than conflating "what the rule asked for" with "what actually happened."
+    public let executedAction: DeletionAction?
 
     init(
         id: String,
@@ -119,7 +127,8 @@ public struct CleanItemOutcome: Sendable, Equatable, Identifiable {
         trashURL: URL?,
         quarantineLocation: URL? = nil,
         allocatedSize: Int64,
-        detail: String?
+        detail: String?,
+        executedAction: DeletionAction? = nil
     ) {
         self.id = id
         self.url = url
@@ -133,6 +142,7 @@ public struct CleanItemOutcome: Sendable, Equatable, Identifiable {
         self.quarantineLocation = quarantineLocation
         self.allocatedSize = allocatedSize
         self.detail = detail
+        self.executedAction = executedAction
     }
 
     /// A selected id that matched nothing in the request.
@@ -206,7 +216,11 @@ public struct CleanItemOutcome: Sendable, Equatable, Identifiable {
             trashURL: result.trashURL,
             quarantineLocation: result.quarantineLocation,
             allocatedSize: result.item.allocatedSize,
-            detail: result.detail
+            detail: result.detail,
+            // Gate 2: `result.item.action` is what the coordinator actually ran the item through
+            // (`.trash` or `.delete`), which can differ from `plan.action` (the rule's declared
+            // action) exactly when a `delete`-action rule fell back to trash.
+            executedAction: result.item.action
         )
     }
 }
@@ -305,6 +319,21 @@ public enum CleanService {
 
     static let runtimeKillSwitchKey = "SWEEP_CLEAN_SERVICE_DISABLED"
 
+    /// Gate 2 (PLAN §6): direct deletion for tier-`safe`, action-`delete`, undo-`regenerated`
+    /// cache rules. Stays `false` until Fable signs off on the fault-injection suite
+    /// (`Gate2FaultInjectionTests`), mirroring `gate1Open`'s own history exactly — a source
+    /// constant, never state, and nothing in this file or anywhere else in SweepCore sets it.
+    ///
+    /// This does *not* gate whether `CleanService` runs at all (`isEnabled` above, driven solely
+    /// by `gate1Open` and the runtime kill switch, is unchanged and still the only thing
+    /// `execute(_:)` checks). It gates one narrower decision inside the pipeline: whether a
+    /// `delete`-action rule executes via `DirectDeleteExecutor` (`.directDelete` mode) or falls
+    /// back to trash (`.trashOnly` mode, `action` forced to `.trash`). With it closed, every
+    /// `delete`-action rule still executes — as a trash — rather than being skipped, so Gate 1's
+    /// trash-only safety posture is unchanged with Gate 2 closed; nothing irreversible can happen
+    /// while this constant is `false`.
+    static let gate2Open = false
+
     /// The pinned entry point. Throws ``CleanServiceError/gateClosed`` immediately, before a
     /// single candidate is even looked at, whenever ``isEnabled`` is `false`.
     public static func execute(_ request: CleanRequest) -> AsyncThrowingStream<CleanEvent, Error> {
@@ -320,11 +349,18 @@ public enum CleanService {
     /// on its own — the whole point of building this defensively *before* the gate opens is that
     /// the pipeline is fully proven the moment `gate1Open` flips, not proven for the first time
     /// after. Package-internal only; nothing outside `execute`'s gate check reaches it.
-    static func runPipeline(_ request: CleanRequest) -> AsyncThrowingStream<CleanEvent, Error> {
+    ///
+    /// `gate2Open` is a parameter (defaulting to the real compile-time constant) for exactly the
+    /// same reason: Gate 2's direct-delete branch must be fully provable by
+    /// `Gate2FaultInjectionTests`/`CleanServiceGate2Tests` while the shipped constant stays
+    /// `false` — every real caller still only ever gets the default.
+    static func runPipeline(
+        _ request: CleanRequest, gate2Open: Bool = CleanService.gate2Open
+    ) -> AsyncThrowingStream<CleanEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
-                    try await run(request, into: continuation)
+                    try await run(request, gate2Open: gate2Open, into: continuation)
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)
@@ -338,6 +374,7 @@ public enum CleanService {
 
     private static func run(
         _ request: CleanRequest,
+        gate2Open: Bool,
         into continuation: AsyncThrowingStream<CleanEvent, Error>.Continuation
     ) async throws {
         // Codex G1 finding #1: the catalog is never the caller's. Loaded, hash-pinned and
@@ -400,20 +437,24 @@ public enum CleanService {
 
         // HARD FILTERS. Independent of anything the rule or the authorization step already
         // decided: even a correctly-authorized plan is only executed here if it clears all three.
-        var toExecute: [AuthorizedCleanPlan] = []
+        // Gate 2 (PLAN §6) widens the action filter from "trash only" to "trash or delete" — every
+        // other item (notably `commandPreview`, and anything that fails the denylist re-check) is
+        // still skipped exactly as before.
+        var trashPlans: [AuthorizedCleanPlan] = []
+        var directDeletePlans: [AuthorizedCleanPlan] = []
         var plansByIdentity: [FileIdentity: AuthorizedCleanPlan] = [:]
         for plan in authorized {
             guard plan.tier == .safe else {
                 settled.append(CleanItemOutcome(
                     skipping: plan, reason: .tierViolation,
-                    detail: "tier \(plan.tier.rawValue) is not safe; Gate 1 runs safe-tier items only"
+                    detail: "tier \(plan.tier.rawValue) is not safe; only safe-tier items ever execute"
                 ))
                 continue
             }
-            guard plan.action == .trash else {
+            guard plan.action == .trash || plan.action == .delete else {
                 settled.append(CleanItemOutcome(
                     skipping: plan, reason: .actionNotPermitted,
-                    detail: "action \(plan.action.rawValue) is not trash; Gate 1 is trash-only"
+                    detail: "action \(plan.action.rawValue) never reaches the deletion coordinator"
                 ))
                 continue
             }
@@ -422,16 +463,26 @@ public enum CleanService {
                 continue
             }
             plansByIdentity[plan.candidate.identity] = plan
-            toExecute.append(plan)
+
+            // Gate 2's requirement beyond Gate 1 (also re-checked, independently, by
+            // `DeletionCoordinator.directDelete` mode itself): only when the gate is open AND the
+            // rule declared `undo == .regenerated` does a delete-action item actually get deleted.
+            // Every other delete-action item falls back to trash rather than being skipped, so
+            // Gate 1's trash-only safety posture is unchanged whenever this branch is not taken.
+            if plan.action == .delete, gate2Open, plan.undo == .regenerated {
+                directDeletePlans.append(plan)
+            } else {
+                trashPlans.append(plan)
+            }
         }
 
         let operationID = UUID()
-        continuation.yield(.started(operationID: operationID, itemCount: toExecute.count))
+        continuation.yield(.started(operationID: operationID, itemCount: trashPlans.count + directDeletePlans.count))
         for outcome in settled {
             continuation.yield(.itemCompleted(outcome))
         }
 
-        guard !toExecute.isEmpty else {
+        guard !trashPlans.isEmpty || !directDeletePlans.isEmpty else {
             continuation.yield(.finished(CleanReport(
                 operationID: operationID, outcomes: settled, committed: true,
                 catalogDigest: pinned.sha256Hex, journalingDegraded: false, freedBytesEstimate: 0
@@ -439,32 +490,85 @@ public enum CleanService {
             return
         }
 
-        var anchorsByKey: [TrashAnchorKey: TrashOnlyAnchor] = [:]
-        for plan in toExecute { anchorsByKey[plan.anchor.key] = plan.anchor }
-        let anchors = Array(anchorsByKey.values)
-        let sampleVolumes = Set(anchors.map(\.url))
+        // `trashItems` forces `action == .trash` for a fallback item (a delete-action rule not
+        // routed to direct delete): `DeletionItem(authorized:)` alone would carry `plan.action`
+        // (`.delete`) straight through, which `.trashOnly` mode structurally refuses. This never
+        // *escalates* a rule's declared action — only ever downgrades `.delete` to the strictly
+        // less destructive `.trash` — and only for items this loop already decided are not going
+        // through direct delete.
+        let trashItems: [DeletionItem] = trashPlans.map { plan in
+            plan.action == .trash
+                ? DeletionItem(authorized: plan)
+                : DeletionItem(
+                    url: plan.resolvedPath, identity: plan.candidate.identity, parentIdentity: plan.candidate.parentIdentity,
+                    action: .trash, tier: plan.tier, allocatedSize: plan.candidate.allocatedSize,
+                    ruleID: plan.ruleID, undo: plan.undo
+                )
+        }
+        let directDeleteItems: [DeletionItem] = directDeletePlans.map { DeletionItem(authorized: $0) }
+
+        var trashAnchorsByKey: [TrashAnchorKey: TrashOnlyAnchor] = [:]
+        for plan in trashPlans { trashAnchorsByKey[plan.anchor.key] = plan.anchor }
+        var directDeleteAnchorsByKey: [TrashAnchorKey: TrashOnlyAnchor] = [:]
+        for plan in directDeletePlans { directDeleteAnchorsByKey[plan.anchor.key] = plan.anchor }
+        let sampleVolumes = Set((Array(trashAnchorsByKey.values) + Array(directDeleteAnchorsByKey.values)).map(\.url))
         let before = VolumeCapacity.sample(volumes: sampleVolumes)
 
         let journal = try await WALJournal(url: request.journalURL)
-        let coordinator: DeletionCoordinator
-        do {
-            coordinator = try DeletionCoordinator(mode: .trashOnly(anchors: anchors), journal: journal)
-        } catch {
-            await journal.close()
-            throw error
+        var allResults: [DeletionItemResult] = []
+        var committed = true
+        var journalingDegraded = false
+
+        // Codex G1 finding #4: when there is no direct-delete sub-plan (the common case, and the
+        // *only* case while `gate2Open` is `false`), the trash sub-plan carries the *same*
+        // operation id already emitted in `.started` above (and used in the final `.finished`
+        // report below) — not a fresh one of its own, preserving the exact invariant Gate 1
+        // established. A direct-delete sub-plan present alongside it gets its own id (below):
+        // `WALJournal` supports more than one operation id per file (`InterruptedOperation`
+        // recovery is keyed per id already), so this never corrupts either sub-plan's record.
+        if !trashItems.isEmpty {
+            let coordinator: DeletionCoordinator
+            do {
+                coordinator = try DeletionCoordinator(mode: .trashOnly(anchors: Array(trashAnchorsByKey.values)), journal: journal)
+            } catch {
+                await journal.close()
+                throw error
+            }
+            let plan = DeletionPlan(operationID: operationID, catalogDigest: pinned.sha256Hex, items: trashItems)
+            do {
+                let report = try await coordinator.execute(plan)
+                allResults.append(contentsOf: report.results)
+                committed = committed && report.committed
+                journalingDegraded = journalingDegraded || report.journalingDegraded
+            } catch {
+                await journal.close()
+                throw error
+            }
         }
 
-        // Codex G1 finding #4: the plan must carry the *same* operation id already emitted in
-        // `.started` above (and used in the final `.finished` report below) — not a fresh one of
-        // its own, which is what let the WAL disagree with the service's own report.
-        let plan = DeletionPlan(operationID: operationID, catalogDigest: pinned.sha256Hex, items: toExecute.map { DeletionItem(authorized: $0) })
-        let report: DeletionReport
-        do {
-            report = try await coordinator.execute(plan)
-        } catch {
-            await journal.close()
-            throw error
+        if !directDeleteItems.isEmpty {
+            let directOperationID = trashItems.isEmpty ? operationID : UUID()
+            let coordinator: DeletionCoordinator
+            do {
+                coordinator = try DeletionCoordinator(
+                    mode: .directDelete(anchors: Array(directDeleteAnchorsByKey.values)), journal: journal
+                )
+            } catch {
+                await journal.close()
+                throw error
+            }
+            let plan = DeletionPlan(operationID: directOperationID, catalogDigest: pinned.sha256Hex, items: directDeleteItems)
+            do {
+                let report = try await coordinator.execute(plan)
+                allResults.append(contentsOf: report.results)
+                committed = committed && report.committed
+                journalingDegraded = journalingDegraded || report.journalingDegraded
+            } catch {
+                await journal.close()
+                throw error
+            }
         }
+
         await journal.close()
 
         let after = VolumeCapacity.sample(volumes: sampleVolumes)
@@ -472,7 +576,7 @@ public enum CleanService {
 
         var allOutcomes = settled
         var bytesSoFar: Int64 = 0
-        for result in report.results {
+        for result in allResults {
             let outcome = CleanItemOutcome(result: result, plan: plansByIdentity[result.item.identity])
             allOutcomes.append(outcome)
             if result.outcome == .succeeded { bytesSoFar += result.item.allocatedSize }
@@ -481,8 +585,8 @@ public enum CleanService {
         }
 
         continuation.yield(.finished(CleanReport(
-            operationID: operationID, outcomes: allOutcomes, committed: report.committed,
-            catalogDigest: pinned.sha256Hex, journalingDegraded: report.journalingDegraded,
+            operationID: operationID, outcomes: allOutcomes, committed: committed,
+            catalogDigest: pinned.sha256Hex, journalingDegraded: journalingDegraded,
             freedBytesEstimate: freed
         )))
     }

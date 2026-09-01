@@ -87,7 +87,7 @@ final class CleanAdapterPipelineTests: XCTestCase {
         // The internal test seam, not `gate1Open`: `runPipeline` is what SweepCore itself uses to
         // prove the pipeline correct while the gate stays closed (`CleanServiceTests` does the
         // same). Reachable here only because this file `@testable import SweepCore`.
-        let adapter = CleanAdapter(context: context, items: [item], executePipeline: SweepCore.CleanService.runPipeline)
+        let adapter = CleanAdapter(context: context, items: [item], executePipeline: { SweepCore.CleanService.runPipeline($0) })
 
         var finalReport: SweepUI.CleanReport?
         for try await event in adapter.execute(itemIDs: [item.id]) {
@@ -158,7 +158,7 @@ final class CleanAdapterPipelineTests: XCTestCase {
             reviewedIdentityByItemID: [nodeURL.path: reviewedIdentity]
         )
         let item = InventoryItem(id: nodeURL.path, title: nodeName, byteCount: 4, tier: .safe)
-        let adapter = CleanAdapter(context: context, items: [item], executePipeline: SweepCore.CleanService.runPipeline)
+        let adapter = CleanAdapter(context: context, items: [item], executePipeline: { SweepCore.CleanService.runPipeline($0) })
 
         var finalReport: SweepUI.CleanReport?
         for try await event in adapter.execute(itemIDs: [item.id]) {

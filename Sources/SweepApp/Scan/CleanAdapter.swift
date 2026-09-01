@@ -249,6 +249,7 @@ struct CleanAdapter: CleanBackend {
         case .notAuthorized: "Could not be authorized."
         case .rollbackFailed: "Moved to quarantine but could not be recovered."
         case .journalUnavailable: "Could not be safely logged; skipped for safety."
+        case .directDeleteRequirementNotMet: "Not proven regenerable; skipped for safety."
         }
     }
 }
