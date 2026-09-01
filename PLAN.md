@@ -91,6 +91,7 @@ Contract: primary modules may auto-select tier-`safe` items and feed Smart Scan.
 
 1. **Smart Scan.** One click: System Junk (safe tier) + safe maintenance. Hero moment of app. Empty Trash NEVER auto-selected: separate irreversible operation, second confirmation showing count/bytes/volumes, item identities snapshotted at review, anything added after review skipped.
 2. **System Junk.** User caches, logs, Xcode (DerivedData, DeviceSupport, old simulators), Homebrew cache, npm/pnpm/yarn/pip caches, browser caches, Trash on all volumes.
+   Plus **stale code-sign clones** (user-requested 2026-08-31, mechanics from disk-cleanup skill): macOS clones app bundle to `$DARWIN_USER_TEMP_DIR/../X/<bundle-id>.code_sign_clone` on every launch and leaks old ones on app self-update; Electron apps worst (Chrome, Codex; ~21 GB apparent seen on this machine). Not a catalog glob rule (needs per-item dynamic predicate): code-driven detector in SweepCore. Per clone: derive bundle id from dirname, skip if that app is running (NSRunningApplication) or clone <10 min old, size honestly (CoW: report apparent + note real reclaim is unique blocks only), tier safe, regenerates on next launch. Current user only in v1 (other accounts need the P4 helper). Implementation queued after the SweepCore fix batch merges.
 3. **Memory.** Honest RAM module: live pressure, compressor stats, top consumers, one-click quit of heavy apps. No placebo "boost" claims; show real numbers.
    Research confirmed: `purge` (root, `/usr/sbin/purge`) flushes disk buffer cache only, never anonymous/compressed app memory; MacPaw itself documents its "Free up RAM" task as Intel-only. On Apple Silicon ship no purge action at all; only legitimate "free memory" action = quit heavy apps. Honesty = differentiator.
    Metrics: `host_statistics64(HOST_VM_INFO64)` for breakdown, `DISPATCH_SOURCE_TYPE_MEMORYPRESSURE` for pressure level, `proc_listpids` + `proc_pid_rusage` (`ri_phys_footprint`) for per-process footprint.
@@ -210,6 +211,7 @@ Verification rules, every agent:
 | Mail attachments | `~/Library/Containers/com.apple.mail/Data/Library/Mail Downloads` (copies only, needs FDA; never touch `~/Library/Mail/V*`) | caution |
 | Crash reports | `~/Library/Logs/DiagnosticReports`, `/Library/Logs/DiagnosticReports` | safe |
 | APFS snapshots | `tmutil listlocalsnapshots` / `thinlocalsnapshots`; surface, never silent-delete | caution |
+| Code-sign clones | `$DARWIN_USER_TEMP_DIR/../X/*.code_sign_clone` (code-driven detector, not glob: per-item app-not-running + >10 min age checks; CoW-honest sizing) | safe |
 
 ## Appendix B: API reference (verified by research, exceptions marked)
 
