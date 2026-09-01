@@ -188,6 +188,11 @@ Verification rules, every agent:
 - First real-machine runs trash-only mode.
 - This machine's known hogs (Xcode junk, Claude vm_bundles, leaked code-sign clones per disk-cleanup skill) = acceptance fixtures for junk scanner.
 
+## 6b. Known issues (open, discovered in build)
+
+- **macOS 26 titlebar corruption past ~32,767pt scroll content** (2^15 CG limit; reproduced with LazyVStack AND native List; evidence screenshots in scratchpad/final/). Fix at Gate 1: never render unbounded content height — groups collapsed beyond N rows, "Show all" paginates within group. Also better UX at scale. Owner: Gate 1 wave.
+- **Smart Scan summary currently includes caution-tier groups** (cosmetic while read-only; contract says Smart Scan = safe tier only). Gate 1 wiring must filter selection to `safe` before any clean executes.
+
 ## 7. Risks
 
 - **Wrong deletion catastrophic.** Mitigated: deny-by-default policy, tiers, identity revalidation, WAL + quarantine, trash-first, two destructive-release gates, fault-injection suite, M5 audit. This risk owns architecture.
