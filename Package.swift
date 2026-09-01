@@ -35,5 +35,24 @@ let package = Package(
             ],
             path: "Tests/SweepAppTests"
         ),
+        // Privileged helper daemon (PLAN §2, §3 module 8, Appendix B). A separate executable
+        // target, not a library `SweepApp` links against — the two communicate only over XPC
+        // (`SweepPolicy`'s `SweepHelperXPCProtocol`), never by importing each other's code, which
+        // is exactly the process boundary a privileged helper is supposed to have.
+        .executableTarget(
+            name: "SweepHelper",
+            dependencies: [
+                .product(name: "SweepPolicy", package: "SweepPolicy"),
+            ],
+            path: "SweepHelper/Sources/SweepHelper"
+        ),
+        .testTarget(
+            name: "SweepHelperTests",
+            dependencies: [
+                "SweepHelper",
+                .product(name: "SweepPolicy", package: "SweepPolicy"),
+            ],
+            path: "SweepHelper/Tests/SweepHelperTests"
+        ),
     ]
 )
