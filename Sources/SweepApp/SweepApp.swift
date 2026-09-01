@@ -1,6 +1,9 @@
 import AppKit
+import OSLog
 import SwiftUI
 import SweepUI
+
+private let dockDropLog = Logger(subsystem: "com.aditya.sweep", category: "uninstall")
 
 @main
 struct SweepApp: App {
@@ -77,7 +80,22 @@ final class SweepAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
+        dockDropLog.notice("application(_:open:) received \(urls.count) URL(s): \(urls.map(\.path).joined(separator: ", "), privacy: .public)")
         for url in urls { route(url) }
+    }
+
+    /// Legacy fallback. Empirically (this build, this macOS version): a cold launch via
+    /// `open -a Sweep SomeApp.app` — an application bundle as the "document" — calls the modern
+    /// `application(_:open:)` above exactly once with an EMPTY array (apparently just the launch
+    /// bookkeeping call every cold launch gets) and instead delivers the real path through this
+    /// older, plural, `[String]`-based selector. Implementing both costs nothing — AppKit only
+    /// ever invokes whichever one the actual Apple Event maps to — and `NSApplication.reply
+    /// (toOpenOrPrint:)` is required here so LaunchServices does not treat the request as having
+    /// silently failed.
+    func application(_ sender: NSApplication, openFiles filenames: [String]) {
+        dockDropLog.notice("application(_:openFiles:) received \(filenames.count) path(s): \(filenames.joined(separator: ", "), privacy: .public)")
+        for path in filenames { route(URL(fileURLWithPath: path)) }
+        sender.reply(toOpenOrPrint: filenames.isEmpty ? .failure : .success)
     }
 
     private func route(_ url: URL) {

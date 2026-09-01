@@ -23,6 +23,31 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleShortVersionString</key><string>0.1.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>LSMinimumSystemVersion</key><string>15.0</string>
+  <!-- AppCleaner-parity drop targets (PLAN §3 module 5): a .app dragged onto Sweep's Dock icon
+       while it is closed launches the process, and Launch Services hands the dropped bundle to
+       SweepAppDelegate.application(_:open:) as a document-open event. LSHandlerRank "Alternate"
+       registers Sweep as *able* to open application bundles without claiming the double-click
+       default (that stays Finder/LaunchServices' own "open the app" behavior). -->
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key><string>Application</string>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+      <key>LSHandlerRank</key><string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array><string>com.apple.application-bundle</string></array>
+    </dict>
+  </array>
+  <!-- sweep://open-uninstall-orphan?bundleID=... — the SmartDelete watcher's own offer-accept
+       deep link (TrashOfferPanel), delivered back to the running process via .onOpenURL. -->
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key><string>com.aditya.sweep.deeplink</string>
+      <key>CFBundleURLSchemes</key>
+      <array><string>sweep</string></array>
+    </dict>
+  </array>
 </dict></plist>
 PLIST
 
