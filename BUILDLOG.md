@@ -47,3 +47,23 @@ rolls down) -> report.
 
 ## Model tiering (user mandate 2026-09-01)
 Haiku = mechanical (catalogs, fixtures, boilerplate, docs). Sonnet = implementation + research. Opus = security/architecture-critical only (currently spend-capped). Fable = orchestrate, review, glue. Terse status output.
+
+## RESUME STATE (2026-09-01 ~05:30, both model tiers spend-capped until 9:40am PT)
+
+Fable can run but cannot spawn Sonnet/Opus subagents (429 spend limit). Tree GREEN + committed
+(6e0e0fc), signed app built + launches (~/Applications/Sweep.app, 9.4 MB). Both destructive
+gates CLOSED (safe). ~470 tests across 6 packages, ci.sh PASS.
+
+DONE: P0-P5, M1/M2/M3. Gate 1 (trash junk cleaning) LIVE. Helper HELPER:OPEN (cleared; needs
+user System-Settings approval on first Maintenance use). Menubar split 45 MB. Onboarding,
+Uninstaller+AppCleaner parity (preview), SmartDelete watcher, Developer/Homebrew/Memory/
+Startup/Large-Old screens, code-sign-clone detector. Design recalibrated (palette v2, motion
+continuity, ring proportions) per user review.
+
+TODO when limits reset (spawn Sonnet agents):
+1. Gate U fix loop 2: fixes ON DISK (AppInventory completeness cap, identity-verified rollback)
+   but Finding-B regression tests INCOMPLETE. Finish tests -> Codex re-verdict -> flip gateUOpen.
+2. Gate 2: DirectDeleteExecutor built, gate2Open=false (action=delete falls back to trash).
+   Fault-injection suite NOT written. Write it -> Codex review -> flip gate2Open.
+3. M5: rule-by-rule safety audit, budget CI check, final signed build + notarization profile.
+Neither gate opens without its tests + a clean Codex verdict (the discipline that held all night).
