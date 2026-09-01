@@ -1,0 +1,125 @@
+import Foundation
+
+/// Per-item state vocabulary shared by the journal, the deletion report and the UI.
+/// `changed` and `skipped` are distinct on purpose: one means the disk moved under us, the
+/// other means we refused on policy.
+public enum ItemOutcome: String, Sendable, Codable, CaseIterable {
+    case planned
+    case succeeded
+    case failed
+    case skipped
+    case changed
+}
+
+/// Why an item did not succeed. Permission denial, policy refusal, disappearance and
+/// filesystem error must never collapse into one bucket (PLAN §2, result semantics).
+public enum ItemFailureReason: String, Sendable, Codable, CaseIterable {
+    case permissionDenied
+    case policyDenied
+    case outsideFixtureRoot
+    case identityChanged
+    case vanished
+    case tierViolation
+    case filesystemError
+    case notAttempted
+}
+
+/// One item as recorded in the log: the identity is the record, the path is a label.
+public struct JournalItem: Sendable, Equatable, Codable {
+    public let path: String
+    public let identity: FileIdentity
+    public let action: DeletionAction
+    public let tier: Tier
+    public let allocatedSize: Int64
+    public let ruleID: String?
+
+    public init(
+        path: String,
+        identity: FileIdentity,
+        action: DeletionAction,
+        tier: Tier,
+        allocatedSize: Int64,
+        ruleID: String? = nil
+    ) {
+        self.path = path
+        self.identity = identity
+        self.action = action
+        self.tier = tier
+        self.allocatedSize = allocatedSize
+        self.ruleID = ruleID
+    }
+}
+
+/// A write-ahead log line. One JSON object per line, versioned, append-only.
+public struct JournalRecord: Sendable, Equatable, Codable {
+    public static let currentVersion = 1
+
+    public enum Kind: String, Sendable, Codable, CaseIterable {
+        case planned
+        case started
+        case itemResult
+        case committed
+    }
+
+    public let version: Int
+    public let kind: Kind
+    public let operationID: UUID
+    public let recordedAt: Date
+    public let planVersion: Int?
+    public let items: [JournalItem]?
+    public let item: JournalItem?
+    public let outcome: ItemOutcome?
+    public let failureReason: ItemFailureReason?
+    /// Where `trashItem` actually put it, so restore is possible.
+    public let trashURL: URL?
+    public let detail: String?
+
+    init(
+        kind: Kind,
+        operationID: UUID,
+        recordedAt: Date = Date(),
+        planVersion: Int? = nil,
+        items: [JournalItem]? = nil,
+        item: JournalItem? = nil,
+        outcome: ItemOutcome? = nil,
+        failureReason: ItemFailureReason? = nil,
+        trashURL: URL? = nil,
+        detail: String? = nil
+    ) {
+        self.version = Self.currentVersion
+        self.kind = kind
+        self.operationID = operationID
+        self.recordedAt = recordedAt
+        self.planVersion = planVersion
+        self.items = items
+        self.item = item
+        self.outcome = outcome
+        self.failureReason = failureReason
+        self.trashURL = trashURL
+        self.detail = detail
+    }
+}
+
+/// State of an operation as reconstructed from the log.
+public enum OperationState: String, Sendable, Codable {
+    case planned
+    case started
+    case committed
+}
+
+/// An operation the log says was never committed: the process died between `planned` and
+/// `committed`. Recovery surfaces these; it never replays them automatically.
+public struct InterruptedOperation: Sendable, Equatable {
+    public let operationID: UUID
+    public let planVersion: Int
+    public let state: OperationState
+    public let plannedAt: Date
+    public let items: [JournalItem]
+    public let recordedOutcomes: [String: ItemOutcome]
+
+    /// Items with no result line at all: their real on-disk state is unknown and must be
+    /// re-stat'd before anything else happens to them.
+    public var unresolvedItems: [JournalItem] {
+        items.filter { recordedOutcomes[$0.path] == nil }
+    }
+}
