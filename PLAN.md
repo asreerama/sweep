@@ -98,6 +98,12 @@ Contract: primary modules may auto-select tier-`safe` items and feed Smart Scan.
 4. **Large & Old Files.** Volume scan, size/age filters + sort, reveal + trash actions.
 5. **Uninstaller.** Full removal: bundle + leftovers matched by bundle id across `~/Library/{Application Support, Caches, Preferences, Containers, Group Containers,
    Saved Application State, LaunchAgents, WebKit, HTTPStorages}`, plus `/Library/LaunchDaemons` and `pkgutil` receipts. Every candidate carries auditable ownership evidence: signed bundle ID, receipt relationship, declared app-group entitlement, other installed consumers. Never auto-select name-only matches, shared Group Containers, LaunchDaemons, or orphans. Never uninstall Sweep itself or Apple/system apps; never `pkgutil --forget` as implicit cleanup. Process preflight: quit app + bootout its agents before bundle removal. Orphan detection tier `caution`, never `safe` (helper tools, licensed-but-uninstalled apps = false positives). No macOS API lists an app's files; glob-over-known-locations = what every uninstaller uses. `~/Library/Group Containers` gained SIP protection on macOS 15, deletions there can fail; handle gracefully, report, never silently skip.
+   **AppCleaner parity (user goal 2026-09-01: retire AppCleaner entirely).** Required:
+   - Full app list: icons, sizes, last-used, search + sort; widgets/plugins/extensions listed as removable categories too.
+   - Select app => bundle + every leftover preselected by evidence tier => everything to Trash (recoverable), never direct delete.
+   - **Drop targets:** drag .app onto window OR Dock icon; Dock drop works with Sweep closed, launches straight into removal-confirm view. Mechanics: `CFBundleDocumentTypes` accepting `com.apple.application-bundle` in Info.plist (build-app.sh), `onOpenURL`/`application(_:open:)` deep-link to Uninstaller.
+   - **SmartDelete watcher (PROMOTED backlog -> v1.0):** Sentinel-pattern FSEvents watch on ~/.Trash; app bundle trashed => quiet panel offers leftover cleanup. Togglable, near-zero cost (Pearcleaner's ~2 MB).
+   - Protection: system/default apps + running apps refuse removal (quit-first flow), atop denylist.
 6. **Startup Items.** Inventory + reveal + deep-link to System Settings for modern background items. Enable/disable ONLY where documented public API exists (own `SMAppService` items; legacy `LSSharedFileList` login-item APIs deprecated, do not use). Public-API boundary prototyped before committing toggle UI.
 7. **Menubar monitor.** Live RAM/CPU/disk/network, memory-pressure gauge, quick actions (free memory, open main app; Empty Trash opens confirmation, never immediate). Measure post-scan retained memory + steady-state CPU at M1; if 50 MB idle budget missed, split minimal unprivileged menubar login item from main UI (decision gate, not afterthought).
 8. **Maintenance.** Flush DNS, rebuild Spotlight (mdutil), thin APFS snapshots. Purgeable space shown as estimate only; reclaim is OS's job, no fake "free purgeable" action. `lsregister -kill -r` dropped (undocumented internal tool, violates documented-APIs-only rule).
@@ -108,7 +114,7 @@ Contract: primary modules may auto-select tier-`safe` items and feed Smart Scan.
 
 ### v1.1+ backlog
 
-Duplicates finder, space lens (treemap), mail attachments, privacy cleaner (browser data), app updater, shredder, auto-cleanup on app trash (Sentinel pattern). Pearcleaner-inspired hub views (same inventory template): **Packages** (`pkgutil` receipts browser: list, files, uninstall-by-receipt; destructive so gated), **Plugins** (Internet Plug-Ins, PreferencePanes, app extensions inventory), **Lipo** (strip unused architecture slices; must ad-hoc re-sign after strip, careful with notarized apps), **File Search** (name search across system with size sort). Out of scope forever: malware scanning (liability, needs signature infrastructure we cannot maintain).
+Duplicates finder, space lens (treemap), mail attachments, privacy cleaner (browser data), app updater, shredder. Pearcleaner-inspired hub views (same inventory template): **Packages** (`pkgutil` receipts browser: list, files, uninstall-by-receipt; destructive so gated), **Plugins** (Internet Plug-Ins, PreferencePanes, app extensions inventory), **Lipo** (strip unused architecture slices; must ad-hoc re-sign after strip, careful with notarized apps), **File Search** (name search across system with size sort). Out of scope forever: malware scanning (liability, needs signature infrastructure we cannot maintain).
 
 ## 4. Permissions and onboarding
 
@@ -137,6 +143,7 @@ Identity: **instrument, not toy**. Utility first, motion signals speed.
   2. Clean: byte counter rolls down to zero, ring collapses inward.
   3. Menubar gauge breathes under memory pressure.
   120 Hz aware, `Reduce Motion` respected, no particles, no confetti.
+- Press feedback instant (respond on press, not release); every kinetic animation state-driven + spring-retargetable so it can be grabbed/redirected mid-flight, never chained (emil/Apple fluid-interface check, 2026-09-01).
 - Every screen designed against real data volumes (10k-row file lists), not toy fixtures. Large lists virtualized (NSTableView-backed representable if SwiftUI lists stutter).
 
 ## 6. Execution: phases, workstreams, agent assignment
