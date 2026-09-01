@@ -122,6 +122,34 @@ public struct HelperHandshake: Sendable, Equatable, Codable {
     }
 }
 
+/// The wire envelope `perform(_:reply:)`'s `requestData` actually decodes as — the one
+/// ``MaintenanceOperation`` a caller wants run, plus the protocol/policy versions the caller
+/// believes are in effect.
+///
+/// Codex finding #2 ("handshake and policy compatibility are not helper-enforced"): before this
+/// type existed, `perform`'s `requestData` decoded as a bare `MaintenanceOperation`, so nothing
+/// about a caller's declared versions ever reached the helper — only `HelperClient` compared
+/// `HelperHandshake.protocolVersion` after `handshake()`, and a caller could skip the handshake
+/// entirely and call `perform` directly. Carrying the versions on *every* `perform` call (not just
+/// once at handshake time) lets `HelperService` independently refuse an incompatible or
+/// handshake-skipping caller at the one place that actually executes something, closed by
+/// construction rather than by the client's own good behavior.
+public struct MaintenanceRequest: Sendable, Equatable, Codable {
+    public let operation: MaintenanceOperation
+    public let protocolVersion: Int
+    public let policyVersion: Int
+
+    public init(
+        operation: MaintenanceOperation,
+        protocolVersion: Int = HelperProtocolVersion.current,
+        policyVersion: Int = MaintenancePolicyVersion.current
+    ) {
+        self.operation = operation
+        self.protocolVersion = protocolVersion
+        self.policyVersion = policyVersion
+    }
+}
+
 /// Fixed identifiers shared by the LaunchDaemon plist (`scripts/build-app.sh`), the app's
 /// `SMAppService.daemon(plistName:)` registration, and `NSXPCConnection`'s mach service lookup —
 /// one spelling, three consumers, so they can never drift apart.
@@ -129,6 +157,13 @@ public enum HelperIdentity {
     public static let machServiceName = "com.aditya.sweep.helper"
     public static let launchDaemonPlistName = "com.aditya.sweep.helper.plist"
     public static let launchDaemonLabel = "com.aditya.sweep.helper"
+
+    /// Sweep.app's own `CFBundleIdentifier` (`scripts/build-app.sh`'s `Info.plist`) — the identity
+    /// `HelperTrust.designatedRequirement`'s `identifier` clause binds to. Named here, not just
+    /// inlined at each call site, so the one property the helper's designated requirement must
+    /// check ("is the caller Sweep.app itself", Codex finding #1) has exactly one spelling shared
+    /// by the requirement-builder and anything that verifies it.
+    public static let appBundleIdentifier = "com.aditya.sweep"
 }
 
 /// The one absolute-path, argv-array command (or short fixed sequence of them) each

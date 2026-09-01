@@ -6,8 +6,10 @@ import SweepPolicy
 // that ever creates an `NSXPCListener` before every one of them has passed:
 //
 //   1. Real root (PLAN §2: "Helper refuses if effective uid != 0 at runtime").
-//   2. A build-time-injected, correctly-shaped signing-cert hash (never the checked-in placeholder
-//      — see `GeneratedHelperTrust`).
+//   2. A build-time-injected, correctly-shaped signing-cert hash AND app bundle identifier (never
+//      the checked-in placeholders — see `GeneratedHelperTrust`). Both are required in the
+//      designated requirement (Codex finding #1: a certificate-only requirement is satisfied by
+//      any binary this machine's signing cert has signed, not just Sweep.app).
 //   3. A requirement string `SecRequirementCreateWithString` actually accepts. Apple's own doc
 //      comment on `setConnectionCodeSigningRequirement` says a malformed requirement throws an
 //      Objective-C exception — uncatchable from Swift — so this is validated proactively with a
@@ -29,9 +31,16 @@ guard HelperTrust.isValidLeafHash(GeneratedHelperTrust.designatedRequirementLeaf
     fail("no valid signing-cert hash was injected at build time (see scripts/build-app.sh)", code: EX_CONFIG)
 }
 
+guard HelperTrust.isValidAppIdentifier(GeneratedHelperTrust.designatedRequirementAppIdentifier) else {
+    fail("no valid app bundle identifier was injected at build time (see scripts/build-app.sh)", code: EX_CONFIG)
+}
+
 let requirementString: String
 do {
-    requirementString = try HelperTrust.designatedRequirement(leafHash: GeneratedHelperTrust.designatedRequirementLeafHash)
+    requirementString = try HelperTrust.designatedRequirement(
+        appIdentifier: GeneratedHelperTrust.designatedRequirementAppIdentifier,
+        leafHash: GeneratedHelperTrust.designatedRequirementLeafHash
+    )
 } catch {
     fail("\(error)", code: EX_CONFIG)
 }

@@ -36,22 +36,88 @@ final class HelperTrustTests: XCTestCase {
         XCTAssertFalse(HelperTrust.isValidLeafHash("UNSET-PLACEHOLDER-REPLACED-BY-scripts-build-app-sh"))
     }
 
-    // MARK: - Designated requirement string
+    // MARK: - App identifier format validation
 
-    func testDesignatedRequirementIsExactlyTheCertificateLeafClause() throws {
-        let requirement = try HelperTrust.designatedRequirement(leafHash: validHash)
-        XCTAssertEqual(requirement, "certificate leaf = H\"\(validHash)\"")
+    func testAppBundleIdentifierIsAccepted() {
+        XCTAssertTrue(HelperTrust.isValidAppIdentifier(HelperIdentity.appBundleIdentifier))
     }
 
-    func testDesignatedRequirementCarriesNoAnchorOrIdentifierClause() throws {
-        let requirement = try HelperTrust.designatedRequirement(leafHash: validHash)
+    func testEmptyAppIdentifierIsRejected() {
+        XCTAssertFalse(HelperTrust.isValidAppIdentifier(""))
+    }
+
+    func testAppIdentifierContainingAQuoteIsRejected() {
+        // Would otherwise let a malformed value escape the requirement language's double-quoted
+        // `identifier "..."` literal.
+        XCTAssertFalse(HelperTrust.isValidAppIdentifier("com.aditya.sweep\" or certificate leaf = H\"anything"))
+    }
+
+    func testAppIdentifierContainingWhitespaceIsRejected() {
+        XCTAssertFalse(HelperTrust.isValidAppIdentifier("com.aditya sweep"))
+    }
+
+    func testCheckedInDevIdentifierPlaceholderIsRejected() {
+        // The exact value `GeneratedHelperTrust` ships with before `scripts/build-app.sh` ever
+        // runs — this must fail closed exactly like the leaf-hash placeholder does.
+        XCTAssertFalse(HelperTrust.isValidAppIdentifier("UNSET PLACEHOLDER - REPLACED BY scripts/build-app.sh"))
+    }
+
+    // MARK: - Designated requirement string
+
+    /// Codex finding #1 ("caller identity is certificate-wide"): a `certificate leaf`-only
+    /// requirement is satisfied by *any* binary this machine's signing cert has signed, since the
+    /// same local cert signs more than one tool. This is the regression test — it fails against
+    /// the pre-fix implementation, which produced only `certificate leaf = H"…"` with no
+    /// identifier clause at all.
+    func testDesignatedRequirementContainsTheAppIdentifierClause() throws {
+        let requirement = try HelperTrust.designatedRequirement(
+            appIdentifier: HelperIdentity.appBundleIdentifier,
+            leafHash: validHash
+        )
+        XCTAssertTrue(requirement.contains("identifier \"\(HelperIdentity.appBundleIdentifier)\""))
+    }
+
+    func testDesignatedRequirementIsExactlyTheIdentifierAndCertificateLeafClause() throws {
+        let requirement = try HelperTrust.designatedRequirement(
+            appIdentifier: HelperIdentity.appBundleIdentifier,
+            leafHash: validHash
+        )
+        XCTAssertEqual(
+            requirement,
+            "identifier \"\(HelperIdentity.appBundleIdentifier)\" and certificate leaf = H\"\(validHash)\""
+        )
+    }
+
+    func testDesignatedRequirementCarriesNoAnchorClause() throws {
+        let requirement = try HelperTrust.designatedRequirement(appIdentifier: HelperIdentity.appBundleIdentifier, leafHash: validHash)
         XCTAssertFalse(requirement.contains("anchor"))
-        XCTAssertFalse(requirement.contains("identifier"))
+    }
+
+    /// The exact "certificate-wide" hole the fix closes: two callers signed by the *same*
+    /// certificate but with different app identifiers must produce two different, mutually
+    /// exclusive requirement strings — proving the identifier is actually load-bearing in the
+    /// generated requirement, not merely appended and ignored.
+    func testDifferentAppIdentifiersWithTheSameCertificateProduceDifferentRequirements() throws {
+        let sweepRequirement = try HelperTrust.designatedRequirement(appIdentifier: "com.aditya.sweep", leafHash: validHash)
+        let otherToolRequirement = try HelperTrust.designatedRequirement(appIdentifier: "com.aditya.othertool", leafHash: validHash)
+
+        XCTAssertNotEqual(sweepRequirement, otherToolRequirement)
+        XCTAssertFalse(otherToolRequirement.contains("\"com.aditya.sweep\""))
     }
 
     func testDesignatedRequirementThrowsOnMalformedHash() {
-        XCTAssertThrowsError(try HelperTrust.designatedRequirement(leafHash: "not-a-hash")) { error in
+        XCTAssertThrowsError(
+            try HelperTrust.designatedRequirement(appIdentifier: HelperIdentity.appBundleIdentifier, leafHash: "not-a-hash")
+        ) { error in
             XCTAssertEqual(error as? HelperTrust.TrustError, .malformedLeafHash("not-a-hash"))
+        }
+    }
+
+    func testDesignatedRequirementThrowsOnMalformedAppIdentifier() {
+        XCTAssertThrowsError(
+            try HelperTrust.designatedRequirement(appIdentifier: "", leafHash: validHash)
+        ) { error in
+            XCTAssertEqual(error as? HelperTrust.TrustError, .malformedAppIdentifier(""))
         }
     }
 

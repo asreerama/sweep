@@ -29,7 +29,11 @@ final class XPCHelperConnection: HelperConnecting, @unchecked Sendable {
     }
 
     func perform(_ operation: MaintenanceOperation) async throws -> MaintenanceOutcome {
-        let requestData = try JSONEncoder().encode(operation)
+        // Wrapped in a `MaintenanceRequest` (not sent as a bare `MaintenanceOperation`) so the
+        // helper can independently verify this app's declared protocol/policy versions on *this*
+        // call, not only trust that a prior `handshake()` happened (Codex finding #2: "handshake
+        // and policy compatibility are not helper-enforced").
+        let requestData = try JSONEncoder().encode(MaintenanceRequest(operation: operation))
         let data = try await callProxy { proxy, reply in proxy.perform(requestData, reply: reply) }
         return try JSONDecoder().decode(MaintenanceOutcome.self, from: data)
     }
