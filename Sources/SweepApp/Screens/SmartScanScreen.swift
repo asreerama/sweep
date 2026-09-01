@@ -7,10 +7,21 @@ import SweepUI
 /// screen renders) are deliberately different values. Collapsing them back into one would mean
 /// the ring's slot swaps the instant the model says "results" — the "hard cut" this section
 /// exists to remove. `displayPhase` lags one beat behind on the scanning→results edge specifically,
-/// long enough for `ScanRing` to decelerate and close on its own (`SweepMotion.resultsMorphDelay`),
-/// so the ring and hero counter are still the *same* `ScanRing`/`HeroByteCounter` instances
-/// (tagged into `heroNamespace`) when the layout morphs them into the results slot, rather than
-/// one pair of views disappearing and a different pair fading in.
+/// long enough for `ScanRing` to decelerate and close on its own (`SweepMotion.resultsMorphDelay`).
+///
+/// There is exactly one `ScanRing`/`HeroByteCounter` call site for the whole screen (`heroRing`,
+/// built inside `heroScreen`), and it sits unconditionally above every `displayPhase` branch —
+/// never inside an `if`/`switch` that could tear it down and remount it. That used to be the bug:
+/// an earlier build instantiated a second, differently-sized `ScanRing` in the `results` branch
+/// and bridged the two with `matchedGeometryEffect`. `matchedGeometryEffect` interpolates the
+/// *frame* across that swap, but it cannot carry over `ScanRing`'s internal `@State`
+/// (`rotationAngle`, `spinTask`, `pulseScale`) — those reset the instant the new instance mounts,
+/// which is exactly the moment the scan lands and the ring is mid-deceleration. The reset showed
+/// up as a one-frame glitch, plus the hero number's font size (52.6pt scanning → 28.2pt results)
+/// jumping instantly because `Text` font size isn't itself animatable. Now the ring only ever
+/// changes *parameters* (`diameter`, `state`) on the one instance, and the counter's shrink is a
+/// `scaleEffect` on a fixed-size `HeroByteCounter` rather than a re-sized one, so it interpolates
+/// on the same curve as the ring instead of popping.
 struct SmartScanScreen: View {
     @Environment(ScanModel.self) private var scan
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -25,9 +36,10 @@ struct SmartScanScreen: View {
     /// What this screen is actually showing — see the type doc for why this is not just
     /// `scan.phase` re-read.
     @State private var displayPhase: ScanDisplayPhase = .idle
-    @Namespace private var heroNamespace
 
-    private let ringDiameter: CGFloat = 224
+    /// The ring's diameter while idle/scanning/settling. `HeroByteCounter`'s `size` is always
+    /// computed from this constant, never from `resultsRingDiameter` — see `heroRing`.
+    private let scanRingDiameter: CGFloat = 224
     private let resultsRingDiameter: CGFloat = 120
 
     private enum ScanDisplayPhase: Equatable {
@@ -72,9 +84,9 @@ struct SmartScanScreen: View {
     /// Mirrors `scan.phase` into `displayPhase` — immediately on every edge except
     /// scanning→results, which routes through `.settling` first. Re-entrant: a rescan that lands
     /// mid-settle calls this again with `scan.phase == .scanning`, which reverts `displayPhase`
-    /// to `.scanning` right away (same branch as `.settling`, so nothing unmounts) and the
-    /// pending delayed flip below no-ops itself via the phase check when it wakes up — the
-    /// "everything interruptible" half of PLAN §5's continuity requirement.
+    /// to `.scanning` right away (still resolved by the same unconditional `heroScreen`, so
+    /// nothing unmounts) and the pending delayed flip below no-ops itself via the phase check
+    /// when it wakes up — the "everything interruptible" half of PLAN §5's continuity requirement.
     private func syncDisplayPhase(immediate: Bool) {
         switch scan.phase {
         case .idle: displayPhase = .idle
@@ -95,31 +107,103 @@ struct SmartScanScreen: View {
         }
     }
 
+    /// Only the failure screen is a genuine branch swap — it has no ring at all, and a scan
+    /// that fails never had one turning yet, so there is no in-flight motion to destroy. Every
+    /// other phase resolves to the same `heroScreen` call site.
     @ViewBuilder
     private var content: some View {
-        switch displayPhase {
-        case .idle:
-            idle
-        case .scanning, .settling:
-            scanning(ringComplete: displayPhase == .settling)
-        case .results:
-            results
-        case .failed(let message):
+        if case .failed(let message) = displayPhase {
             failure(message)
+        } else {
+            heroScreen
         }
     }
 
-    // MARK: - Idle
+    // MARK: - Hero (ring + counter + phase chrome)
+    //
+    // One shell for idle/scanning/settling/results: a `ScrollView` so results can grow past the
+    // pane without a container swap, holding exactly one `heroRing` and one phase-driven
+    // `heroBelow`. Short content (idle, scanning, a small result set) just centers inside it,
+    // identically to a fixed VStack.
 
-    private var idle: some View {
-        VStack(spacing: 0) {
-            Spacer(minLength: SweepTokens.s5)
-            ScanRing(state: .idle, diameter: ringDiameter) {
+    private var isSettled: Bool { displayPhase == .settling || displayPhase == .results }
+    private var isResults: Bool { displayPhase == .results }
+
+    private var heroDiameter: CGFloat { isResults ? resultsRingDiameter : scanRingDiameter }
+    /// The hero counter never changes its own `size`; it shrinks by exactly this factor via
+    /// `scaleEffect`, animating on the same curve/timeline as `heroDiameter` instead of jumping
+    /// between two discrete font sizes.
+    private var heroCounterScale: CGFloat { isResults ? resultsRingDiameter / scanRingDiameter : 1 }
+
+    private var heroRingState: ScanRingState {
+        switch displayPhase {
+        case .idle, .failed: .idle
+        case .scanning: .scanning
+        case .settling, .results: .complete
+        }
+    }
+
+    private var heroScreen: some View {
+        GeometryReader { proxy in
+            ScrollView(.vertical) {
+                VStack(spacing: 0) {
+                    heroRing
+                        .padding(.horizontal, SweepTokens.s5)
+                        .padding(.top, SweepTokens.s5)
+                    heroBelow
+                    Color.clear.frame(height: isResults ? SweepTokens.s2 : SweepTokens.s5)
+                }
+                // Short results sit centred in the pane; long ones scroll from the top. Idle and
+                // scanning are always short, so this centers them exactly as a fixed VStack would.
+                .frame(maxWidth: .infinity, minHeight: proxy.size.height, alignment: .center)
+            }
+            .scrollDisabled(!isResults)
+        }
+    }
+
+    /// The one `ScanRing`/`HeroByteCounter` pair for the entire screen's lifetime. See the type
+    /// doc: this call site never sits inside an `if`/`switch` keyed on `displayPhase`, so it is
+    /// never torn down and remounted by a phase change — only `heroDiameter`/`heroRingState`/the
+    /// counter's own inputs move, and they move on ordinary animatable state.
+    private var heroRing: some View {
+        ScanRing(state: heroRingState, diameter: heroDiameter) {
+            if displayPhase == .idle {
                 Image(systemName: "sparkles")
                     .font(.system(size: 30, weight: .light))
                     .foregroundStyle(.quaternary)
+            } else {
+                HeroByteCounter(
+                    // Safe-tier bytes only once the ring lands (PLAN §6b): the counter settles
+                    // to the number that is both the hero total and the clean scope, not the raw
+                    // scan total scanning was showing a moment before.
+                    byteCount: isSettled ? scan.safeBytes : scan.claimedBytes,
+                    size: scanRingDiameter * 0.235,
+                    label: isSettled ? (scan.wasCancelled ? "Found so far" : "Ready to clean") : nil,
+                    caption: isSettled ? scan.safeResultsCaption : scan.scanningCaption
+                )
+                .scaleEffect(heroCounterScale)
             }
-            .matchedGeometryEffect(id: "hero-ring", in: heroNamespace)
+        }
+    }
+
+    /// Phase-specific chrome below the ring. Safe to branch on `displayPhase` here — none of
+    /// this holds animation state that motion continuity depends on; only `heroRing` does.
+    @ViewBuilder
+    private var heroBelow: some View {
+        switch displayPhase {
+        case .idle:
+            idleBelow
+        case .scanning, .settling:
+            scanningBelow
+        case .results:
+            resultsBelow
+        case .failed:
+            EmptyView()
+        }
+    }
+
+    private var idleBelow: some View {
+        VStack(spacing: 0) {
             Spacer().frame(height: SweepTokens.s6)
             Button("Scan") { scan.start() }
                 .buttonStyle(.sweepPrimary)
@@ -128,100 +212,65 @@ struct SmartScanScreen: View {
             Text("Reads your caches, logs and developer junk. Nothing is deleted.")
                 .font(SweepFont.screenSubtitle)
                 .foregroundStyle(.secondary)
-            Spacer(minLength: SweepTokens.s5)
         }
         .padding(.horizontal, SweepTokens.s5)
     }
 
-    // MARK: - Scanning / settling
-    //
-    // One layout for both: `ringComplete` only changes what `ScanRing` and `HeroByteCounter` are
-    // showing, never which branch of `content` is active, so the transition between them is
-    // whatever `ScanRing`'s own decelerate-and-close choreography does — no outer content swap
-    // to interrupt it.
-
-    private func scanning(ringComplete: Bool) -> some View {
+    private var scanningBelow: some View {
         VStack(spacing: 0) {
-            Spacer(minLength: SweepTokens.s5)
-            ScanRing(state: ringComplete ? .complete : .scanning, diameter: ringDiameter) {
-                HeroByteCounter(
-                    // Safe-tier bytes only once the ring lands (PLAN §6b): the counter settles
-                    // to the number that is both the hero total and the clean scope, not the raw
-                    // scan total scanning was showing a moment before.
-                    byteCount: ringComplete ? scan.safeBytes : scan.claimedBytes,
-                    size: ringDiameter * 0.235,
-                    label: ringComplete ? (scan.wasCancelled ? "Found so far" : "Ready to clean") : nil,
-                    caption: ringComplete ? scan.safeResultsCaption : scan.scanningCaption
-                )
-            }
-            .matchedGeometryEffect(id: "hero-ring", in: heroNamespace)
             Spacer().frame(height: SweepTokens.s5)
-            PathTicker(path: ringComplete ? nil : scan.currentPath)
+            PathTicker(path: isSettled ? nil : scan.currentPath)
             Spacer().frame(height: SweepTokens.s5)
             Button("Stop") { scan.cancel() }
                 .buttonStyle(.sweepQuiet)
                 .keyboardShortcut(.cancelAction)
-                .disabled(ringComplete)
-                .opacity(ringComplete ? 0 : 1)
-            Spacer(minLength: SweepTokens.s5)
+                .disabled(isSettled)
+                .opacity(isSettled ? 0 : 1)
         }
         .padding(.horizontal, SweepTokens.s5)
     }
 
     // MARK: - Results
 
-    private var results: some View {
-        GeometryReader { proxy in
-            ScrollView(.vertical) {
-                VStack(spacing: SweepTokens.s5) {
-                    ScanRing(state: .complete, diameter: resultsRingDiameter) {
-                        HeroByteCounter(
-                            byteCount: scan.safeBytes,
-                            size: resultsRingDiameter * 0.235,
-                            label: scan.wasCancelled ? "Found so far" : "Ready to clean",
-                            caption: scan.safeResultsCaption
-                        )
-                    }
-                    .matchedGeometryEffect(id: "hero-ring", in: heroNamespace)
-                    .padding(.top, SweepTokens.s5)
-
-                    if scan.summaryGroups.isEmpty {
-                        InventoryEmptyState(
-                            symbol: "checkmark.circle",
-                            title: "You're all clear",
-                            message: "Nothing under the roots this build can read needs attention right now."
-                        )
-                        .frame(height: 160)
-                    } else {
-                        if scan.safeSummaryGroups.isEmpty {
-                            InventoryEmptyState(
-                                symbol: "checkmark.circle",
-                                title: "Nothing safe to clean automatically",
-                                message: "Everything found is worth a second look first — see Needs review below."
-                            )
-                            .frame(height: 120)
-                        } else {
-                            summaryCard(scan.safeSummaryGroups)
-                                .padding(.horizontal, SweepTokens.s5)
-                        }
-
-                        if !scan.needsReviewGroups.isEmpty {
-                            needsReview
-                        }
-                    }
-
-                    if let note = scan.skippedSummary {
-                        Footnote(note, symbol: "info.circle")
-                            .padding(.horizontal, SweepTokens.s5)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-
-                    Color.clear.frame(height: SweepTokens.s2)
+    /// Everything results shows beneath the (already on-screen, already-shrinking) ring: it
+    /// mounts fresh at `.results` and slides/fades in under the live ring rather than the ring
+    /// itself ever remounting.
+    @ViewBuilder
+    private var resultsBelow: some View {
+        VStack(spacing: SweepTokens.s5) {
+            if scan.summaryGroups.isEmpty {
+                InventoryEmptyState(
+                    symbol: "checkmark.circle",
+                    title: "You're all clear",
+                    message: "Nothing under the roots this build can read needs attention right now."
+                )
+                .frame(height: 160)
+            } else {
+                if scan.safeSummaryGroups.isEmpty {
+                    InventoryEmptyState(
+                        symbol: "checkmark.circle",
+                        title: "Nothing safe to clean automatically",
+                        message: "Everything found is worth a second look first — see Needs review below."
+                    )
+                    .frame(height: 120)
+                } else {
+                    summaryCard(scan.safeSummaryGroups)
+                        .padding(.horizontal, SweepTokens.s5)
                 }
-                // Short results sit centred in the pane; long ones scroll from the top.
-                .frame(maxWidth: .infinity, minHeight: proxy.size.height, alignment: .center)
+
+                if !scan.needsReviewGroups.isEmpty {
+                    needsReview
+                }
+            }
+
+            if let note = scan.skippedSummary {
+                Footnote(note, symbol: "info.circle")
+                    .padding(.horizontal, SweepTokens.s5)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
+        .padding(.top, SweepTokens.s5)
+        .transition(.opacity.combined(with: .move(edge: .top)))
     }
 
     private func summaryCard(_ groups: [InventoryGroup]) -> some View {
