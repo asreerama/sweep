@@ -17,15 +17,18 @@ enum LeftoverFixture {
 
         func candidates(
             for app: InstalledApp,
-            roots: [SearchRoot] = SearchRoot.filesystemRoots
+            roots: [SearchRoot] = SearchRoot.filesystemRoots,
+            receipts: PkgutilReceiptsProviding = EmptyPkgutilReceiptsProvider(),
+            installedApps: [InstalledApp] = []
         ) -> [LeftoverCandidate] {
             LeftoverMatcher.candidates(
                 for: app,
                 roots: roots,
                 homeDirectory: home,
                 systemLaunchDaemonsDirectory: systemLaunchDaemonsDirectory,
-                receipts: EmptyPkgutilReceiptsProvider(),
-                fileManager: fileManager
+                receipts: receipts,
+                fileManager: fileManager,
+                installedApps: installedApps
             )
         }
 
@@ -149,5 +152,60 @@ enum LeftoverFixture {
 
     static func tearDown(_ tree: Tree) {
         try? tree.fileManager.removeItem(at: tree.root)
+    }
+
+    // MARK: - Ambiguous-ownership fixtures (finding #11)
+
+    static let adobePhotoshopApp = InstalledApp(
+        bundleIdentifier: "com.adobe.photoshop",
+        name: "Photoshop",
+        shortVersion: "1.0",
+        buildVersion: "1",
+        bundlePath: URL(fileURLWithPath: "/Applications/Adobe Photoshop.app"),
+        teamIdentifier: "ADOBETEAMID",
+        signingIdentifier: nil,
+        isAppleSigned: false,
+        isSystemLocation: false
+    )
+
+    static let adobeBridgeApp = InstalledApp(
+        bundleIdentifier: "com.adobe.bridge",
+        name: "Bridge",
+        shortVersion: "1.0",
+        buildVersion: "1",
+        bundlePath: URL(fileURLWithPath: "/Applications/Adobe Bridge.app"),
+        teamIdentifier: "ADOBETEAMID",
+        signingIdentifier: nil,
+        isAppleSigned: false,
+        isSystemLocation: false
+    )
+
+    static let adobeCommonFilesApp = InstalledApp(
+        bundleIdentifier: "com.adobe.CommonFiles",
+        name: "Adobe Common Files",
+        shortVersion: "1.0",
+        buildVersion: "1",
+        bundlePath: URL(fileURLWithPath: "/Applications/Utilities/Adobe Common Files.app"),
+        teamIdentifier: "ADOBETEAMID",
+        signingIdentifier: nil,
+        isAppleSigned: false,
+        isSystemLocation: false
+    )
+
+    /// Minimal fixture for ambiguous-ownership tests: a single Application Support folder whose
+    /// name exactly equals `name`, with no other planted entries — kept separate from `build()`'s
+    /// large fixture so these narrow assertions aren't coupled to the unrelated Xcode/VS
+    /// Code/browser fixtures already living there.
+    static func buildSingleApplicationSupportFolder(named name: String, fileManager: FileManager = .default) throws -> Tree {
+        let root = fileManager.temporaryDirectory.appendingPathComponent("SweepUninstallAmbiguityFixture-\(UUID().uuidString)")
+        let home = root.appendingPathComponent("home")
+        let library = home.appendingPathComponent("Library")
+        let systemLaunchDaemons = root.appendingPathComponent("LaunchDaemons")
+
+        try fileManager.createDirectory(at: systemLaunchDaemons, withIntermediateDirectories: true)
+        let appSupport = library.appendingPathComponent("Application Support")
+        try fileManager.createDirectory(at: appSupport.appendingPathComponent(name), withIntermediateDirectories: true)
+
+        return Tree(root: root, home: home, systemLaunchDaemonsDirectory: systemLaunchDaemons, fileManager: fileManager)
     }
 }

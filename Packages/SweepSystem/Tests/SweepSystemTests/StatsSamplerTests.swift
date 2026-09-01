@@ -116,4 +116,39 @@ final class StatsSamplerTests: XCTestCase {
     private static func seconds(_ tv: timeval) -> Double {
         Double(tv.tv_sec) + Double(tv.tv_usec) / 1_000_000
     }
+
+    /// Regression for finding #16 in the adversarial review: `sampleOnce()` previously ran every
+    /// blocking Darwin/IOKit/FileManager read synchronously inline on the actor. This models the
+    /// concrete failure mode that would cause — a fast, frequently-ticking concurrent task
+    /// starving for the whole duration of a batch of samples — by running a ticker task
+    /// alongside a batch of `sampleOnce()` calls and asserting the ticker kept making progress
+    /// throughout rather than stalling.
+    func testSampleOnceDoesNotStarveConcurrentTasks() async {
+        let sampler = StatsSampler()
+        _ = await sampler.sampleOnce() // warm up CPU/network baselines
+
+        let counter = TickCounter()
+        let tickerTask = Task {
+            while !Task.isCancelled {
+                await counter.increment()
+                try? await Task.sleep(for: .milliseconds(2))
+            }
+        }
+
+        for _ in 0..<20 {
+            _ = await sampler.sampleOnce()
+        }
+
+        tickerTask.cancel()
+        let finalCount = await counter.value
+        XCTAssertGreaterThan(
+            finalCount, 5,
+            "a concurrent 2ms-interval ticker should have kept making progress while 20 samples ran, not been starved by inline blocking syscalls on the actor"
+        )
+    }
+}
+
+private actor TickCounter {
+    private(set) var value = 0
+    func increment() { value += 1 }
 }

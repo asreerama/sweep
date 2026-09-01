@@ -93,15 +93,20 @@ public enum MemoryStatsReader {
     /// element count matches the struct we're decoding before touching any field.
     private static func readRawVMStatistics64() -> vm_statistics64_data_t? {
         var stats = vm_statistics64_data_t()
-        var count = mach_msg_type_number_t(
-            MemoryLayout<vm_statistics64_data_t>.size / MemoryLayout<integer_t>.size
-        )
+        let neededCount = MemoryLayout<vm_statistics64_data_t>.size / MemoryLayout<integer_t>.size
+        var count = mach_msg_type_number_t(neededCount)
         let result = withUnsafeMutablePointer(to: &stats) { pointer -> kern_return_t in
             pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { rebound in
                 host_statistics64(mach_host_self(), HOST_VM_INFO64, rebound, &count)
             }
         }
         guard result == KERN_SUCCESS else { return nil }
+        // `count` is updated in place by `host_statistics64` to the number of `integer_t`
+        // elements actually written; verify it covers everything `vm_statistics64_data_t` needs
+        // before trusting any field read from `stats` above — a short response would otherwise
+        // leave trailing fields silently un-populated while this function still reported success.
+        // See finding #15.
+        guard MachBufferValidation.atLeast(reported: count, needed: neededCount) else { return nil }
         return stats
     }
 }

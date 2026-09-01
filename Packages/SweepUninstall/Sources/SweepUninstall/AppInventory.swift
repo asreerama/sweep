@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 /// A macOS application discovered on disk via its bundle `Info.plist`.
@@ -77,7 +78,12 @@ public enum AppInventory {
         var bundleURLs: [URL] = []
         var seenPaths = Set<String>()
         for directory in directories {
-            collectAppBundles(in: directory, remainingDepth: 1, fileManager: fileManager, into: &bundleURLs, seenPaths: &seenPaths)
+            // The root itself must be a real (non-symlink) directory — pins the device identity
+            // every descendant is checked against below. See finding #10 in the adversarial
+            // review.
+            guard let rootIdentity = FileIdentityReader.lstatIdentity(at: directory),
+                  rootIdentity.isDirectory, !rootIdentity.isSymbolicLink else { continue }
+            collectAppBundles(in: directory, remainingDepth: 1, rootDevice: rootIdentity.device, fileManager: fileManager, into: &bundleURLs, seenPaths: &seenPaths)
         }
         return bundleURLs.compactMap { readAppInfo(at: $0) }
     }
@@ -85,6 +91,7 @@ public enum AppInventory {
     private static func collectAppBundles(
         in directory: URL,
         remainingDepth: Int,
+        rootDevice: dev_t,
         fileManager: FileManager,
         into result: inout [URL],
         seenPaths: inout Set<String>
@@ -104,10 +111,20 @@ public enum AppInventory {
 
         for entry in entries {
             guard !entry.lastPathComponent.hasPrefix(".") else { continue }
-            var isDirectory: ObjCBool = false
-            guard fileManager.fileExists(atPath: entry.path, isDirectory: &isDirectory) else { continue }
+
+            // `lstat`, never `stat`/`fileExists` (finding #10): reports the entry itself, never
+            // follows a trailing symlink. A symlink FILE always reports its own containing
+            // directory's device via `lstat` regardless of what it points to, so this does not
+            // reject the legitimate macOS 26 case (a dot-less `.app`-extension symlink into a
+            // cryptex mount) — it only rejects a REAL directory substituted by a different-device
+            // mount, or a device mismatch that should never occur for an ordinary symlink/file.
+            guard let identity = FileIdentityReader.lstatIdentity(at: entry), identity.device == rootDevice else { continue }
 
             if entry.pathExtension == "app" {
+                // Terminal regardless of symlink status: macOS 26 legitimately relocates some
+                // system apps (Safari confirmed on this machine) to a dot-less symlink pointing
+                // into a cryptex mount, and `Bundle(url:)` in `readAppInfo` below correctly
+                // resolves that. Never descend further either way.
                 let standardized = entry.standardizedFileURL.path
                 if seenPaths.insert(standardized).inserted {
                     result.append(entry.standardizedFileURL)
@@ -115,8 +132,11 @@ public enum AppInventory {
                 continue // never descend into a bundle
             }
 
-            guard isDirectory.boolValue, remainingDepth > 0 else { continue }
-            collectAppBundles(in: entry, remainingDepth: remainingDepth - 1, fileManager: fileManager, into: &result, seenPaths: &seenPaths)
+            // Never recurse through a symlinked subdirectory: it could point anywhere on disk,
+            // and recursing into it would misattribute unrelated `.app` bundles found there as
+            // installed at this (spoofed) location — finding #10 in the adversarial review.
+            guard identity.isDirectory, !identity.isSymbolicLink, remainingDepth > 0 else { continue }
+            collectAppBundles(in: entry, remainingDepth: remainingDepth - 1, rootDevice: rootDevice, fileManager: fileManager, into: &result, seenPaths: &seenPaths)
         }
     }
 

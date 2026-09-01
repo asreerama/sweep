@@ -77,7 +77,14 @@ public struct NetworkStatsSampler: Sendable {
     }
 
     public mutating func sample() -> NetworkStats {
-        let currentCounters = Self.readInterfaceCounters(matchingPrefix: interfacePrefix)
+        update(withCurrentCounters: Self.readInterfaceCounters(matchingPrefix: interfacePrefix))
+    }
+
+    /// Same computation as `sample()`, but takes an already-fetched interface-counter reading
+    /// instead of calling `getifaddrs` itself. Lets a caller (`StatsSampler`) perform the
+    /// blocking read off its actor and hand back just the result for this cheap, pure
+    /// diff-and-update step. See finding #16 in the adversarial review.
+    mutating func update(withCurrentCounters currentCounters: [String: (received: UInt64, sent: UInt64)]) -> NetworkStats {
         defer { previousCounters = currentCounters }
 
         var interfaces: [NetworkInterfaceStats] = []
@@ -105,7 +112,11 @@ public struct NetworkStatsSampler: Sendable {
     /// `AF_LINK` entries (the link-layer record carries the byte counters; the same interface
     /// name also appears with `AF_INET`/`AF_INET6` entries we skip), and frees the list before
     /// returning — no `ifaddrs` pointer escapes this function.
-    private static func readInterfaceCounters(matchingPrefix prefix: String) -> [String: (received: UInt64, sent: UInt64)] {
+    ///
+    /// Internal (not `private`) so `StatsSampler` can call this blocking syscall on its own
+    /// dedicated background queue and hand only the result back to `update(withCurrentCounters:)`
+    /// on the actor. See finding #16.
+    static func readInterfaceCounters(matchingPrefix prefix: String) -> [String: (received: UInt64, sent: UInt64)] {
         var head: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&head) == 0, let head else { return [:] }
         defer { freeifaddrs(head) }

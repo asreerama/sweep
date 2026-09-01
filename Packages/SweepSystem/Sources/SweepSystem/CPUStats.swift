@@ -99,7 +99,16 @@ public struct CPUStatsSampler: Sendable {
     /// reporting — not expected on Apple Silicon but guarded anyway) has no prior sample to
     /// diff against and returns `CPUStats.unavailable`.
     public mutating func sample() -> CPUStats {
-        guard let currentTicks = Self.readProcessorTicks() else { return .unavailable }
+        update(withCurrentTicks: Self.readProcessorTicks())
+    }
+
+    /// Same computation as `sample()`, but takes an already-fetched tick reading instead of
+    /// calling `host_processor_info` itself. Lets a caller (`StatsSampler`) perform the blocking
+    /// Mach call off its actor and hand back just the result for this cheap, pure diff-and-update
+    /// step, which is the only part that needs to touch `previousTicks`. See finding #16 in the
+    /// adversarial review.
+    mutating func update(withCurrentTicks currentTicks: [CPUTicks]?) -> CPUStats {
+        guard let currentTicks else { return .unavailable }
         defer { previousTicks = currentTicks }
 
         guard let previousTicks, previousTicks.count == currentTicks.count else {
@@ -139,7 +148,11 @@ public struct CPUStatsSampler: Sendable {
     /// `processor_cpu_load_info_data_t`, copies it into a Swift array immediately, and
     /// `vm_deallocate`s the kernel-owned out-of-line memory before returning — the array must
     /// not be allowed to leak the raw pointer past this function.
-    private static func readProcessorTicks() -> [CPUTicks]? {
+    ///
+    /// Internal (not `private`) so `StatsSampler` can call this blocking syscall on its own
+    /// dedicated background queue and hand only the result back to `update(withCurrentTicks:)`
+    /// on the actor. See finding #16.
+    static func readProcessorTicks() -> [CPUTicks]? {
         var processorCount: natural_t = 0
         var cpuInfo: processor_info_array_t?
         var cpuInfoCount: mach_msg_type_number_t = 0
@@ -153,9 +166,27 @@ public struct CPUStatsSampler: Sendable {
         )
         guard result == KERN_SUCCESS, let cpuInfo else { return nil }
         defer {
+            // Deallocated with the kernel-returned size on every exit path from this function
+            // (including the validation failure below), never just the happy path.
             let size = vm_size_t(cpuInfoCount) * vm_size_t(MemoryLayout<integer_t>.size)
             vm_deallocate(mach_task_self_, vm_address_t(UInt(bitPattern: cpuInfo)), size)
         }
+
+        // The kernel is trusted to report a *consistent* (processorCount, cpuInfoCount) pair,
+        // but never trusted blindly: verify the returned `integer_t` count exactly matches
+        // `processorCount * PROCESSOR_CPU_LOAD_INFO_COUNT` (overflow-checked) before rebinding
+        // the buffer to typed records and indexing it — an inconsistent response would otherwise
+        // read past the actual out-of-line allocation. See finding #15.
+        //
+        // `PROCESSOR_CPU_LOAD_INFO_COUNT` itself doesn't import into Swift (it's a `sizeof(...)`
+        // C macro Swift can't re-evaluate), so it's computed the same way the macro defines it:
+        // the record's size in `natural_t` (== `integer_t`-sized) units.
+        let perProcessorCount = MemoryLayout<processor_cpu_load_info_data_t>.size / MemoryLayout<natural_t>.size
+        guard MachBufferValidation.exactCountMatches(
+            reported: cpuInfoCount,
+            elementCount: Int(processorCount),
+            perElementCount: perProcessorCount
+        ) else { return nil }
 
         let loadInfo = cpuInfo.withMemoryRebound(to: processor_cpu_load_info_data_t.self, capacity: Int(processorCount)) { $0 }
         var ticks: [CPUTicks] = []

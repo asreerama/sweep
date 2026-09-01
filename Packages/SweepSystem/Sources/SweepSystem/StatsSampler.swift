@@ -52,6 +52,20 @@ public actor StatsSampler {
     private var cachedDisks: [DiskStats] = []
     private var lastDiskRefresh: ContinuousClock.Instant?
 
+    /// Every blocking Darwin/IOKit/FileManager call `sampleOnce()` needs — `host_processor_info`,
+    /// `getifaddrs`, `host_statistics64`, the disk volumes' `URLResourceKey` reads, and
+    /// `proc_listpids`/`proc_pid_rusage` over every process — is a synchronous syscall with no
+    /// async variant. Running any of them directly inside an `actor` method blocks whichever
+    /// cooperative-pool thread happens to be running this actor for as long as they take,
+    /// starving every other actor/task sharing that pool. `sampleOnce()` instead bridges each one
+    /// onto this dedicated serial queue via `withCheckedContinuation`, suspending the actor
+    /// instead of occupying a pool thread; the actor itself only assembles the results into a
+    /// `SystemSnapshot` and updates the stateful CPU/network samplers' baselines. One queue per
+    /// `StatsSampler` instance (rather than `DispatchQueue.global()` per call) keeps this
+    /// sampler's own blocking work serialized without spawning a new thread per tick, and without
+    /// contending with other `StatsSampler` instances. See finding #16 in the adversarial review.
+    private let blockingQueue = DispatchQueue(label: "com.sweep.system.statssampler.blocking", qos: .utility)
+
     public init(configuration: Configuration = .init()) {
         self.configuration = configuration
         self.networkSampler = NetworkStatsSampler(interfacePrefix: configuration.networkInterfacePrefix)
@@ -64,19 +78,47 @@ public actor StatsSampler {
     /// Takes one reading right now, independent of `snapshots()`'s loop. Also what
     /// `snapshots()` calls internally on every tick.
     @discardableResult
-    public func sampleOnce() -> SystemSnapshot {
+    public func sampleOnce() async -> SystemSnapshot {
         startPressureMonitoringIfNeeded()
+
+        // Extracted before crossing onto `blockingQueue`: `configuration` itself is actor-isolated
+        // state, but these two `Sendable` values are cheap to copy out here, on the actor, and
+        // capture cleanly in the `@Sendable` closures below.
+        let topProcessCount = configuration.topProcessCount
+        let networkInterfacePrefix = configuration.networkInterfacePrefix
+
+        let currentTicks = await runBlocking { CPUStatsSampler.readProcessorTicks() }
+        let cpu = cpuSampler.update(withCurrentTicks: currentTicks)
+
+        let currentNetworkCounters = await runBlocking { NetworkStatsSampler.readInterfaceCounters(matchingPrefix: networkInterfacePrefix) }
+        let network = networkSampler.update(withCurrentCounters: currentNetworkCounters)
+
+        let memory = await runBlocking { MemoryStatsReader.read() } ?? .unavailable
+        let topProcesses = await runBlocking { ProcessStatsReader.topProcesses(limit: topProcessCount) }
+        let battery = await runBlocking { BatteryStatsReader.read() }
+        let disks = await refreshedDiskStatsIfNeeded()
 
         return SystemSnapshot(
             timestamp: Date(),
-            memory: MemoryStatsReader.read() ?? .unavailable,
+            memory: memory,
             memoryPressure: latestPressure,
-            cpu: cpuSampler.sample(),
-            disks: refreshedDiskStatsIfNeeded(),
-            network: networkSampler.sample(),
-            topProcesses: ProcessStatsReader.topProcesses(limit: configuration.topProcessCount),
-            battery: BatteryStatsReader.read()
+            cpu: cpu,
+            disks: disks,
+            network: network,
+            topProcesses: topProcesses,
+            battery: battery
         )
+    }
+
+    /// Bridges one blocking Darwin/IOKit/FileManager call onto `blockingQueue`: the actor
+    /// suspends here (freeing its cooperative-pool thread) instead of running the syscall inline.
+    /// See `blockingQueue`'s doc comment above.
+    private func runBlocking<T: Sendable>(_ work: @escaping @Sendable () -> T) async -> T {
+        await withCheckedContinuation { continuation in
+            blockingQueue.async {
+                continuation.resume(returning: work())
+            }
+        }
     }
 
     /// An `AsyncStream` of `SystemSnapshot`s, one per `configuration.interval`. Each call starts
@@ -120,13 +162,14 @@ public actor StatsSampler {
     }
 
     /// Returns the cached disk reading unless `diskRefreshInterval` has elapsed (or this is the
-    /// first sample), in which case it re-reads and re-caches. See `Configuration.diskRefreshInterval`.
-    private func refreshedDiskStatsIfNeeded() -> [DiskStats] {
+    /// first sample), in which case it re-reads (off-actor, see `runBlocking`) and re-caches. See
+    /// `Configuration.diskRefreshInterval`.
+    private func refreshedDiskStatsIfNeeded() async -> [DiskStats] {
         let now = ContinuousClock.now
         if let lastDiskRefresh, now - lastDiskRefresh < configuration.diskRefreshInterval, !cachedDisks.isEmpty {
             return cachedDisks
         }
-        let disks = DiskStatsReader.readAll()
+        let disks = await runBlocking { DiskStatsReader.readAll() }
         cachedDisks = disks
         lastDiskRefresh = now
         return disks

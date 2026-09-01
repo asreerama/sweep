@@ -65,11 +65,19 @@ public enum LeftoverMatcher {
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
         systemLaunchDaemonsDirectory: URL = URL(fileURLWithPath: "/Library/LaunchDaemons"),
         receipts: PkgutilReceiptsProviding = PkgutilReceiptsProvider(),
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        installedApps: [InstalledApp] = []
     ) -> [LeftoverCandidate] {
         let attributedID = app.bundleIdentifier ?? NameNormalization.alphanumeric(app.name)
         let conditions = ConditionsTable.conditions(for: app.bundleIdentifier)
         let nameForms = nameForms(for: app)
+        // See finding #11 in the adversarial review: an exact bundle-id-shaped item was
+        // previously promoted to auto-selectable without ever checking whether some OTHER
+        // installed app could also depend on it. `installedApps` defaults to empty for backward
+        // compatibility with callers that don't (yet) have a full inventory to pass; passing the
+        // real inventory (typically `AppInventory.scan()`, `app` included) is what activates
+        // this check.
+        let sharedOwnership = SharedOwnershipContext(target: app, installedApps: installedApps)
 
         var results: [LeftoverCandidate] = []
 
@@ -81,14 +89,18 @@ public enum LeftoverMatcher {
                 fileManager: fileManager
             )
             for entry in entries {
-                let evidence = evaluate(entry: entry, root: root, app: app, nameForms: nameForms, conditions: conditions, fileManager: fileManager)
+                var evidence = evaluate(entry: entry, root: root, app: app, nameForms: nameForms, conditions: conditions, fileManager: fileManager)
                 guard !evidence.isEmpty else { continue }
+                let comparableName = groupContainerBaseName(entry.baseName, root: root)
+                if sharedOwnership.isAmbiguous(comparableName: comparableName) {
+                    evidence.insert(.ambiguousOwner)
+                }
                 results.append(LeftoverCandidate(url: entry.url, root: root, attributedBundleID: attributedID, evidence: evidence))
             }
         }
 
         if roots.contains(.pkgReceipt) {
-            results.append(contentsOf: receiptCandidates(for: app, attributedID: attributedID, receipts: receipts))
+            results.append(contentsOf: receiptCandidates(for: app, attributedID: attributedID, receipts: receipts, sharedOwnership: sharedOwnership))
         }
 
         for path in conditions.flatMap(\.forceIncludePaths) {
@@ -252,24 +264,105 @@ public enum LeftoverMatcher {
     private static func receiptCandidates(
         for app: InstalledApp,
         attributedID: String,
-        receipts: PkgutilReceiptsProviding
+        receipts: PkgutilReceiptsProviding,
+        sharedOwnership: SharedOwnershipContext
     ) -> [LeftoverCandidate] {
         guard let bundleID = app.bundleIdentifier else { return [] }
         let bundleFileSuffix = "Applications/\(app.bundlePath.lastPathComponent)"
 
         var results: [LeftoverCandidate] = []
         for packageID in receipts.packageIdentifiers() {
-            let idMatches = BundleIDMatch.isExact(packageID, bundleID: bundleID)
-                || BundleIDMatch.isComponentPrefix(packageID, bundleID: bundleID)
+            let isExactID = BundleIDMatch.isExact(packageID, bundleID: bundleID)
+            let isPrefixEitherDirection = BundleIDMatch.isComponentPrefix(packageID, bundleID: bundleID)
                 || BundleIDMatch.isComponentPrefix(bundleID, bundleID: packageID)
 
-            let filesMatch = idMatches ? false : receipts.files(forPackageID: packageID).contains { $0.hasSuffix(bundleFileSuffix) }
-            guard idMatches || filesMatch else { continue }
+            // Only an exact receipt identifier, or `pkgutil --files` proof that the receipt
+            // actually installed this exact app bundle, counts as strong (`.receiptListed`,
+            // auto-selectable-eligible) evidence. A broad suite receipt like `com.vendor` for a
+            // candidate `com.vendor.product` (or the reverse: a narrow receipt for a broader app
+            // id) is a real relationship — it just isn't proof this SPECIFIC package receipt
+            // installed THIS SPECIFIC app — so it is downgraded to `.receiptPrefixMatch`, which
+            // `MatchConfidence.derive` never promotes past `manualReview`. See finding #12.
+            let filesMatch = isExactID ? false : receipts.files(forPackageID: packageID).contains { $0.hasSuffix(bundleFileSuffix) }
+
+            var evidence: OwnershipEvidence
+            if isExactID || filesMatch {
+                evidence = [.receiptListed]
+            } else if isPrefixEitherDirection {
+                evidence = [.receiptPrefixMatch]
+            } else {
+                continue
+            }
+            if sharedOwnership.isAmbiguous(comparableName: packageID) {
+                evidence.insert(.ambiguousOwner)
+            }
 
             let receiptURL = URL(fileURLWithPath: "/private/var/db/receipts/\(packageID).plist")
-            results.append(LeftoverCandidate(url: receiptURL, root: .pkgReceipt, attributedBundleID: attributedID, evidence: [.receiptListed]))
+            results.append(LeftoverCandidate(url: receiptURL, root: .pkgReceipt, attributedBundleID: attributedID, evidence: evidence))
         }
         return results
+    }
+
+    // MARK: - Ambiguous ownership (finding #11)
+
+    /// Ambiguous-ownership detection: an item that textually matches `target` can still be
+    /// unsafe to auto-select if another installed app plausibly also depends on it. Built once
+    /// per `candidates(for:)` call from the full installed-app inventory the caller supplies.
+    ///
+    /// Before this, `candidates(for:)` only ever looked at `target`: a broad vendor "Common
+    /// Files"-style folder that happened to equal one product's bundle id verbatim was promoted
+    /// to auto-selectable even when sibling products from the same vendor/team were also
+    /// installed (e.g. `com.adobe.CommonFiles` while `com.adobe.photoshop` and
+    /// `com.adobe.bridge` are both present).
+    private struct SharedOwnershipContext {
+        /// Every OTHER installed app's bundle identifier (lowercased), excluding `target` itself
+        /// (compared by bundle path, since two distinct apps could coincidentally share a
+        /// nil/empty bundle id).
+        private let otherBundleIDs: [String]
+        /// True when at least one other installed app shares `target`'s second-level
+        /// reverse-DNS vendor prefix (`com.vendor` out of `com.vendor.product`).
+        private let vendorPrefixIsShared: Bool
+        /// True when at least one other installed app shares `target`'s non-empty code-signing
+        /// team identifier.
+        private let teamIsShared: Bool
+
+        init(target: InstalledApp, installedApps: [InstalledApp]) {
+            let others = installedApps.filter { $0.bundlePath != target.bundlePath }
+            otherBundleIDs = others.compactMap { $0.bundleIdentifier?.lowercased() }
+
+            if let targetVendorPrefix = Self.vendorPrefix(of: target.bundleIdentifier) {
+                vendorPrefixIsShared = others.contains { Self.vendorPrefix(of: $0.bundleIdentifier) == targetVendorPrefix }
+            } else {
+                vendorPrefixIsShared = false
+            }
+
+            if let targetTeam = target.teamIdentifier, !targetTeam.isEmpty {
+                teamIsShared = others.contains { $0.teamIdentifier == targetTeam }
+            } else {
+                teamIsShared = false
+            }
+        }
+
+        /// True when `comparableName` should never be treated as exclusively `target`'s: either
+        /// the vendor namespace (or signing team) it belongs to has other live consumers, or the
+        /// name itself also matches a different installed app's bundle id or prefix.
+        func isAmbiguous(comparableName: String) -> Bool {
+            if vendorPrefixIsShared || teamIsShared { return true }
+            return otherBundleIDs.contains { otherBundleID in
+                BundleIDMatch.isExact(comparableName, bundleID: otherBundleID)
+                    || BundleIDMatch.isComponentPrefix(comparableName, bundleID: otherBundleID)
+            }
+        }
+
+        /// First two dot-separated components of a reverse-DNS bundle id, e.g. `"com.adobe"`
+        /// from `"com.adobe.photoshop"`. `nil` when the id has fewer than two components — too
+        /// generic to mean anything as a "vendor".
+        private static func vendorPrefix(of bundleID: String?) -> String? {
+            guard let bundleID else { return nil }
+            let components = BundleIDMatch.components(bundleID)
+            guard components.count >= 2 else { return nil }
+            return components.prefix(2).joined(separator: ".")
+        }
     }
 
     // MARK: - Orphan-mode helpers
