@@ -149,7 +149,7 @@ struct SmartScanScreen: View {
                     // to the number that is both the hero total and the clean scope, not the raw
                     // scan total scanning was showing a moment before.
                     byteCount: ringComplete ? scan.safeBytes : scan.claimedBytes,
-                    size: 52,
+                    size: ringDiameter * 0.235,
                     label: ringComplete ? (scan.wasCancelled ? "Found so far" : "Ready to clean") : nil,
                     caption: ringComplete ? scan.safeResultsCaption : scan.scanningCaption
                 )
@@ -177,7 +177,7 @@ struct SmartScanScreen: View {
                     ScanRing(state: .complete, diameter: resultsRingDiameter) {
                         HeroByteCounter(
                             byteCount: scan.safeBytes,
-                            size: 34,
+                            size: resultsRingDiameter * 0.235,
                             label: scan.wasCancelled ? "Found so far" : "Ready to clean",
                             caption: scan.safeResultsCaption
                         )

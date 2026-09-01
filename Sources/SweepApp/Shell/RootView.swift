@@ -36,6 +36,7 @@ struct RootView: View {
         }
         .animation(reduceMotion ? SweepMotion.crossfade : SweepMotion.layout, value: state.destination)
         .navigationTitle(state.destination.title)
+        .toolbar(removing: .title)
         .environment(state.scan)
         .environment(\.sweepAnimationsEnabled, visibility.isVisible)
     }

@@ -198,7 +198,7 @@ final class ScanModel {
     /// Caption under the safe-tier hero number: locations only, since `claimedFiles` is a
     /// scan-wide total that was never split by tier and would overstate the clean scope.
     var safeResultsCaption: String {
-        "\(SweepFormat.itemCount(safeItemCount)) ready to clean"
+        SweepFormat.itemCount(safeItemCount)
     }
 
     // MARK: - Clean requests

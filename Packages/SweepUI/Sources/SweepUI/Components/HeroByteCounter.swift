@@ -33,10 +33,14 @@ public struct HeroByteCounter: View {
 
         VStack(spacing: size * 0.06) {
             if let label {
+                // Proportional to the number, never wrapping: the whole lockup scales as one
+                // unit with the ring it sits in.
                 Text(label.uppercased())
-                    .font(SweepFont.badge)
-                    .tracking(1.1)
+                    .font(.system(size: max(9, size * 0.20), weight: .semibold))
+                    .tracking(size * 0.028)
                     .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
             }
 
             HStack(alignment: .firstTextBaseline, spacing: size * 0.07) {
@@ -62,11 +66,10 @@ public struct HeroByteCounter: View {
                 // runs, and a second animated number under the first is noise competing with
                 // the one number the screen is about.
                 Text(caption)
-                    .font(SweepFont.caption)
+                    .font(.system(size: max(10, size * 0.22)))
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                    .minimumScaleFactor(0.75)
                     .fixedSize(horizontal: true, vertical: false)
             }
         }
