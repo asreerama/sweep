@@ -12,13 +12,29 @@ struct MutationRequest: Sendable {
     let expected: FileIdentity
     /// Scan-time identity of the immediate parent, when the scan captured one.
     let expectedParent: FileIdentity?
+    /// Which of a multi-root executor's anchors this request descends from. `nil` for a
+    /// single-root executor (fixture mode, and eventually gate-2 live mode), where there is only
+    /// ever one anchor and no ambiguity to resolve. Only ``TrashOnlyFileDescriptorExecutor``
+    /// reads this.
+    var anchorRoot: TrashAnchorKey? = nil
 }
 
-/// The mutation surface, deliberately non-public and deliberately tiny: two verbs, no path
-/// building, no recursion the caller can steer. Everything above it is read-only.
-protocol FileMutating: Sendable {
+/// The mutation surface every trash-capable executor exposes. Deliberately tiny: one verb, no
+/// path building, no recursion the caller can steer.
+protocol TrashCapable: Sendable {
     /// Returns the resulting Trash URL when the system reports one.
     func trash(_ request: MutationRequest) async throws -> URL?
+}
+
+/// The full mutation surface: trash, plus unlink. Only ever implemented by an executor anchored
+/// at a *single* root the coordinator itself opened (fixture mode today; gate 2's live mode
+/// later) — never by ``TrashOnlyFileDescriptorExecutor``, which conforms to ``TrashCapable`` only
+/// and has no `delete` method to call at all. That asymmetry is what makes Gate 1's trash-only
+/// mode structurally incapable of deleting anything: there is no runtime flag guarding `delete`,
+/// there is simply no such method on the type trash-only mode is given (deliverable #2,
+/// "structurally unreachable... not a runtime flag"). See `TrashOnlyExecutorTests` for the
+/// compile-surface proof.
+protocol FileMutating: TrashCapable {
     func delete(_ request: MutationRequest) async throws
 }
 
@@ -68,7 +84,7 @@ final class FileDescriptorExecutor: FileMutating, @unchecked Sendable {
             components: request.relativeComponents,
             expectedParent: request.expectedParent
         )
-        let actual = try validatedLeaf(parent: parent, leaf: leaf, expected: request.expected)
+        let actual = try TrashStaging.validatedLeaf(parent: parent, leaf: leaf, expected: request.expected)
 
         if actual.kind == .directory {
             try removeTree(parent: parent, name: leaf, expected: actual)
@@ -78,68 +94,7 @@ final class FileDescriptorExecutor: FileMutating, @unchecked Sendable {
     }
 
     private func performTrash(_ request: MutationRequest) throws -> URL? {
-        let (parent, leaf) = try FileDescriptorPath.descend(
-            from: root,
-            components: request.relativeComponents,
-            expectedParent: request.expectedParent
-        )
-        let actual = try validatedLeaf(parent: parent, leaf: leaf, expected: request.expected)
-
-        // A directory is trashed whole, by rename: nothing is destroyed, the move is atomic, and
-        // the Trash entry restores the subtree intact. Per-descendant validation is what deletion
-        // needs, because deletion is not reversible.
-        //
-        // `FileManager.trashItem` is the only API that can produce a restorable Trash entry, and
-        // it only speaks pathnames. So the item is first moved, by descriptor-relative atomic
-        // rename, into a quarantine directory this executor created and holds open. The pathname
-        // handed to Foundation is therefore one nothing else has a handle on, and it is
-        // re-validated against the identity that was just moved immediately before the call.
-        let quarantine = try quarantineDirectory()
-        let slotName = UUID().uuidString
-        try quarantine.makeChildDirectory(slotName)
-        let slot = try quarantine.openChildDirectory(slotName)
-        try parent.renameChild(leaf, into: slot, as: leaf)
-
-        do {
-            let moved = try slot.identity(ofChild: leaf, volume: actual.volume)
-            guard moved.isSameFile(as: actual) else {
-                throw FileDescriptorError.identityChanged(path: request.url.path)
-            }
-            let quarantinedURL = URL(fileURLWithPath: slot.path).appending(path: leaf)
-            guard let onDisk = try? FileIdentity.read(at: quarantinedURL),
-                  onDisk.isSameFile(as: moved) else {
-                throw FileDescriptorError.identityChanged(path: quarantinedURL.path)
-            }
-
-            var resulting: NSURL?
-            do {
-                try FileManager.default.trashItem(at: quarantinedURL, resultingItemURL: &resulting)
-            } catch {
-                throw FileDescriptorError.trashFailed((error as NSError).localizedDescription)
-            }
-            try? quarantine.removeChildDirectory(slotName)
-            return resulting as URL?
-        } catch {
-            // Quarantine is a staging area, never a grave: anything that does not reach the Trash
-            // goes back where it came from, through the same descriptors.
-            try? slot.renameChild(leaf, into: parent, as: leaf)
-            try? quarantine.removeChildDirectory(slotName)
-            throw error
-        }
-    }
-
-    /// `fstatat` against the open parent, compared with the plan. Both halves matter: same inode
-    /// (it is the object we planned) and unchanged (nothing wrote to it since).
-    private func validatedLeaf(
-        parent: OpenDirectory,
-        leaf: String,
-        expected: FileIdentity
-    ) throws -> FileIdentity {
-        let actual = try parent.identity(ofChild: leaf, volume: expected.volume)
-        guard actual.isSameFile(as: expected), actual.isUnchanged(from: expected) else {
-            throw FileDescriptorError.identityChanged(path: parent.path + "/" + leaf)
-        }
-        return actual
+        try TrashStaging.trash(request: request, anchoredAt: root, quarantine: try quarantineDirectory())
     }
 
     /// Bottom-up removal. `removeItem`'s recursive delete is never used, because it would take
@@ -207,6 +162,86 @@ final class FileDescriptorExecutor: FileMutating, @unchecked Sendable {
     }
 }
 
+/// The trash-staging algorithm every trash-capable executor uses: rename the leaf into a
+/// quarantine directory this process created and holds open, validate the move landed on the
+/// same object, hand `FileManager.trashItem` a pathname nothing else has a handle on, and roll
+/// back to the original location if anything after the rename fails.
+///
+/// Pulled out so ``FileDescriptorExecutor`` (fixture mode, and eventually gate 2's live mode) and
+/// ``TrashOnlyFileDescriptorExecutor`` (Gate 1's real-filesystem trash-only mode) share one
+/// implementation of the only code that actually moves something into the real Trash — the two
+/// executors differ only in how many roots they anchor and which verbs they expose, never in how
+/// a trash actually happens.
+enum TrashStaging {
+    static func trash(
+        request: MutationRequest,
+        anchoredAt root: OpenDirectory,
+        quarantine: OpenDirectory
+    ) throws -> URL? {
+        let (parent, leaf) = try FileDescriptorPath.descend(
+            from: root,
+            components: request.relativeComponents,
+            expectedParent: request.expectedParent
+        )
+        let actual = try validatedLeaf(parent: parent, leaf: leaf, expected: request.expected)
+
+        // A directory is trashed whole, by rename: nothing is destroyed, the move is atomic, and
+        // the Trash entry restores the subtree intact. Per-descendant validation is what deletion
+        // needs, because deletion is not reversible.
+        //
+        // `FileManager.trashItem` is the only API that can produce a restorable Trash entry, and
+        // it only speaks pathnames. So the item is first moved, by descriptor-relative atomic
+        // rename, into the quarantine directory the caller already holds open. The pathname
+        // handed to Foundation is therefore one nothing else has a handle on, and it is
+        // re-validated against the identity that was just moved immediately before the call.
+        let slotName = UUID().uuidString
+        try quarantine.makeChildDirectory(slotName)
+        let slot = try quarantine.openChildDirectory(slotName)
+        try parent.renameChild(leaf, into: slot, as: leaf)
+
+        do {
+            let moved = try slot.identity(ofChild: leaf, volume: actual.volume)
+            guard moved.isSameFile(as: actual) else {
+                throw FileDescriptorError.identityChanged(path: request.url.path)
+            }
+            let quarantinedURL = URL(fileURLWithPath: slot.path).appending(path: leaf)
+            guard let onDisk = try? FileIdentity.read(at: quarantinedURL),
+                  onDisk.isSameFile(as: moved) else {
+                throw FileDescriptorError.identityChanged(path: quarantinedURL.path)
+            }
+
+            var resulting: NSURL?
+            do {
+                try FileManager.default.trashItem(at: quarantinedURL, resultingItemURL: &resulting)
+            } catch {
+                throw FileDescriptorError.trashFailed((error as NSError).localizedDescription)
+            }
+            try? quarantine.removeChildDirectory(slotName)
+            return resulting as URL?
+        } catch {
+            // Quarantine is a staging area, never a grave: anything that does not reach the Trash
+            // goes back where it came from, through the same descriptors.
+            try? slot.renameChild(leaf, into: parent, as: leaf)
+            try? quarantine.removeChildDirectory(slotName)
+            throw error
+        }
+    }
+
+    /// `fstatat` against the open parent, compared with the plan. Both halves matter: same inode
+    /// (it is the object we planned) and unchanged (nothing wrote to it since).
+    static func validatedLeaf(
+        parent: OpenDirectory,
+        leaf: String,
+        expected: FileIdentity
+    ) throws -> FileIdentity {
+        let actual = try parent.identity(ofChild: leaf, volume: expected.volume)
+        guard actual.isSameFile(as: expected), actual.isUnchanged(from: expected) else {
+            throw FileDescriptorError.identityChanged(path: parent.path + "/" + leaf)
+        }
+        return actual
+    }
+}
+
 /// Maps a descriptor, Cocoa or POSIX error onto the failure vocabulary the journal and UI
 /// distinguish.
 func failureReason(for error: any Error) -> ItemFailureReason {
@@ -251,7 +286,9 @@ func failureReason(for error: any Error) -> ItemFailureReason {
 func outcome(for reason: ItemFailureReason) -> ItemOutcome {
     switch reason {
     case .identityChanged: .changed
-    case .vanished, .policyDenied, .outsideFixtureRoot, .tierViolation, .notAttempted: .skipped
+    case .vanished, .policyDenied, .outsideFixtureRoot, .tierViolation, .notAttempted,
+         .outsideAuthorizedRoot, .actionNotPermitted, .notAuthorized:
+        .skipped
     case .permissionDenied, .filesystemError: .failed
     }
 }

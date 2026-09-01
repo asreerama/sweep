@@ -10,14 +10,21 @@ struct LiveExecutionToken: Sendable {
 
 /// Where the coordinator is allowed to operate.
 ///
-/// This phase ships `fixtureOnly` only: every path must sit strictly under one disposable
-/// fixture root, and anything else is refused before a single byte moves. The constructor is
-/// internal — a caller outside the package cannot name a root at all, and reaches fixture
-/// execution only through ``FixtureExecution``, which owns the root it creates
-/// (review finding #1).
+/// Three modes exist:
+/// - `fixtureOnly`: every path must sit strictly under one disposable fixture root. Test support
+///   only, reached from outside the package solely through ``FixtureExecution``, which owns the
+///   root it creates (review finding #1).
+/// - `trashOnly`: Gate 1 (PLAN §6). Every path must sit under one of a fixed set of
+///   authorization-derived real roots, and only the trash verb is reachable — the executor for
+///   this mode, ``TrashOnlyFileDescriptorExecutor``, has no delete method to call at all. The
+///   constructor is internal; only ``CleanService`` (also inside this package) builds one, and
+///   only from ``AuthorizedCleanPlan``s.
+/// - `live`: gate 2, not yet open. `LiveExecutionToken` cannot be named outside the package, so
+///   `.live` cannot be spelled by an external caller.
 public struct DeletionMode: Sendable, Equatable {
     enum Kind: Sendable, Equatable {
         case fixtureOnly(URL)
+        case trashOnly([TrashOnlyAnchor])
         case live
     }
 
@@ -30,6 +37,14 @@ public struct DeletionMode: Sendable, Equatable {
     /// Confines the coordinator to a disposable fixture tree.
     static func fixtureOnly(root: URL) -> DeletionMode {
         DeletionMode(kind: .fixtureOnly(root.resolvingSymlinksInPath().standardizedFileURL))
+    }
+
+    /// Confines the coordinator to the given authorization-derived roots, trash verb only.
+    /// `anchors` must already be the product of a successful ``SweepPolicy`` authorization —
+    /// this does not re-derive or re-check anything, it only anchors what the caller already
+    /// proved (``AuthorizedCleanPlan``).
+    static func trashOnly(anchors: [TrashOnlyAnchor]) -> DeletionMode {
+        DeletionMode(kind: .trashOnly(anchors))
     }
 
     static func live(_ token: LiveExecutionToken) -> DeletionMode {
@@ -64,6 +79,22 @@ public enum DeletionError: Error, Equatable, CustomStringConvertible {
     case liveModeNotEnabled
     case journalUnavailable(String)
     case fixtureRootUnavailable(String)
+    /// Gate 1 plan-level refusal: an item does not sit under any of `trashOnly`'s authorized
+    /// roots. The whole plan is refused before anything is journaled — same "fail closed on the
+    /// whole plan" discipline `outsideFixtureRoot` already applies to fixture mode.
+    case outsideAuthorizedRoots(path: String)
+    /// Gate 1 plan-level refusal: an item in a `trashOnly` plan requests an action other than
+    /// `trash`. This is the first of two independent gates against a delete slipping into
+    /// trash-only mode — the second is that the mode's executor has no delete method at all.
+    case actionNotPermittedInTrashOnlyMode(path: String, action: DeletionAction)
+    /// `trashOnly`'s authorized root could not be re-opened by descriptor at anchor time (it
+    /// vanished, or a component along the way is no longer a directory).
+    case anchorUnavailable(String)
+    /// `trashOnly`'s authorized root changed identity between the moment ``SweepPolicy``
+    /// authorized it and the moment the coordinator opened it by descriptor — the same
+    /// time-of-check/time-of-use gap the leaf-level descriptor descent already closes, applied
+    /// to the root itself.
+    case anchorIdentityChanged(String)
 
     public var description: String {
         switch self {
@@ -81,6 +112,14 @@ public enum DeletionError: Error, Equatable, CustomStringConvertible {
             "aborted before touching the filesystem: \(reason)"
         case .fixtureRootUnavailable(let reason):
             "cannot anchor the fixture root: \(reason)"
+        case .outsideAuthorizedRoots(let path):
+            "refused: \(path) is not under any root this operation authorized"
+        case .actionNotPermittedInTrashOnlyMode(let path, let action):
+            "refused: \(path) requests action=\(action.rawValue), but trash-only mode never runs anything but trash"
+        case .anchorUnavailable(let reason):
+            "cannot anchor an authorized root: \(reason)"
+        case .anchorIdentityChanged(let reason):
+            "an authorized root changed identity before it could be anchored: \(reason)"
         }
     }
 }
@@ -100,39 +139,77 @@ public actor DeletionCoordinator {
     private let mode: DeletionMode
     private let journal: WALJournal
     private let extraDenials: DenyCheck
-    private let executor: any FileMutating
+    private let executor: any TrashCapable
     /// Descriptor opened once, at init, on the fixture root. Held for the coordinator's life:
     /// every mutation is resolved relative to this inode, not to the pathname it was opened from.
+    /// `nil` for `trashOnly` (which holds its descriptors inside `executor` instead, one per
+    /// anchor) and for `live` (nothing is ever opened before gate 2).
     private let anchor: OpenDirectory?
     private let queue: BlockingIOQueue
 
     init(mode: DeletionMode, journal: WALJournal, additionalDenials: DenyCheck = .none) throws {
         let queue = BlockingIOQueue(label: "com.sweep.deletion.io")
-        let anchor: OpenDirectory?
-        if let root = mode.fixtureRoot {
+
+        switch mode.kind {
+        case .fixtureOnly(let root):
+            let anchor: OpenDirectory
             do {
                 anchor = try OpenDirectory.openRoot(root)
             } catch {
                 throw DeletionError.fixtureRootUnavailable(String(describing: error))
             }
-        } else {
-            anchor = nil
+            self.init(
+                mode: mode,
+                journal: journal,
+                additionalDenials: additionalDenials,
+                executor: FileDescriptorExecutor(root: anchor, queue: queue),
+                anchor: anchor,
+                queue: queue
+            )
+
+        case .trashOnly(let anchors):
+            var opened: [TrashAnchorKey: OpenDirectory] = [:]
+            for trashAnchor in anchors {
+                let directory: OpenDirectory
+                do {
+                    directory = try OpenDirectory.openRoot(trashAnchor.url)
+                } catch {
+                    throw DeletionError.anchorUnavailable(String(describing: error))
+                }
+                // Review finding #2's discipline, applied to the root itself: the identity
+                // `SweepPolicy` authorized against is re-checked the instant the descriptor is
+                // open, closing the gap between "authorize() proved this" and "we anchored it".
+                guard let actual = try? directory.identity(), actual.pathIdentity == trashAnchor.identity else {
+                    throw DeletionError.anchorIdentityChanged(trashAnchor.url.path)
+                }
+                opened[trashAnchor.key] = directory
+            }
+            self.init(
+                mode: mode,
+                journal: journal,
+                additionalDenials: additionalDenials,
+                executor: TrashOnlyFileDescriptorExecutor(anchors: opened, queue: queue),
+                anchor: nil,
+                queue: queue
+            )
+
+        case .live:
+            self.init(
+                mode: mode,
+                journal: journal,
+                additionalDenials: additionalDenials,
+                executor: NoMutation(),
+                anchor: nil,
+                queue: queue
+            )
         }
-        self.init(
-            mode: mode,
-            journal: journal,
-            additionalDenials: additionalDenials,
-            executor: anchor.map { FileDescriptorExecutor(root: $0, queue: queue) } ?? NoMutation(),
-            anchor: anchor,
-            queue: queue
-        )
     }
 
     init(
         mode: DeletionMode,
         journal: WALJournal,
         additionalDenials: DenyCheck = .none,
-        executor: any FileMutating,
+        executor: any TrashCapable,
         anchor: OpenDirectory? = nil,
         queue: BlockingIOQueue = BlockingIOQueue(label: "com.sweep.deletion.io")
     ) {
@@ -208,11 +285,30 @@ public actor DeletionCoordinator {
             for item in plan.items where !Self.isStrictlyContained(item.url, in: root) {
                 throw DeletionError.outsideFixtureRoot(path: item.url.path, fixtureRoot: root.path)
             }
+        case .trashOnly(let anchors):
+            for item in plan.items {
+                guard Self.matchingAnchor(for: item.url, among: anchors) != nil else {
+                    throw DeletionError.outsideAuthorizedRoots(path: item.url.path)
+                }
+                // First of two independent gates against a delete reaching trash-only mode; the
+                // second is that `TrashOnlyFileDescriptorExecutor` has no delete method at all
+                // (see `perform`, step 5).
+                guard item.action == .trash else {
+                    throw DeletionError.actionNotPermittedInTrashOnlyMode(path: item.url.path, action: item.action)
+                }
+            }
         }
 
         for item in plan.items where item.action == .delete && item.tier != .safe {
             throw DeletionError.tierViolation(path: item.url.path, tier: item.tier)
         }
+    }
+
+    /// The first `trashOnly` anchor whose root strictly contains `url`. Mirrors
+    /// ``isStrictlyContained(_:in:)``'s symlink-on-parent-only resolution, so an anchor is judged
+    /// the same way fixture containment is.
+    static func matchingAnchor(for url: URL, among anchors: [TrashOnlyAnchor]) -> TrashOnlyAnchor? {
+        anchors.first { isStrictlyContained(url, in: $0.url) }
     }
 
     /// Resolves symlinks on the *parent* only, so a symlink item is judged where it lives
@@ -234,22 +330,55 @@ public actor DeletionCoordinator {
     private func perform(_ item: DeletionItem) async -> DeletionItemResult {
         // 1. Mode containment, re-checked per item. Plan validation already covers this; the
         //    duplicate is deliberate defense in depth around the only mutating call site.
-        guard let root = mode.fixtureRoot else {
+        let components: [String]
+        let anchorRoot: TrashAnchorKey?
+
+        switch mode.kind {
+        case .fixtureOnly(let root):
+            guard Self.isStrictlyContained(item.url, in: root),
+                  let resolved = FileDescriptorPath.relativeComponents(of: item.url, under: root)
+            else {
+                return DeletionItemResult(
+                    item: item,
+                    outcome: .skipped,
+                    failureReason: .outsideFixtureRoot,
+                    detail: "not under fixture root \(root.path)"
+                )
+            }
+            components = resolved
+            anchorRoot = nil
+
+        case .trashOnly(let anchors):
+            guard let matched = Self.matchingAnchor(for: item.url, among: anchors),
+                  let resolved = FileDescriptorPath.relativeComponents(of: item.url, under: matched.url)
+            else {
+                return DeletionItemResult(
+                    item: item,
+                    outcome: .skipped,
+                    failureReason: .outsideAuthorizedRoot,
+                    detail: "not under any root this operation authorized"
+                )
+            }
+            // Second, independent gate (the first is plan-level `validate`): even if a delete
+            // item somehow reached this point, the executor for this mode has no delete method
+            // to call it with (see step 5).
+            guard item.action == .trash else {
+                return DeletionItemResult(
+                    item: item,
+                    outcome: .skipped,
+                    failureReason: .actionNotPermitted,
+                    detail: "action \(item.action.rawValue) is not reachable in trash-only mode"
+                )
+            }
+            components = resolved
+            anchorRoot = matched.key
+
+        case .live:
             return DeletionItemResult(
                 item: item,
                 outcome: .skipped,
-                failureReason: .outsideFixtureRoot,
-                detail: "no fixture root is anchored"
-            )
-        }
-        guard Self.isStrictlyContained(item.url, in: root),
-              let components = FileDescriptorPath.relativeComponents(of: item.url, under: root)
-        else {
-            return DeletionItemResult(
-                item: item,
-                outcome: .skipped,
-                failureReason: .outsideFixtureRoot,
-                detail: "not under fixture root \(root.path)"
+                failureReason: .notAttempted,
+                detail: "live mode is not enabled"
             )
         }
 
@@ -326,7 +455,8 @@ public actor DeletionCoordinator {
             url: item.url,
             relativeComponents: components,
             expected: item.identity,
-            expectedParent: item.parentIdentity
+            expectedParent: item.parentIdentity,
+            anchorRoot: anchorRoot
         )
         do {
             switch item.action {
@@ -334,7 +464,21 @@ public actor DeletionCoordinator {
                 let trashURL = try await executor.trash(request)
                 return DeletionItemResult(item: item, outcome: .succeeded, trashURL: trashURL)
             case .delete:
-                try await executor.delete(request)
+                // `executor` is typed `any TrashCapable`; only a `FileMutating` conformer (the
+                // fixture/gate-2 executor) can also delete. `TrashOnlyFileDescriptorExecutor`
+                // never conforms to `FileMutating` — it has no delete method — so this cast
+                // fails for every instance of it, unconditionally. Plan-level `validate` already
+                // refuses a delete item in trash-only mode before this line is ever reached; this
+                // is the second, independent gate, and it is a type fact, not a checked flag.
+                guard let deletingExecutor = executor as? any FileMutating else {
+                    return DeletionItemResult(
+                        item: item,
+                        outcome: .skipped,
+                        failureReason: .actionNotPermitted,
+                        detail: "this mode's executor cannot delete"
+                    )
+                }
+                try await deletingExecutor.delete(request)
                 return DeletionItemResult(item: item, outcome: .succeeded)
             }
         } catch {

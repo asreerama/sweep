@@ -21,6 +21,19 @@ public enum RuleDecision: Sendable, Equatable {
     }
 }
 
+extension RuleItemType {
+    /// A rule can only ever describe a file or a directory. A symlink or anything else
+    /// (`FileKind.other`) has no ``RuleItemType`` to match against, which is deliberate: nothing
+    /// in the catalog authorizes acting on a bare symlink or special file (PLAN §2, rule schema).
+    public init?(_ kind: FileKind) {
+        switch kind {
+        case .file: self = .file
+        case .directory: self = .directory
+        case .symbolicLink, .other: return nil
+        }
+    }
+}
+
 extension RuleCatalog {
 
     /// Resolve one path under a symbolic root.

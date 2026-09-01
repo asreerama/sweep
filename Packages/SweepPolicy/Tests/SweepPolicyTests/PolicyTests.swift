@@ -199,6 +199,127 @@ final class PolicyTests: XCTestCase {
         XCTAssertEqual(roots.first?.url.path, realpathOf(logs.path))
     }
 
+    // MARK: - External-root authorization (SweepCore's code-sign-clone detector)
+
+    func testExternalRootAllowsAFileBelowIt() throws {
+        let home = try TemporaryHome()
+        let clone = try home.write("X/com.example.App.code_sign_clone/payload.bin", contents: "hi")
+        let identity = try XCTUnwrap(PathIdentity.read(at: clone))
+
+        let decision = SweepPolicy.authorize(
+            externalRoot: home.url("X"),
+            resolvedPath: clone,
+            identity: identity,
+            home: home.root
+        )
+
+        let authorization = try XCTUnwrap(decision.authorization, "unexpected \(decision)")
+        XCTAssertEqual(authorization.identity, identity)
+        XCTAssertFalse(authorization.ancestors.isEmpty)
+    }
+
+    func testExternalRootItselfIsNeverATarget() throws {
+        let home = try TemporaryHome()
+        let root = try home.makeDirectory("X")
+        let identity = try XCTUnwrap(PathIdentity.read(at: root))
+
+        let decision = SweepPolicy.authorize(externalRoot: root, resolvedPath: root, identity: identity, home: home.root)
+
+        guard case .denied(.outsideRequestedRoot) = decision else {
+            return XCTFail("expected outsideRequestedRoot, got \(decision)")
+        }
+    }
+
+    func testExternalRootAnythingOutsideIsDenied() throws {
+        let home = try TemporaryHome()
+        try home.makeDirectory("X")
+        let elsewhere = try home.write("elsewhere/file.bin", contents: "x")
+        let identity = try XCTUnwrap(PathIdentity.read(at: elsewhere))
+
+        let decision = SweepPolicy.authorize(
+            externalRoot: home.url("X"),
+            resolvedPath: elsewhere,
+            identity: identity,
+            home: home.root
+        )
+
+        guard case .denied(.outsideRequestedRoot) = decision else {
+            return XCTFail("expected outsideRequestedRoot, got \(decision)")
+        }
+    }
+
+    func testExternalRootSymlinkedComponentIsRefused() throws {
+        let home = try TemporaryHome()
+        try home.makeDirectory("X")
+        let outside = try home.makeDirectory("elsewhere")
+        try Data("secret".utf8).write(to: outside.appending(path: "victim.bin"))
+        try FileManager.default.createSymbolicLink(at: home.url("X/link"), withDestinationURL: outside)
+
+        let through = home.url("X/link/victim.bin")
+        let identity = try XCTUnwrap(PathIdentity.read(at: through))
+
+        let decision = SweepPolicy.authorize(
+            externalRoot: home.url("X"),
+            resolvedPath: through,
+            identity: identity,
+            home: home.root
+        )
+
+        guard case .denied(.symlinkComponent) = decision else {
+            return XCTFail("expected symlinkComponent, got \(decision)")
+        }
+    }
+
+    func testExternalRootIdentityMismatchIsDenied() throws {
+        let home = try TemporaryHome()
+        let clone = try home.write("X/com.example.App.code_sign_clone/payload.bin", contents: "hi")
+
+        let decision = SweepPolicy.authorize(
+            externalRoot: home.url("X"),
+            resolvedPath: clone,
+            identity: PathIdentity(deviceID: 999_999, inode: 999_999),
+            home: home.root
+        )
+
+        guard case .denied(.identityMismatch) = decision else {
+            return XCTFail("expected identityMismatch, got \(decision)")
+        }
+    }
+
+    func testExternalRootProtectedAreaIsStillDenied() throws {
+        let home = try TemporaryHome()
+        let hidden = try home.makeDirectory("X/docs")
+        let file = hidden.appending(path: "taxes.pdf")
+        try Data("private".utf8).write(to: file)
+        try FileManager.default.createSymbolicLink(at: home.url("Documents"), withDestinationURL: hidden)
+
+        let identity = try XCTUnwrap(PathIdentity.read(at: file))
+        let decision = SweepPolicy.authorize(
+            externalRoot: home.url("X"),
+            resolvedPath: file,
+            identity: identity,
+            home: home.root
+        )
+
+        guard case .denied(.protectedArea(.documents, _)) = decision else {
+            return XCTFail("expected protectedArea(.documents), got \(decision)")
+        }
+    }
+
+    func testExternalRootThatDoesNotResolveIsDenied() throws {
+        let home = try TemporaryHome()   // no X directory created
+        let decision = SweepPolicy.authorize(
+            externalRoot: home.url("X"),
+            resolvedPath: home.url("X/anything"),
+            identity: PathIdentity(deviceID: 1, inode: 1),
+            home: home.root
+        )
+
+        guard case .denied(.malformedPath) = decision else {
+            return XCTFail("expected malformedPath, got \(decision)")
+        }
+    }
+
     func testEveryOperationRootHasCandidateLocations() {
         let home = FileManager.default.homeDirectoryForCurrentUser
         for root in SweepPolicy.OperationRoot.allCases {

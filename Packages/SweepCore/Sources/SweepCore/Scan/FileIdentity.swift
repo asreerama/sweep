@@ -82,6 +82,11 @@ public struct FileIdentity: Sendable, Hashable, Codable {
     /// `st_flags` — `uchg`, `schg`, `hidden`, `compressed`. A file that gained or lost an
     /// immutability flag since the scan is not the file the plan described.
     public let flags: UInt32
+    /// `st_uid`. Not part of ``isSameFile(as:)``/``isUnchanged(from:)`` (ownership is a
+    /// different axis than "is this the same, untouched object"); captured purely so the
+    /// rule-authorization pipeline can require a candidate be owned by the account running Sweep
+    /// before it authorizes anything against it (review finding #9's "verifies owner UID").
+    public let ownerUserID: UInt32
 
     public init(
         deviceID: UInt64,
@@ -92,7 +97,8 @@ public struct FileIdentity: Sendable, Hashable, Codable {
         modification: FileTimestamp,
         statusChange: FileTimestamp = .zero,
         size: Int64 = 0,
-        flags: UInt32 = 0
+        flags: UInt32 = 0,
+        ownerUserID: UInt32 = UInt32(getuid())
     ) {
         self.deviceID = deviceID
         self.inode = inode
@@ -103,6 +109,7 @@ public struct FileIdentity: Sendable, Hashable, Codable {
         self.statusChange = statusChange
         self.size = size
         self.flags = flags
+        self.ownerUserID = ownerUserID
     }
 
     /// Built straight from a `stat` taken with a symlink-free call (`lstat`, or `fstatat` with
@@ -118,7 +125,8 @@ public struct FileIdentity: Sendable, Hashable, Codable {
             modification: FileTimestamp(status.st_mtimespec),
             statusChange: FileTimestamp(status.st_ctimespec),
             size: Int64(status.st_size),
-            flags: status.st_flags
+            flags: status.st_flags,
+            ownerUserID: status.st_uid
         )
     }
 
@@ -162,7 +170,7 @@ public struct FileIdentity: Sendable, Hashable, Codable {
     // Explicit coding so a journal written before ctime/size/flags existed still replays: the
     // three new fields decode to their zero value rather than failing the whole record.
     private enum CodingKeys: String, CodingKey {
-        case deviceID, inode, volume, kind, linkCount, modification, statusChange, size, flags
+        case deviceID, inode, volume, kind, linkCount, modification, statusChange, size, flags, ownerUserID
     }
 
     public init(from decoder: any Decoder) throws {
@@ -176,6 +184,10 @@ public struct FileIdentity: Sendable, Hashable, Codable {
         self.statusChange = try container.decodeIfPresent(FileTimestamp.self, forKey: .statusChange) ?? .zero
         self.size = try container.decodeIfPresent(Int64.self, forKey: .size) ?? 0
         self.flags = try container.decodeIfPresent(UInt32.self, forKey: .flags) ?? 0
+        // A journal written before this field existed carries no ownership evidence at all: the
+        // sentinel is deliberately never a real uid, so an authorization check against a replayed
+        // pre-existing record fails closed instead of guessing the current user owned it.
+        self.ownerUserID = try container.decodeIfPresent(UInt32.self, forKey: .ownerUserID) ?? .max
     }
 
     /// Bytes actually occupied on disk, from `st_blocks`. Used as the fallback when the URL

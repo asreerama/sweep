@@ -24,8 +24,8 @@ public enum DeletionAction: String, Sendable, Codable, CaseIterable {
 /// The initializers are internal. A caller outside `SweepCore` cannot build one, and the type is
 /// deliberately *not* `Codable`, so it cannot be conjured by decoding either: a self-asserted
 /// `tier: .safe` on a caller-chosen path was a live-deletion capability (review finding #1).
-/// Fixtures go through ``FixtureExecution``; real plans will come from the rule-authorization
-/// pipeline in Gate 1.
+/// Fixtures go through ``FixtureExecution``; real (Gate 1, trash-only) plans go through
+/// ``AuthorizedCleanPlan`` via ``init(authorized:)`` below.
 public struct DeletionItem: Sendable, Equatable, Identifiable {
     public let url: URL
     public let identity: FileIdentity
@@ -66,6 +66,31 @@ public struct DeletionItem: Sendable, Equatable, Identifiable {
             tier: tier,
             allocatedSize: candidate.allocatedSize,
             ruleID: candidate.ruleID
+        )
+    }
+
+    /// The bridge review finding #9 asked for: the *only* way to build a `DeletionItem` from
+    /// something the rule-authorization pipeline produced. Tier and action come from
+    /// `plan.tier`/`plan.action`, which came from the catalog rule (or the code-sign-clone
+    /// detector's fixed policy) inside ``AuthorizedCleanPlan/authorize(ruleID:candidate:catalog:home:now:isRunning:)``
+    /// — never from anything a caller of `CleanService` supplied. `url` is the policy-normalized
+    /// path `SweepPolicy.authorize` resolved, not the (possibly differently-spelled) scan-time
+    /// URL, so the descriptor descent and the authorization decision always agree about which
+    /// real object is meant.
+    init(authorized plan: AuthorizedCleanPlan) {
+        // `DeletionAction(.commandPreview)` is `nil`; that action never reaches this bridge in
+        // practice (`CleanService`'s hard filter only calls this for `plan.action == .trash`),
+        // and falling back to `.trash` rather than force-unwrapping means a hypothetical future
+        // caller of this bridge can only ever end up doing something *less* destructive than
+        // asked, never more.
+        self.init(
+            url: plan.resolvedPath,
+            identity: plan.candidate.identity,
+            parentIdentity: plan.candidate.parentIdentity,
+            action: DeletionAction(plan.action) ?? .trash,
+            tier: plan.tier,
+            allocatedSize: plan.candidate.allocatedSize,
+            ruleID: plan.ruleID
         )
     }
 

@@ -22,6 +22,20 @@ public enum ItemFailureReason: String, Sendable, Codable, CaseIterable {
     case tierViolation
     case filesystemError
     case notAttempted
+    /// Gate 1's trash-only mode (PLAN §6): the item was not under any of the mode's authorized
+    /// roots. Distinct from ``outsideFixtureRoot``, which is fixture-mode's version of the same
+    /// idea, so the journal and UI can tell which mode refused an item.
+    case outsideAuthorizedRoot
+    /// The rule's action was not `trash` (it was `delete` or `commandPreview`), or the concrete
+    /// executor for this mode structurally has no delete verb at all. Gate 1 skips these with a
+    /// reported outcome rather than executing them (deliverable #2's hard filter).
+    case actionNotPermitted
+    /// ``AuthorizedCleanPlan`` construction failed for a reason other than a ``SweepPolicy``
+    /// denial: an unknown rule id, a candidate whose path did not actually match the rule it
+    /// claimed, an owner-uid mismatch, a too-young item, or a running app the rule requires be
+    /// quit first. Distinct from ``policyDenied`` so the two trust boundaries are never conflated
+    /// in the journal or the UI.
+    case notAuthorized
 }
 
 /// One item as recorded in the log: the identity is the record, the path is a label.
