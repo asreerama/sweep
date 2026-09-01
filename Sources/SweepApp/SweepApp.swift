@@ -12,6 +12,7 @@ struct SweepApp: App {
             RootView(state: state)
                 .frame(minWidth: 900, minHeight: 600)
                 .task { await SnapshotHarness.runIfRequested(state: state) }
+                .task { _ = QuarantineWatch.checkAtStartup() }
         }
         .defaultSize(width: 1060, height: 700)
 
