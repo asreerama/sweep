@@ -13,7 +13,8 @@ Sonnet agents + Fable review + Codex (raw `codex exec`, plugin wrapper broken) f
       re-check verdict GATE: HOLD -> fix loop 2 in flight (catalog byte-pinning, trashItem
       decoy verification via slot FD, journal append fail-closed, WAL trusted anchor +
       nlink==1, sealed SelectionBatch, identity-bound adapter, clone Codable removal,
-      quarantine scan gaps). Then Codex re-check 2 -> flip gate1Open -> M3.
+      quarantine scan gaps) -> verdicts 3,4 fixed surgically by Fable -> verdict 5
+      GATE: OPEN -> gate flipped, M3 SHIPPED (trash-only cleaning live in ~/Applications).
 - [ ] WAVE-P4: SweepHelper (SMAppService + XPC codesign validation, maintenance ops),
       Uninstaller screen + AppCleaner parity (Dock/window drop targets, SmartDelete watcher,
       quit-first), Developer + Homebrew screens, clone-detector UI wiring, menubar
