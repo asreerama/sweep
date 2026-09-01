@@ -367,3 +367,28 @@ final class TemporaryHome {
         return target
     }
 }
+
+extension PolicyTests {
+    /// P4-B finding: developer-group rules pattern from home, so `home` must resolve as a
+    /// `developerToolCaches` candidate root — and widening to home must NOT weaken the
+    /// protected-area denylist for operations under that root.
+    func testDeveloperToolCachesResolvesHomeButProtectedAreasStayDenied() throws {
+        let home = try TemporaryHome()
+        let npmCache = try home.write(".npm/_cacache/content-v2/blob", contents: "cache")
+        let identity = try XCTUnwrap(PathIdentity.read(at: npmCache))
+
+        let decision = SweepPolicy.authorize(
+            root: .developerToolCaches, resolvedPath: npmCache, identity: identity, home: home.root
+        )
+        XCTAssertNotNil(decision.authorization, "home-relative tool cache must authorize, got \(decision)")
+
+        let doc = try home.write("Documents/notes.txt", contents: "mine")
+        let docIdentity = try XCTUnwrap(PathIdentity.read(at: doc))
+        let docDecision = SweepPolicy.authorize(
+            root: .developerToolCaches, resolvedPath: doc, identity: docIdentity, home: home.root
+        )
+        guard case .denied(.protectedArea) = docDecision else {
+            return XCTFail("Documents must stay denied even under the home-resolved root, got \(docDecision)")
+        }
+    }
+}

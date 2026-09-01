@@ -9,6 +9,9 @@ if [ "${1:-}" != "--skip-app" ]; then
   swift build 2>&1 | tail -5
 fi
 
+echo "== swift test: root (SweepAppTests) =="
+swift test 2>&1 | tail -3
+
 for pkg in Packages/*/; do
   echo "== swift test: $pkg =="
   swift test --package-path "$pkg" 2>&1 | tail -8

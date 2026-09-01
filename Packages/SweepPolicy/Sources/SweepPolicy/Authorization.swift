@@ -124,9 +124,18 @@ extension SweepPolicy {
                 library.appending(path: "Developer/Xcode/tvOS DeviceSupport"),
             ]
         case .developerToolCaches:
-            // Narrow on purpose: real caches only. SwiftPM *configuration* and security state
-            // live in `~/.swiftpm` and are not reachable from here (review finding #13).
+            // The catalog's developer-group patterns are home-relative (`.npm/_cacache/*`,
+            // `.gradle/caches/*`, `Library/Application Support/Code/Cache/*`, ...), so `home`
+            // itself must be a candidate root — without it 15 of the 24 developer rules could
+            // never match anything (P4-B finding, 2026-09-01). Widening to `home` is bounded by
+            // the same layers that bound every root: rules are byte-pinned fixed relative globs
+            // (no `..`, no leading `/`), deny-wins exclusions, and `authorize()` still refuses
+            // every protected area (Documents, Desktop, CloudStorage, Mail, ...) on resolved
+            // identity regardless of root. SwiftPM *configuration* and security state in
+            // `~/.swiftpm` stay unreachable: no rule targets them (review finding #13) and the
+            // pattern vocabulary cannot escape its glob.
             return [
+                home,
                 library.appending(path: "Caches/org.swift.swiftpm"),
                 library.appending(path: "Developer/CoreSimulator/Caches"),
                 home.appending(path: ".cache/org.swift.swiftpm"),
