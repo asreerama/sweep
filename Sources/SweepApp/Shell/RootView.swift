@@ -39,6 +39,15 @@ struct RootView: View {
         .toolbar(removing: .title)
         .environment(state.scan)
         .environment(\.sweepAnimationsEnabled, visibility.isVisible)
+        // Drop target 1 of 2 (PLAN §3 module 5, AppCleaner parity): drag a `.app` anywhere onto
+        // the window. Drop target 2 (the Dock icon with Sweep closed) is
+        // `SweepAppDelegate.application(_:open:)` in `SweepApp.swift` — both land on
+        // `AppState.openUninstaller(forDroppedAppAt:)`.
+        .dropDestination(for: URL.self) { urls, _ in
+            guard let appURL = urls.first(where: { $0.pathExtension == "app" }) else { return false }
+            state.openUninstaller(forDroppedAppAt: appURL)
+            return true
+        }
     }
 
     @ViewBuilder
@@ -61,11 +70,11 @@ struct RootView: View {
         case .startupItems:
             StartupItemsScreen()
         case .uninstaller:
-            ModulePlaceholderScreen(destination: .uninstaller, arrival: "Matching engine is built; the preview screen arrives with the P3 module wave.")
+            UninstallerScreen(model: state.uninstall)
         case .developer:
-            ModulePlaceholderScreen(destination: .developer, arrival: "Arrives with the P3 module wave, over the same rules engine as System Junk.")
+            DeveloperScreen()
         case .homebrew:
-            ModulePlaceholderScreen(destination: .homebrew, arrival: "Arrives at M4, preview-first over typed brew adapters.")
+            HomebrewScreen()
         }
     }
 }

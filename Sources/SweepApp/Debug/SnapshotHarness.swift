@@ -91,9 +91,29 @@ enum SnapshotHarness {
             }
         }
 
+        // Toolbox (PLAN §3): Developer and Homebrew each own their scan/refresh state, not
+        // `state.scan`, so — unlike every capture above — nothing here triggers their data load;
+        // that happens on `SWEEP_TOOLBOX_AUTOSCAN` (Developer) and on appear (Homebrew, a fast
+        // read-mostly listing, see `HomebrewScreen`). The settle windows below are generous
+        // enough to catch a real scan/refresh landing when that env var is set for the run.
+        // Both real-data loads below can run against the real account (Developer's `userCaches`-
+        // rooted rules ignore `SWEEP_HOME` — `SweepPolicy.candidateRootURLs(for: .userCaches, ...)`
+        // always asks `FileManager` for the real cachesDirectory regardless of the `home` argument
+        // — and Homebrew always talks to the real `brew`), so these settle windows are generous
+        // rather than the ~1s the rest of this sequence uses.
         state.destination = .developer
-        await settle(seconds: 0.5)
-        await capture(window, to: output, "\(prefix)-06-toolbox-placeholder", state: state)
+        // Empirically the slowest step in this whole sequence on this machine: the `developer`
+        // catalog's `userCaches`/`developerToolCaches`-rooted rules walk this account's real,
+        // heavily-used `~/Library/Caches` and `~/Library/Developer/CoreSimulator/Caches` in full
+        // (unbounded depth, same as any other rule-catalog scan) — measured over a minute here,
+        // well past Smart Scan's own full-catalog walk moments earlier in this same run, most
+        // likely because CoreSimulator's cache tree dwarfs a plain app-cache walk file-for-file.
+        await settle(seconds: 90.0)
+        await capture(window, to: output, "\(prefix)-06-toolbox-developer", state: state)
+
+        state.destination = .homebrew
+        await settle(seconds: 20.0)
+        await capture(window, to: output, "\(prefix)-06b-toolbox-homebrew", state: state)
 
         // Minimum supported window: 900x600. Everything above must still fit here.
         state.destination = .smartScan

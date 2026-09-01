@@ -1,0 +1,190 @@
+import Foundation
+import Observation
+
+enum HomebrewLoadState: Equatable {
+    case idle
+    case loading
+    case unavailable
+    case loaded
+    case failed(String)
+}
+
+/// One command the screen has previewed and is waiting on the user to confirm or cancel.
+///
+/// Structural preview-first (PLAN §3 Toolbox contract + task spec "all preview-first"): there is
+/// no code path in `HomebrewModel` that runs `cleanup`/`autoremove`/`upgrade` without first
+/// constructing one of these from a real preview fetch — `confirmPendingAction()` only ever acts
+/// on `pendingAction`, and the only place that gets set is after `previewText` has already come
+/// back from the gateway.
+struct HomebrewPendingAction: Identifiable {
+    enum Kind {
+        case cleanup
+        case autoremove
+        case upgrade(BrewPackage)
+    }
+
+    let id = UUID()
+    let kind: Kind
+    let title: String
+    /// `brew cleanup --prune=all --dry-run` / `brew autoremove --dry-run`'s real stdout for
+    /// cleanup/autoremove; the literal command line about to run for a per-item upgrade (brew has
+    /// no upgrade dry-run, but the confirm sheet already states the exact version jump from data
+    /// already on screen — see `HomebrewModel.requestUpgrade`).
+    let previewText: String
+}
+
+/// Screen state for Homebrew (module 9, PLAN §3): a typed GUI over `brew`, read-mostly, every
+/// mutation preview-first. Owns exactly one `BrewGateway` call at a time — `isRunningAction` is
+/// true for the whole span of a mutating command, which is what keeps the confirm flow from ever
+/// overlapping a second command underneath it.
+@MainActor
+@Observable
+final class HomebrewModel {
+    private(set) var loadState: HomebrewLoadState = .idle
+    private(set) var snapshot: BrewSnapshot = .empty
+    /// Raw stdout/stderr from every command this session has run, newest last — the "quiet
+    /// console disclosure" the task spec asks for. Never cleared automatically: a failed cleanup
+    /// from five minutes ago is still worth scrolling back to.
+    private(set) var consoleLog = ""
+    private(set) var isRunningAction = false
+
+    var pendingAction: HomebrewPendingAction?
+    /// True only once `pendingAction`'s preview text actually came back from the gateway — the
+    /// confirm sheet's button stays disabled until then, so a slow preview fetch can never be
+    /// raced into an unpreviewed confirm.
+    private(set) var isPendingActionReady = false
+
+    private let gateway: any BrewGateway
+
+    init(gateway: any BrewGateway = HomebrewModel.defaultGateway()) {
+        self.gateway = gateway
+    }
+
+    /// `SWEEP_TOOLBOX_BREW_FIXTURE=1` swaps in realistic static data (task spec: "fixture data
+    /// acceptable for Homebrew if machine brew is slow") — same env-var-gated pattern as
+    /// `SWEEP_UI_STRESS`/`SWEEP_HOME` elsewhere in this app, never engaged in a normal launch.
+    static func defaultGateway() -> any BrewGateway {
+        if ProcessInfo.processInfo.environment["SWEEP_TOOLBOX_BREW_FIXTURE"] != nil {
+            return FixtureBrewGateway()
+        }
+        return RealBrewGateway()
+    }
+
+    var isAvailable: Bool { gateway.isAvailable }
+
+    func refresh() async {
+        guard gateway.isAvailable else {
+            loadState = .unavailable
+            snapshot = .empty
+            return
+        }
+        loadState = .loading
+        do {
+            snapshot = try await gateway.snapshot()
+            loadState = .loaded
+        } catch {
+            loadState = .failed(String(describing: error))
+        }
+    }
+
+    // MARK: - Preview-first actions
+
+    func requestCleanup() {
+        beginPreview(kind: .cleanup, title: "Clean Homebrew Cache")
+        Task { await loadPreview(kind: .cleanup, title: "Clean Homebrew Cache") {
+            try await self.gateway.cleanupPreview()
+        } }
+    }
+
+    func requestAutoremove() {
+        beginPreview(kind: .autoremove, title: "Remove Unused Dependencies")
+        Task { await loadPreview(kind: .autoremove, title: "Remove Unused Dependencies") {
+            try await self.gateway.autoremovePreview()
+        } }
+    }
+
+    /// No `brew upgrade --dry-run` exists, so there is nothing to fetch here — but the sheet is
+    /// still shown before anything runs, and its content (the exact version jump) is data this
+    /// screen already has on hand from the last refresh, which is what "preview" means for this
+    /// one action.
+    func requestUpgrade(_ package: BrewPackage) {
+        let jump = package.latestVersion.map { "\(package.installedVersion ?? "current") \u{2192} \($0)" }
+            ?? "the latest version"
+        let command = "brew upgrade \(package.isCask ? "--cask " : "")\(package.name)"
+        pendingAction = HomebrewPendingAction(
+            kind: .upgrade(package),
+            title: "Upgrade \(package.name)",
+            previewText: "Will upgrade \(package.name): \(jump)\n\n\(command)"
+        )
+        isPendingActionReady = true
+    }
+
+    /// Sets the "Checking…" placeholder synchronously, before the async fetch even starts, so
+    /// the confirm sheet appears the instant the user taps Cleanup/Autoremove rather than after a
+    /// runloop hop — and so a caller that checks `pendingAction` right after calling
+    /// `requestCleanup()`/`requestAutoremove()` (this screen's own `.sheet(item:)`, and
+    /// `HomebrewModelTests`) never observes a window where nothing is pending yet.
+    private func beginPreview(kind: HomebrewPendingAction.Kind, title: String) {
+        pendingAction = HomebrewPendingAction(kind: kind, title: title, previewText: "Checking\u{2026}")
+        isPendingActionReady = false
+    }
+
+    private func loadPreview(kind: HomebrewPendingAction.Kind, title: String, fetch: () async throws -> String) async {
+        do {
+            let text = try await fetch()
+            // A rescan/cancel could have raced ahead while the preview was in flight; only apply
+            // it if the user is still looking at the same pending action.
+            guard pendingAction?.kind.matches(kind) == true else { return }
+            pendingAction = HomebrewPendingAction(kind: kind, title: title, previewText: text)
+            isPendingActionReady = true
+        } catch {
+            guard pendingAction?.kind.matches(kind) == true else { return }
+            pendingAction = nil
+            appendConsole("\(title) preview failed: \(String(describing: error))")
+        }
+    }
+
+    func cancelPendingAction() {
+        pendingAction = nil
+        isPendingActionReady = false
+    }
+
+    func confirmPendingAction() {
+        guard let action = pendingAction, isPendingActionReady, !isRunningAction else { return }
+        pendingAction = nil
+        isPendingActionReady = false
+        isRunningAction = true
+        Task {
+            do {
+                let output: String
+                switch action.kind {
+                case .cleanup: output = try await gateway.cleanup()
+                case .autoremove: output = try await gateway.autoremove()
+                case .upgrade(let package): output = try await gateway.upgrade(package)
+                }
+                appendConsole("$ \(action.title)\n\(output.isEmpty ? "(no output)" : output)")
+            } catch {
+                appendConsole("$ \(action.title)\n\(String(describing: error))")
+            }
+            isRunningAction = false
+            await refresh()
+        }
+    }
+
+    private func appendConsole(_ text: String) {
+        consoleLog = consoleLog.isEmpty ? text : consoleLog + "\n\n" + text
+    }
+}
+
+extension HomebrewPendingAction.Kind {
+    /// Same-action identity check (cleanup/autoremove are singletons; an upgrade matches only the
+    /// same package) — used to guard a preview fetch that raced against the user cancelling or
+    /// requesting a different action while it was in flight.
+    func matches(_ other: HomebrewPendingAction.Kind) -> Bool {
+        switch (self, other) {
+        case (.cleanup, .cleanup), (.autoremove, .autoremove): true
+        case (.upgrade(let lhs), .upgrade(let rhs)): lhs.id == rhs.id
+        default: false
+        }
+    }
+}
