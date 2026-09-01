@@ -17,6 +17,8 @@ public struct TierBadge: View {
 
     public var body: some View {
         if tier != .safe || showsSafe {
+            // Soft tinted pill (Palette v2): a 12% hue wash, never a solid fill, and no border —
+            // the wash alone is enough separation against the card/ground tokens it sits on.
             Text(tier.label.uppercased())
                 .font(SweepFont.badge)
                 .tracking(0.5)
@@ -25,11 +27,7 @@ public struct TierBadge: View {
                 .padding(.vertical, 2)
                 .background(
                     RoundedRectangle(cornerRadius: 4, style: .continuous)
-                        .fill(tint.opacity(0.14))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 4, style: .continuous)
-                        .strokeBorder(tint.opacity(0.28), lineWidth: 0.5)
+                        .fill(tint.opacity(0.12))
                 )
                 .accessibilityLabel("\(tier.label) tier")
         }

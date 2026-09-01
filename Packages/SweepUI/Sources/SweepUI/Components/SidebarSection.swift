@@ -76,10 +76,7 @@ public struct SidebarRow: View {
     public var body: some View {
         Button(action: action) {
             HStack(spacing: SweepTokens.s2) {
-                Image(systemName: symbol)
-                    .font(.system(size: tier.glyphSize, weight: .regular))
-                    .frame(width: tier.glyphWidth, alignment: .center)
-                    .foregroundStyle(glyphStyle)
+                icon
                 Text(title)
                     .font(tier.font)
                     .foregroundStyle(titleStyle)
@@ -105,6 +102,22 @@ public struct SidebarRow: View {
         .padding(.horizontal, tier.indent)
         .onHover { isHovering = $0 }
         .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
+    }
+
+    /// Primary rows get the colored "System Settings" badge (PLAN §5 volume-raise); Toolbox
+    /// stays the plain hierarchical glyph it always was — advanced, quieter, out of the way, the
+    /// same contract that keeps Toolbox rows a size down and a shade back.
+    @ViewBuilder
+    private var icon: some View {
+        if tier == .primary {
+            ModuleIcon(symbol: symbol, diameter: tier.glyphWidth)
+        } else {
+            Image(systemName: symbol)
+                .font(.system(size: tier.glyphSize, weight: .regular))
+                .symbolRenderingMode(.hierarchical)
+                .frame(width: tier.glyphWidth, alignment: .center)
+                .foregroundStyle(glyphStyle)
+        }
     }
 
     private var background: AnyShapeStyle {

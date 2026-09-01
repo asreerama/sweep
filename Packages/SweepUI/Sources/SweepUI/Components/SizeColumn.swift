@@ -27,6 +27,7 @@ public struct SizeColumn: View {
     public var body: some View {
         HStack(spacing: 4) {
             Text(value)
+                .contentTransition(.numericText())
                 .frame(width: SweepTokens.sizeValueWidth, alignment: .trailing)
             Text(unit)
                 .frame(width: SweepTokens.sizeUnitWidth, alignment: .leading)

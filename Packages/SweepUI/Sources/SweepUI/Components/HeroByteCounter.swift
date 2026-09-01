@@ -44,7 +44,8 @@ public struct HeroByteCounter: View {
                     .font(SweepFont.hero(size))
                     .tracking(SweepFont.heroTracking(size))
                     .monospacedDigit()
-                    .foregroundStyle(.primary)
+                    // Palette v2: one step off pure black/white, not the platform label color.
+                    .foregroundStyle(SweepTokens.heroInk)
                     .contentTransition(reduceMotion ? .identity : .numericText(value: Double(byteCount)))
                 Text(parts.unit)
                     .font(SweepFont.heroUnit(size * 0.26))

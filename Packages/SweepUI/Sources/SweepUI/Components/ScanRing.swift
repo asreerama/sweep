@@ -37,7 +37,15 @@ public struct ScanRing<Content: View>: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.sweepAnimationsEnabled) private var animationsEnabled
-    @State private var isTurning = false
+    /// Monotonically increasing — never reset to 0 — so stopping never has to snap back across a
+    /// discontinuity. A `repeatForever` rotation (the original approach) cannot do this: SwiftUI
+    /// gives no way to read a repeating animation's live interpolated value, so there is nothing
+    /// to decelerate *from*. Bumping a real, ever-growing angle by exactly 360° every
+    /// `sweepPeriod` looks identical while spinning, and leaves a genuine current value to ease
+    /// out from when the scan lands (PLAN §5, "Motion continuity": no snap, decelerate to rest).
+    @State private var rotationAngle: Double = 0
+    @State private var spinTask: Task<Void, Never>?
+    @State private var pulseScale: CGFloat = 1
 
     public init(
         state: ScanRingState,
@@ -71,9 +79,13 @@ public struct ScanRing<Content: View>: View {
         .frame(width: diameter, height: diameter)
         .animation(reduceMotion ? SweepMotion.crossfade : SweepMotion.ring, value: state)
         .onAppear { syncTurning() }
-        .onChange(of: state) { _, _ in syncTurning() }
+        .onChange(of: state) { _, _ in
+            syncTurning()
+            pulseOnCompletion()
+        }
         .onChange(of: animationsEnabled) { _, _ in syncTurning() }
         .onChange(of: reduceMotion) { _, _ in syncTurning() }
+        .onDisappear { spinTask?.cancel() }
         .accessibilityHidden(true)
     }
 
@@ -96,13 +108,7 @@ public struct ScanRing<Content: View>: View {
                 ),
                 style: StrokeStyle(lineWidth: sweepWidth, lineCap: .round)
             )
-            .rotationEffect(.degrees(isTurning ? 360 : 0))
-            .animation(
-                isTurning
-                    ? .linear(duration: SweepMotion.sweepPeriod).repeatForever(autoreverses: false)
-                    : nil,
-                value: isTurning
-            )
+            .rotationEffect(.degrees(rotationAngle))
             .scaleEffect(state == .complete ? 0.86 : 1)
             .opacity(state == .scanning ? 1 : 0)
     }
@@ -115,22 +121,77 @@ public struct ScanRing<Content: View>: View {
             .opacity(state == .scanning ? 1 : 0)
     }
 
-    /// Draws itself clockwise from twelve o'clock when the scan lands.
+    /// Draws itself clockwise from twelve o'clock when the scan lands. An angular gradient sweep
+    /// (PLAN §5 volume-raise) rather than a flat stroke — still one hue family, just given some
+    /// depth around the ring instead of reading as a single flat line.
+    ///
+    /// Completion choreography (PLAN §5, "Motion continuity"): the trim starts after
+    /// `SweepMotion.decelerationDuration`, the same span `stopSpin(decelerate:)` gives the comet
+    /// to coast to a stop, so the circle only starts closing once the turn has actually settled
+    /// rather than closing underneath a comet still visibly spinning.
     private var settledRing: some View {
         Circle()
             .inset(by: sweepWidth / 2)
             .trim(from: 0, to: state == .complete ? 1 : 0)
-            .stroke(SweepTokens.accent, style: StrokeStyle(lineWidth: sweepWidth, lineCap: .round))
+            .stroke(SweepTokens.ringSweep, style: StrokeStyle(lineWidth: sweepWidth, lineCap: .round))
             .rotationEffect(.degrees(-90))
-            .animation(reduceMotion ? SweepMotion.crossfade : SweepMotion.ringTrim, value: state)
+            .scaleEffect(pulseScale)
+            .animation(
+                reduceMotion ? SweepMotion.crossfade : SweepMotion.ringTrim.delay(SweepMotion.decelerationDuration),
+                value: state
+            )
     }
 
     private func syncTurning() {
         let shouldTurn = state == .scanning && !reduceMotion && animationsEnabled
-        guard shouldTurn != isTurning else { return }
-        // Assigning outside `withAnimation` lets the `.animation(_:value:)` above own the
-        // timing curve: a repeating linear turn on the way in, an instant stop on the way out.
-        isTurning = shouldTurn
+        if shouldTurn {
+            startSpin()
+        } else {
+            stopSpin(decelerate: state == .complete)
+        }
+    }
+
+    /// One `sweepPeriod`-long linear leg per loop, each one bumping `rotationAngle` by exactly
+    /// one full turn. Indistinguishable from the old `repeatForever` while it runs, but every leg
+    /// leaves a real value behind for ``stopSpin(decelerate:)`` to ease out from.
+    private func startSpin() {
+        guard spinTask == nil else { return }
+        spinTask = Task { @MainActor in
+            while !Task.isCancelled {
+                withAnimation(.linear(duration: SweepMotion.sweepPeriod)) {
+                    rotationAngle += 360
+                }
+                try? await Task.sleep(for: .seconds(SweepMotion.sweepPeriod))
+            }
+        }
+    }
+
+    /// PLAN §5, "Motion continuity": the turn decelerates to rest instead of snapping to 0.
+    /// Coasts forward — never backward, which would read as the sweep reversing — to the next
+    /// multiple of 360° on an ease-out curve, so it always comes to rest at the same orientation
+    /// the settled ring draws from.
+    private func stopSpin(decelerate: Bool) {
+        spinTask?.cancel()
+        spinTask = nil
+        guard decelerate, !reduceMotion else { return }
+        let remainder = rotationAngle.truncatingRemainder(dividingBy: 360)
+        let toNextStop = remainder <= 0.01 ? 0 : (360 - remainder)
+        guard toNextStop > 0 else { return }
+        withAnimation(.easeOut(duration: SweepMotion.decelerationDuration)) {
+            rotationAngle += toNextStop
+        }
+    }
+
+    /// One completion pulse (PLAN §5 volume-raise): the settled ring breathes out and back once
+    /// when the scan lands, layered on top of the trim-in rather than replacing it. Skipped
+    /// entirely under Reduce Motion, same as every other kinetic flourish here.
+    private func pulseOnCompletion() {
+        guard state == .complete, !reduceMotion else { return }
+        withAnimation(SweepMotion.completionPulse) { pulseScale = 1.05 }
+        Task {
+            try? await Task.sleep(for: .milliseconds(220))
+            withAnimation(SweepMotion.completionPulse) { pulseScale = 1.0 }
+        }
     }
 }
 

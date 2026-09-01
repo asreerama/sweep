@@ -49,9 +49,15 @@ struct ScanOutcome: Sendable {
     let duration: TimeInterval
     let cancelled: Bool
 
+    /// The catalog this scan ran against — retained so a later Clean request can be
+    /// re-authorized by `CleanAdapter.swift` against the exact rules that produced these items,
+    /// never a catalog re-read from disk that might have changed underneath the scan.
+    let catalog: RuleCatalog
+
     static let empty = ScanOutcome(
         summaryGroups: [], ruleGroups: [], claimedBytes: 0, claimedFiles: 0,
-        filesExamined: 0, skipped: [], duration: 0, cancelled: false
+        filesExamined: 0, skipped: [], duration: 0, cancelled: false,
+        catalog: RuleCatalog(schemaVersion: RuleCatalog.supportedSchemaVersion, rules: [])
     )
 }
 
@@ -225,7 +231,8 @@ enum ScanService {
             filesExamined: filesExamined,
             skipped: dedupeSkipped(skipped),
             duration: Date().timeIntervalSince(started),
-            cancelled: cancelled
+            cancelled: cancelled,
+            catalog: catalog
         )
     }
 
@@ -430,6 +437,27 @@ enum ScanService {
         case .uninstall: "Uninstaller"
         case .maintenance: "Maintenance"
         }
+    }
+
+    /// Plain-language line under a Smart Scan category row (PLAN §5 volume-raise) — what this
+    /// category actually is, not the rule-engine name for it. One per `RuleGroup`, since that is
+    /// the granularity Smart Scan's summary shows; a per-app line ("Spotify's temporary files")
+    /// would need copy for every rule in the catalog, which lives in SweepCore, not here.
+    static func friendlySubtitle(for group: RuleGroup) -> String {
+        switch group {
+        case .systemJunk: "Caches, logs and crash reports quietly piling up in the background."
+        case .developer: "Old build output and simulator data Xcode never clears on its own."
+        case .homebrew: "Downloaded formula and cask archives left behind after installing."
+        case .largeFiles: "Big, old files taking up space you've probably forgotten about."
+        case .uninstall: "Leftovers from apps that are already gone."
+        case .maintenance: "Small housekeeping tasks that keep things running smoothly."
+        }
+    }
+
+    /// `group.id` for a Smart Scan summary group is the `RuleGroup`'s raw value (`buildGroups`,
+    /// below) — this is the lookup a screen actually has in hand.
+    static func friendlySubtitle(forSummaryGroupID id: String) -> String? {
+        RuleGroup(rawValue: id).map(friendlySubtitle(for:))
     }
 
     static func symbol(for group: RuleGroup) -> String {

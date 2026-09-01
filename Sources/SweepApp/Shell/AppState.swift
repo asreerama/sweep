@@ -12,6 +12,11 @@ final class AppState {
     let scan: ScanModel
     let environment: ScanEnvironment
 
+    /// Which state `CleanFlowPreviewScreen` (Toolbox debug harness) shows. Lifted out to
+    /// `AppState`, same reasoning as `destination`: the snapshot harness drives it externally
+    /// without the screen growing a debug hook of its own.
+    var cleanFlowPreviewPhase: CleanFlowPreviewPhase = .confirm
+
     init(environment: ScanEnvironment) {
         self.environment = environment
         self.scan = ScanModel(environment: environment)

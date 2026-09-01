@@ -26,6 +26,9 @@ public struct InventoryRow: View {
     private let indented: Bool
 
     @State private var isHovering = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var liftsOnHover: Bool { emphasis == .summary }
 
     public init(
         symbol: String,
@@ -82,10 +85,7 @@ public struct InventoryRow: View {
                 }
             }
 
-            Image(systemName: symbol)
-                .font(.system(size: emphasis == .summary ? 14 : 12, weight: .regular))
-                .foregroundStyle(.secondary)
-                .frame(width: 17, alignment: .center)
+            icon
 
             VStack(alignment: .leading, spacing: 0) {
                 Text(title)
@@ -122,10 +122,35 @@ public struct InventoryRow: View {
                 .fill(isHovering ? AnyShapeStyle(.fill.quaternary) : AnyShapeStyle(.clear))
         }
         .padding(.horizontal, SweepTokens.s1 + 2)
+        // Hover-lift (PLAN §5 volume-raise), summary rows only: a `System Junk`-style item row
+        // repeats thousands of times and a lift on every hover would be noise at that scale, but
+        // Smart Scan's handful of category cards can afford a little life.
+        .scaleEffect(liftsOnHover && isHovering ? 1.012 : 1)
+        .shadow(
+            color: .black.opacity(liftsOnHover && isHovering ? 0.1 : 0),
+            radius: liftsOnHover && isHovering ? 6 : 0, y: liftsOnHover && isHovering ? 2 : 0
+        )
+        .animation(reduceMotion ? SweepMotion.crossfade : SweepMotion.row, value: isHovering)
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(title), \(sizeValue) \(sizeUnit), \(tier.label) tier")
+    }
+
+    /// Summary rows are module rows (Smart Scan's "System Junk", "Developer"...) and get the same
+    /// hue badge the sidebar uses. Standard rows are individual items — hierarchy there is still
+    /// weight and space, not color, so they stay a plain hierarchical-rendered glyph.
+    @ViewBuilder
+    private var icon: some View {
+        if emphasis == .summary {
+            ModuleIcon(symbol: symbol, diameter: 22)
+        } else {
+            Image(systemName: symbol)
+                .font(.system(size: 12, weight: .regular))
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(.secondary)
+                .frame(width: 17, alignment: .center)
+        }
     }
 }
 

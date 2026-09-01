@@ -9,7 +9,10 @@ struct SystemJunkScreen: View {
     @Environment(ScanModel.self) private var scan
 
     @State private var query = ""
-    @State private var collapsed: Set<String> = []
+    @State private var expansion = InventoryExpansion()
+    /// Non-nil while the Clean flow's sheet is up. See `SmartScanScreen` for why this is built
+    /// fresh per press rather than kept around.
+    @State private var cleanFlow: CleanFlowModel?
 
     private var visibleGroups: [InventoryGroup] {
         InventoryAggregate.filter(scan.ruleGroups, query: query)
@@ -47,6 +50,11 @@ struct SystemJunkScreen: View {
             // user checks last.
             footer
         }
+        // Re-applies the row budget every time a scan lands a new rule-group set: System Junk
+        // groups by rule (often dozens of them), and the budget has to hold from the first frame
+        // a scan produces — not only after the user opens or pages a group (PLAN §6b).
+        .onAppear { expansion = .initial(for: scan.ruleGroups) }
+        .onChange(of: scan.ruleGroups) { _, newValue in expansion = .initial(for: newValue) }
     }
 
     @ViewBuilder
@@ -55,8 +63,8 @@ struct SystemJunkScreen: View {
         case .idle:
             InventoryEmptyState(
                 symbol: "trash",
-                title: "No scan yet",
-                message: "Run a scan to list everything the rule catalog claims under the caches, logs and developer roots it can read."
+                title: "Ready when you are",
+                message: "Run a scan to see everything the rule catalog can find in your caches, logs and developer roots."
             )
         case .scanning:
             scanningState
@@ -66,13 +74,13 @@ struct SystemJunkScreen: View {
             if visibleGroups.isEmpty {
                 InventoryEmptyState(
                     symbol: query.isEmpty ? "checkmark.circle" : "magnifyingglass",
-                    title: query.isEmpty ? "Nothing to clean" : "No matches",
+                    title: query.isEmpty ? "Nothing here needs cleaning" : "No matches",
                     message: query.isEmpty
                         ? "No rule claimed anything under the roots this build can read."
                         : "Nothing in the results matches \u{201C}\(query)\u{201D}."
                 )
             } else {
-                InventoryList(groups: visibleGroups, selection: scan.selection, collapsed: $collapsed)
+                InventoryList(groups: visibleGroups, selection: scan.selection, expansion: $expansion)
             }
         }
     }
@@ -95,12 +103,14 @@ struct SystemJunkScreen: View {
         VStack(spacing: 0) {
             Divider()
             HStack(spacing: SweepTokens.s3) {
-                Button("Clean") {}
+                Button("Clean") { startClean() }
                     .buttonStyle(.sweepPrimary(minWidth: 108))
-                    .disabled(true)
-                    .help("Cleaning arrives at Gate 1")
-                    .accessibilityHint("Disabled. Cleaning arrives at Gate 1.")
-                GateNotice("Cleaning arrives at Gate 1")
+                    .disabled(!CleanAdapter.isEnabled || scan.selection.selectedCount(in: scan.ruleGroups) == 0)
+                    .help(CleanAdapter.isEnabled ? "Move the selected items to Trash" : "Cleaning arrives at Gate 1")
+                    .accessibilityHint(CleanAdapter.isEnabled ? "" : "Disabled. Cleaning arrives at Gate 1.")
+                if !CleanAdapter.isEnabled {
+                    GateNotice("Cleaning arrives at Gate 1")
+                }
                 Spacer(minLength: SweepTokens.s3)
                 if scan.phase == .results, !scan.ruleGroups.isEmpty {
                     Text(selectionSummary)
@@ -119,6 +129,21 @@ struct SystemJunkScreen: View {
             }
         }
         .background(.bar)
+        .sheet(isPresented: Binding(get: { cleanFlow != nil }, set: { if !$0 { cleanFlow = nil } })) {
+            if let cleanFlow {
+                CleanFlowContainer(model: cleanFlow) { self.cleanFlow = nil }
+            }
+        }
+    }
+
+    private func startClean() {
+        let (summary, items) = scan.systemJunkCleanRequest()
+        guard let context = scan.cleanExecutionContext() else { return }
+        cleanFlow = CleanFlowModel(
+            requestSummary: summary,
+            itemIDs: Set(items.map(\.id)),
+            backend: CleanAdapter(context: context, items: items)
+        )
     }
 
     private var selectionSummary: String {

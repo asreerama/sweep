@@ -3,6 +3,7 @@ import SweepUI
 
 struct RootView: View {
     @Bindable var state: AppState
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var visibility = WindowVisibility()
 
@@ -14,9 +15,26 @@ struct RootView: View {
             )
             .navigationSplitViewColumnWidth(min: 196, ideal: 216, max: 260)
         } detail: {
+            // Module navigation (PLAN §5, "Motion continuity"): a crossfade with a slight
+            // vertical drift, never a hard swap. `.id` gives each destination's content its own
+            // identity so the transition actually has an insert/remove to animate, rather than
+            // SwiftUI diffing two same-shaped views in place.
             detail
+                .id(state.destination)
+                .transition(
+                    .opacity.combined(with: .offset(y: 6))
+                )
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                // Palette v2's tinted ground, set explicitly rather than left to the system
+                // default: `Color(nsColor: .windowBackgroundColor)` (what an unset background
+                // otherwise resolves to) is an `NSColor` bridge, and — like every other `NSColor`
+                // bridge tried here — does not reliably re-resolve for a forced dark appearance
+                // inside this app's offscreen screenshot harness, even though it works correctly
+                // in a normally-composited window. `SweepTokens.ground` sidesteps that whole
+                // class of bridge (see its doc comment) and is correct in both places.
+                .background(SweepTokens.ground)
         }
+        .animation(reduceMotion ? SweepMotion.crossfade : SweepMotion.layout, value: state.destination)
         .navigationTitle(state.destination.title)
         .environment(state.scan)
         .environment(\.sweepAnimationsEnabled, visibility.isVisible)
@@ -31,14 +49,16 @@ struct RootView: View {
             SystemJunkScreen()
         case .listStress:
             ListStressScreen(rowCount: state.environment.stressRowCount)
+        case .cleanFlowPreview:
+            CleanFlowPreviewScreen(phase: $state.cleanFlowPreviewPhase)
         case .largeFiles:
-            ModulePlaceholderScreen(destination: .largeFiles, arrival: "Arrives with the P3 module wave.")
+            LargeOldFilesScreen()
         case .memory:
-            ModulePlaceholderScreen(destination: .memory, arrival: "Arrives at M4, on the honest-metrics design in PLAN §3.")
+            MemoryScreen()
         case .maintenance:
             ModulePlaceholderScreen(destination: .maintenance, arrival: "Arrives at M4, behind typed command adapters.")
         case .startupItems:
-            ModulePlaceholderScreen(destination: .startupItems, arrival: "Arrives once the public-API boundary is prototyped.")
+            StartupItemsScreen()
         case .uninstaller:
             ModulePlaceholderScreen(destination: .uninstaller, arrival: "Matching engine is built; the preview screen arrives with the P3 module wave.")
         case .developer:

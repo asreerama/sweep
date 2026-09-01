@@ -54,7 +54,13 @@ enum SnapshotHarness {
         await capture(window, to: output, "\(prefix)-02-smart-scan-scanning", state: state)
 
         await waitForResults(state.scan, timeout: 600)
-        await settle(seconds: 1.0)
+        // Motion continuity evidence (PLAN §5): the model already says `.results`, but
+        // `SmartScanScreen` holds the ring in its scanning slot for `SweepMotion
+        // .resultsMorphDelay` while it decelerates and closes. A short settle here catches that
+        // in-flight frame; the longer settle below waits past it for the fully morphed layout.
+        await settle(seconds: 0.35)
+        await capture(window, to: output, "\(prefix)-02b-smart-scan-settling-mid-transition", state: state)
+        await settle(seconds: 1.4)
         await capture(window, to: output, "\(prefix)-03-smart-scan-results", state: state)
 
         state.destination = .systemJunk
@@ -66,9 +72,23 @@ enum SnapshotHarness {
             state.destination = .listStress
             await settle(seconds: 2.0)
             await capture(window, to: output, "\(prefix)-05-list-stress", state: state)
+            // PLAN §6b evidence: the full window, native titlebar included, at whatever row
+            // count `SWEEP_UI_STRESS` requested. Bounded expansion keeps rendered rows (and so
+            // scroll-content height) flat regardless of this number — this is the screenshot
+            // that shows the titlebar is not corrupted at that row count.
+            await captureFullWindowForTitlebarEvidence(
+                window, to: output, "\(prefix)-05b-titlebar-evidence-\(state.environment.stressRowCount)rows"
+            )
             let after = residentBytes()
             print("stress: \(state.environment.stressRowCount)-row inventory resident \(before / 1_048_576) MB -> \(after / 1_048_576) MB")
             await measureScroll(in: window, rows: state.environment.stressRowCount)
+
+            state.destination = .cleanFlowPreview
+            for phase in CleanFlowPreviewPhase.allCases {
+                state.cleanFlowPreviewPhase = phase
+                await settle(seconds: 0.5)
+                await capture(window, to: output, "\(prefix)-05c-clean-flow-\(phase.rawValue)", state: state)
+            }
         }
 
         state.destination = .developer
@@ -128,11 +148,68 @@ enum SnapshotHarness {
 
     private static func capture(_ window: NSWindow, to directory: URL, _ name: String, state: AppState) async {
         guard let view = window.contentView else { return }
-        view.displayIfNeeded()
+        // Forced appearance spans the display pass too, not just the render pass below: a
+        // dynamic `NSColor` inside a SwiftUI `Color` can resolve as early as `displayIfNeeded()`
+        // evaluates view bodies, not only when `CALayer.render(in:)` walks the finished layers.
+        withForcedAppearance { view.displayIfNeeded() }
         let url = directory.appending(path: "\(name).png")
         guard let data = render(view, scale: window.backingScaleFactor, state: state) else { return }
         try? data.write(to: url)
         print("snapshot: \(url.lastPathComponent)  resident=\(residentBytes() / 1_048_576) MB")
+    }
+
+    /// Renders the *whole* window — including the native titlebar strip above `contentView`,
+    /// where PLAN §6b's corruption actually shows up — rather than just the content area.
+    ///
+    /// `window.contentView`'s superview is AppKit's private theme-frame view, which owns the
+    /// traffic lights and title text; capturing its layer instead of `contentView`'s is the only
+    /// way an offscreen render can show whether the titlebar itself is intact. Skips the sidebar
+    /// overlay compositing `capture(_:to:_:state:)` does for the shipping screenshots: this exists
+    /// to answer one question — is the titlebar corrupted — not to look production-ready.
+    private static func captureFullWindowForTitlebarEvidence(
+        _ window: NSWindow, to directory: URL, _ name: String
+    ) async {
+        guard let content = window.contentView else { return }
+        let root = content.superview ?? content
+        withForcedAppearance { root.displayIfNeeded() }
+        guard let layer = root.layer else { return }
+        let scale = window.backingScaleFactor
+        let size = root.bounds.size
+        let pixelWidth = Int(size.width * scale)
+        let pixelHeight = Int(size.height * scale)
+        guard pixelWidth > 0, pixelHeight > 0 else { return }
+        guard let context = CGContext(
+            data: nil,
+            width: pixelWidth,
+            height: pixelHeight,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpace(name: CGColorSpace.sRGB)!,
+            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+        ) else { return }
+        // `contentView` (used by `render(_:scale:state:)` above) is flipped, so that function's
+        // fixed flip transform is correct there. AppKit's private theme-frame view — `root` here
+        // — is not, and applying the same transform to a non-flipped layer draws it upside down
+        // (traffic lights at the bottom). `CALayer.render(in:)` takes the CTM as given and does
+        // not correct for this itself, so the two cases need their own transforms.
+        if root.isFlipped {
+            context.translateBy(x: 0, y: CGFloat(pixelHeight))
+            context.scaleBy(x: scale, y: -scale)
+        } else {
+            context.scaleBy(x: scale, y: scale)
+        }
+        // See the matching comment in `render(_:scale:state:)`.
+        withForcedAppearance {
+            currentAppearance.performAsCurrentDrawingAppearance {
+                layer.render(in: context)
+            }
+        }
+        guard let image = context.makeImage() else { return }
+        let representation = NSBitmapImageRep(cgImage: image)
+        guard let data = representation.representation(using: .png, properties: [:]) else { return }
+        let url = directory.appending(path: "\(name).png")
+        try? data.write(to: url)
+        print("snapshot: \(url.lastPathComponent) (full window, titlebar evidence)")
     }
 
     /// Renders the window's layer tree.
@@ -161,7 +238,17 @@ enum SnapshotHarness {
         // CoreGraphics is origin-bottom-left, the layer tree is origin-top-left.
         context.translateBy(x: 0, y: CGFloat(pixelHeight))
         context.scaleBy(x: scale, y: -scale)
-        layer.render(in: context)
+        // `CALayer.render(in:)` draws outside AppKit's normal display cycle, which is what
+        // usually brackets a draw with an active `NSAppearance` — every custom dynamic `NSColor`
+        // (the whole Palette v2 token set) resolved to its light variant under a forced dark run
+        // without this, even though `NSApp.appearance` was set correctly and system materials
+        // (`.bar`, `NSVisualEffectView`) rendered dark regardless, because those bake in their
+        // appearance during the `displayIfNeeded()` call above instead.
+        withForcedAppearance {
+            currentAppearance.performAsCurrentDrawingAppearance {
+                layer.render(in: context)
+            }
+        }
 
         // The sidebar column will not read back offscreen on macOS 26: the split view hosts it
         // inside an `NSContainerConcentricGlassEffectView` whose backdrop and mask layers only
@@ -285,6 +372,23 @@ enum SnapshotHarness {
 
     private static var isDarkAppearance: Bool {
         NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+    }
+
+    private static var currentAppearance: NSAppearance {
+        NSApp.effectiveAppearance
+    }
+
+    /// Forces `NSAppearance.current` for the duration of `body` — belt-and-suspenders alongside
+    /// `performAsCurrentDrawingAppearance` at each `layer.render(in:)` call. A dynamic `NSColor`
+    /// resolves its `dynamicProvider` against whichever of these actually reflects the forced
+    /// appearance at that exact call site; setting both, rather than picking one, is cheaper than
+    /// re-diagnosing which one a given macOS version honors for a `CALayer` walk outside the
+    /// normal AppKit display cycle.
+    private static func withForcedAppearance<T>(_ body: () -> T) -> T {
+        let previous = NSAppearance.current
+        NSAppearance.current = currentAppearance
+        defer { NSAppearance.current = previous }
+        return body()
     }
 
     /// The split view's sidebar column, in the content view's coordinates.

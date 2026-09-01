@@ -4,11 +4,20 @@ import SwiftUI
 
 /// The one filled button in the app. Accent-tinted, so it belongs to the same family as the
 /// ring and the results; used for the action a screen exists to perform, once per screen.
+///
+/// `tint` defaults to the kinetic accent. The Clean flow's confirm sheet passes
+/// `SweepTokens.danger` instead: the one place a filled button represents an irreversible,
+/// destructive action rather than the screen's home action, and the only other color this style
+/// is allowed to carry.
 public struct SweepPrimaryButtonStyle: ButtonStyle {
     private let minWidth: CGFloat
+    private let tint: Color
     @Environment(\.isEnabled) private var isEnabled
 
-    public init(minWidth: CGFloat = 148) { self.minWidth = minWidth }
+    public init(minWidth: CGFloat = 148, tint: Color = SweepTokens.accent) {
+        self.minWidth = minWidth
+        self.tint = tint
+    }
 
     public func makeBody(configuration: Configuration) -> some View {
         configuration.label
@@ -18,7 +27,7 @@ public struct SweepPrimaryButtonStyle: ButtonStyle {
             .frame(height: 32)
             .background {
                 RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .fill(isEnabled ? AnyShapeStyle(SweepTokens.accent) : AnyShapeStyle(.fill.tertiary))
+                    .fill(isEnabled ? AnyShapeStyle(tint) : AnyShapeStyle(.fill.tertiary))
             }
             .opacity(configuration.isPressed ? 0.82 : 1)
             .scaleEffect(configuration.isPressed ? 0.985 : 1)
@@ -57,6 +66,10 @@ extension ButtonStyle where Self == SweepPrimaryButtonStyle {
     public static var sweepPrimary: SweepPrimaryButtonStyle { SweepPrimaryButtonStyle() }
     public static func sweepPrimary(minWidth: CGFloat) -> SweepPrimaryButtonStyle {
         SweepPrimaryButtonStyle(minWidth: minWidth)
+    }
+    /// The Clean confirm sheet's primary action: same shape, `SweepTokens.danger` fill.
+    public static func sweepDestructive(minWidth: CGFloat = 148) -> SweepPrimaryButtonStyle {
+        SweepPrimaryButtonStyle(minWidth: minWidth, tint: SweepTokens.danger)
     }
 }
 
@@ -105,10 +118,13 @@ extension ScreenHeader where Trailing == EmptyView {
     }
 }
 
-/// Grouped container for rows. A hairline border and the secondary background, nothing else:
-/// no shadow, no gradient, no elevation theatre.
+/// Grouped container for rows (Palette v2): a white/elevated card on the tinted ground, separated
+/// by a soft diffuse shadow in light mode and a low-contrast hairline everywhere — no hard border
+/// doing all the work, no gradient, no elevation theatre.
 public struct SectionCard<Content: View>: View {
     private let content: Content
+
+    @Environment(\.colorScheme) private var colorScheme
 
     public init(@ViewBuilder content: () -> Content) { self.content = content() }
 
@@ -116,13 +132,17 @@ public struct SectionCard<Content: View>: View {
         VStack(spacing: 0) { content }
             .background {
                 RoundedRectangle(cornerRadius: SweepTokens.cornerRadius, style: .continuous)
-                    .fill(.background.secondary)
+                    .fill(SweepTokens.cardBackground)
             }
             .overlay {
                 RoundedRectangle(cornerRadius: SweepTokens.cornerRadius, style: .continuous)
-                    .strokeBorder(.separator, lineWidth: 0.5)
+                    .strokeBorder(SweepTokens.hairline, lineWidth: 1)
             }
             .clipShape(RoundedRectangle(cornerRadius: SweepTokens.cornerRadius, style: .continuous))
+            .shadow(
+                color: colorScheme == .dark ? .clear : SweepTokens.cardShadow,
+                radius: 8, y: 2
+            )
     }
 }
 

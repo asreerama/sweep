@@ -7,19 +7,25 @@ import SwiftUI
 /// pre-formatted sizes and no per-row formatter, no per-row date math and no per-row closure
 /// allocation beyond one `Binding`, which is what keeps a ten-thousand-row tree scrolling at
 /// display rate instead of at whatever `ByteCountFormatter` can manage.
+///
+/// Rows within a group are bounded by ``InventoryExpansion`` (PLAN §6b): a group renders at most
+/// `InventoryBudget.initialRowsPerGroup` rows until "Show all" pages in more, and the total across
+/// every expanded group is capped well under the point count that corrupts a macOS 26 titlebar.
+/// A scan producing 10,000 rows and a scan producing 10 render the same handful of DOM nodes at
+/// rest — the bound is structural, not a courtesy the caller has to remember.
 public struct InventoryList: View {
     private let groups: [InventoryGroup]
     private let selection: Binding<InventorySelection>?
-    @Binding private var collapsed: Set<String>
+    @Binding private var expansion: InventoryExpansion
 
     public init(
         groups: [InventoryGroup],
         selection: Binding<InventorySelection>? = nil,
-        collapsed: Binding<Set<String>>
+        expansion: Binding<InventoryExpansion>
     ) {
         self.groups = groups
         self.selection = selection
-        self._collapsed = collapsed
+        self._expansion = expansion
     }
 
     public var body: some View {
@@ -27,11 +33,21 @@ public struct InventoryList: View {
             LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
                 ForEach(groups) { group in
                     Section {
-                        if !collapsed.contains(group.id) {
-                            ForEach(group.items) { item in
+                        if !expansion.isCollapsed(group) {
+                            ForEach(group.items.prefix(expansion.visibleCount(for: group))) { item in
                                 InventoryRow(item: item, selection: binding(for: item), indented: true)
                             }
                             .padding(.bottom, 1)
+                            if expansion.hasMore(group) {
+                                InventoryShowMoreRow(
+                                    shown: expansion.visibleCount(for: group),
+                                    total: group.itemCount
+                                ) {
+                                    withAnimation(SweepMotion.row) {
+                                        expansion.showMore(group, in: groups)
+                                    }
+                                }
+                            }
                         }
                     } header: {
                         header(for: group)
@@ -41,6 +57,7 @@ public struct InventoryList: View {
             }
         }
         .scrollContentBackground(.hidden)
+        .background(SweepTokens.ground)
     }
 
     private func header(for group: InventoryGroup) -> some View {
@@ -54,9 +71,10 @@ public struct InventoryList: View {
                 }
             },
             isExpanded: Binding(
-                get: { !collapsed.contains(group.id) },
-                set: { expanded in
-                    if expanded { collapsed.remove(group.id) } else { collapsed.insert(group.id) }
+                get: { !expansion.isCollapsed(group) },
+                set: { shouldExpand in
+                    guard shouldExpand != !expansion.isCollapsed(group) else { return }
+                    expansion.toggleCollapsed(group, in: groups)
                 }
             )
         )
@@ -68,6 +86,42 @@ public struct InventoryList: View {
             get: { selection.wrappedValue.contains(item.id) },
             set: { selection.wrappedValue.set(item.id, selected: $0) }
         )
+    }
+}
+
+/// The bounded-group paging control: "Show all N", `InventoryBudget.pageSize` rows at a time.
+///
+/// Never jumps straight to the full count — a tap always requests one more page, so a group of
+/// 50,000 rows takes 250 taps to fully page in rather than one tap that reintroduces the
+/// unbounded-height bug it exists to prevent.
+struct InventoryShowMoreRow: View {
+    let shown: Int
+    let total: Int
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: SweepTokens.s2) {
+                Color.clear.frame(width: SweepTokens.rowDisclosureIndent, height: 1)
+                Image(systemName: "ellipsis.circle")
+                    .font(.system(size: 12, weight: .regular))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 17, alignment: .center)
+                Text("Show all \(SweepFormat.count(total))")
+                    .font(SweepFont.rowTitle)
+                    .foregroundStyle(Color.accentColor)
+                Text("\(SweepFormat.count(shown)) of \(SweepFormat.count(total)) shown")
+                    .font(SweepFont.caption)
+                    .foregroundStyle(.tertiary)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, SweepTokens.s3 - 2)
+            .frame(height: SweepTokens.inventoryRowHeight)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, SweepTokens.s1 + 2)
+        .accessibilityLabel("Show all \(total) items, \(shown) currently shown")
     }
 }
 
@@ -110,7 +164,7 @@ public struct InventoryEmptyState: View {
 
 private struct InventoryListPreview: View {
     @State private var selection = InventorySelection()
-    @State private var collapsed: Set<String> = []
+    @State private var expansion = InventoryExpansion()
 
     private let groups: [InventoryGroup] = [
         InventoryGroup(id: "caches", title: "User Application Caches", symbol: "internaldrive", items: (0..<40).map {
@@ -136,7 +190,10 @@ private struct InventoryListPreview: View {
     ]
 
     var body: some View {
-        InventoryList(groups: groups, selection: $selection, collapsed: $collapsed)
-            .onAppear { selection = .safeDefaults(in: groups) }
+        InventoryList(groups: groups, selection: $selection, expansion: $expansion)
+            .onAppear {
+                selection = .safeDefaults(in: groups)
+                expansion = .initial(for: groups)
+            }
     }
 }

@@ -39,7 +39,7 @@ struct ListStressScreen: View {
     let rowCount: Int
 
     @State private var selection = InventorySelection()
-    @State private var collapsed: Set<String> = []
+    @State private var expansion = InventoryExpansion()
     @State private var query = ""
     @State private var groups: [InventoryGroup] = []
 
@@ -70,6 +70,13 @@ struct ListStressScreen: View {
         InventoryAggregate.filter(groups, query: query)
     }
 
+    /// What's actually on screen right now, summed across every group's bounded page. Printed in
+    /// the footnote as the screenshot evidence for PLAN §6b: this number stays flat whether
+    /// `rowCount` is 100 or 10,000.
+    private var renderedRowCount: Int {
+        visible.reduce(0) { $0 + expansion.visibleCount(for: $1) }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             ScreenHeader(
@@ -79,13 +86,15 @@ struct ListStressScreen: View {
                 SweepSearchField(text: $query, prompt: "Filter paths").frame(width: 200)
             }
             Divider()
-            InventoryList(groups: visible, selection: $selection, collapsed: $collapsed)
+            InventoryList(groups: visible, selection: $selection, expansion: $expansion)
 
             VStack(spacing: 0) {
                 Divider()
                 HStack {
                     Footnote(
-                        "\(SweepFormat.count(InventoryAggregate.totalItems(groups))) rows, \(SweepFormat.count(groups.count)) sections, LazyVStack with pinned headers.",
+                        "\(SweepFormat.count(InventoryAggregate.totalItems(groups))) rows total, "
+                            + "\(SweepFormat.count(renderedRowCount)) rendered across \(SweepFormat.count(groups.count)) sections "
+                            + "(budget \(InventoryBudget.maxVisibleRows)) — PLAN §6b.",
                         symbol: "speedometer"
                     )
                     Spacer()
@@ -103,6 +112,7 @@ struct ListStressScreen: View {
             guard groups.isEmpty else { return }
             groups = Self.makeGroups(rowCount: rowCount)
             selection = .safeDefaults(in: groups)
+            expansion = .initial(for: groups)
         }
     }
 }

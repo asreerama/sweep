@@ -83,9 +83,13 @@ public struct GroupHeader: View {
             }
 
             if let symbol {
+                // Module-hue tint (PLAN §5 volume-raise), not the full sidebar badge: a header
+                // row is compact and already carries a chevron, checkbox, badge and size — a
+                // tinted glyph reads as "this module's color" without adding another shape.
                 Image(systemName: symbol)
                     .font(.system(size: 11, weight: .regular))
-                    .foregroundStyle(.secondary)
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(SweepModuleHue.color(forSymbol: symbol) ?? .secondary)
                     .frame(width: 15)
             }
 

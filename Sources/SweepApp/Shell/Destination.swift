@@ -17,6 +17,7 @@ enum Destination: String, Hashable, Identifiable, CaseIterable {
     case developer
     case homebrew
     case listStress
+    case cleanFlowPreview
 
     var id: String { rawValue }
 
@@ -32,6 +33,7 @@ enum Destination: String, Hashable, Identifiable, CaseIterable {
         case .developer: "Developer"
         case .homebrew: "Homebrew"
         case .listStress: "List Stress"
+        case .cleanFlowPreview: "Clean Flow Preview"
         }
     }
 
@@ -47,12 +49,13 @@ enum Destination: String, Hashable, Identifiable, CaseIterable {
         case .developer: "hammer"
         case .homebrew: "mug"
         case .listStress: "speedometer"
+        case .cleanFlowPreview: "sparkle.magnifyingglass"
         }
     }
 
     var tier: SidebarTier {
         switch self {
-        case .developer, .homebrew, .listStress: .toolbox
+        case .developer, .homebrew, .listStress, .cleanFlowPreview: .toolbox
         default: .primary
         }
     }
@@ -70,6 +73,7 @@ enum Destination: String, Hashable, Identifiable, CaseIterable {
         case .developer: "Per-environment caches with live sizes. Nothing is ever auto-selected."
         case .homebrew: "Formulae, casks, outdated packages and cache, previewed before anything runs."
         case .listStress: "Debug harness: 10,000 synthetic rows through the shipping inventory list."
+        case .cleanFlowPreview: "Debug harness: confirm / progress / report states, ahead of the Gate 1 flip."
         }
     }
 }
@@ -88,13 +92,14 @@ struct SidebarGroup: Identifiable {
         SidebarGroup(id: "apps", title: "Apps", destinations: [.uninstaller]),
     ]
 
-    /// Toolbox tier, pinned to the bottom, quieter. The stress harness only appears when
-    /// `SWEEP_UI_STRESS` is set, so it never ships in a normal run.
+    /// Toolbox tier, pinned to the bottom, quieter. The stress harness and the Clean flow preview
+    /// only appear when `SWEEP_UI_STRESS` is set, so neither ships in a normal run.
     static func toolbox(includingStressHarness: Bool) -> SidebarGroup {
         SidebarGroup(
             id: "toolbox",
             title: "Toolbox",
-            destinations: [.developer, .homebrew] + (includingStressHarness ? [.listStress] : [])
+            destinations: [.developer, .homebrew]
+                + (includingStressHarness ? [.listStress, .cleanFlowPreview] : [])
         )
     }
 }

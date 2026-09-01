@@ -137,7 +137,27 @@ Identity: **instrument, not toy**. Utility first, motion signals speed.
 
 - **Layout.** Two-tier grouped sidebar (Smart Scan + CLEAN/SPEED/APPS primary; Toolbox quieter, bottom, smaller type + tighter rows), large content pane. Hierarchy carried by weight + spacing, not color. Menubar popover = compact stat stack, one action row.
 - **Type.** SF Pro throughout (platform face right choice here), SF Pro Display tight tracking for big numbers, SF Mono for paths + byte counts, tabular figures wherever data aligns. Oversized animated number (GB found, GB freed) = visual signature.
-- **Color.** System materials (sidebar translucency, `.ultraThinMaterial` popover), graphite surfaces, single kinetic accent only for progress, results, scan sweep. Semantic colors (warning amber, danger red) reserved for safety tiers. Follows system light/dark.
+- **Color.** System materials (sidebar translucency, `.ultraThinMaterial` popover), graphite surfaces, single kinetic accent for progress, results, scan sweep. Semantic colors (warning amber, danger red) reserved for safety tiers. Follows system light/dark.
+  **Palette v2 (user 2026-09-01: "modern SaaS type", old palette "unnecessarily contrasty"):**
+  drop the vivid teal. Accent = soft indigo `#5E6AD2` light / `#7C8AEE` dark. Grounds =
+  indigo-biased tinted neutrals: light `#F7F8FA` ground + white cards with soft diffuse
+  shadows, dark `#16181D` ground + `#1D2025` elevated cards; hairlines low-contrast
+  (`#E8EAF0` / `#2A2E36`). Tier + status badges = soft tinted pills (12% hue background,
+  medium-chroma text of same hue), never solid fills. Module hue families muted to
+  consistent lightness (pastel-leaning, low-mid chroma). Big numbers ink softens one step
+  from pure black/white. Contrast stays WCAG AA, drama comes from tint + depth, not edges.
+  **Volume raise (user recalibration 2026-09-01: likes direction, wants it louder + more approachable, "not a dev tool"):** every module gets a distinct icon hue family (System Settings-style colored sidebar icons + matching group headers); hero ring gets an accent gradient sweep; success states get a soft accent wash; SF Symbols use hierarchical/palette rendering, not monochrome. Tier semantics still own amber/red exclusively. Plain-language subtitles on groups ("Spotify's temporary files — safe to clear"), friendly empty states. Discipline unchanged, amplitude up.
+- **Motion continuity (user 2026-09-01: scan->results hard cut is "bad implementation"; must be one continuous motion, "super smooth", swanky-but-advanced):**
+  the ring and hero counter are PERSISTENT SHARED ELEMENTS across idle -> scanning ->
+  results -> cleaning -> report. Never unmount/replace them; one screen, one state enum,
+  views morph between layout slots (matchedGeometryEffect). Completion choreography:
+  sweep rotation decelerates to rest velocity-matched (no snap), trim closes the circle,
+  ring then springs smaller + upward into its results slot WHILE the counter settles to
+  the final total, THEN result rows stagger in under it on the same timeline. Clean flow
+  continues the same objects: ring drains as counter rolls down, single pulse at zero.
+  Module-to-module navigation: crossfade + slight vertical drift, never a hard swap.
+  Every phase interruptible: rescan mid-settle retargets from current value.
+- **Motion volume raise (same recalibration):** micro-interaction layer on top of the three hero moments: spring hover-lift on cards/summary rows, SF Symbol effects (bounce on completion, pulse on scan start), staggered entrance on results reveal (fast, 20ms/row, capped 10 rows), numeric contentTransition everywhere data changes, one clean completion pulse on the ring (never confetti). All still spring-driven, interruptible, reduceMotion-respecting.
 - **Motion.** Three orchestrated moments, restraint everywhere else:
   1. Scan: radial sweep + counting number, spring-driven.
   2. Clean: byte counter rolls down to zero, ring collapses inward.

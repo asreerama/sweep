@@ -116,6 +116,18 @@ public struct InventoryGroup: Identifiable, Hashable, Sendable {
         guard !matches.isEmpty else { return nil }
         return InventoryGroup(id: id, title: title, symbol: symbol, items: matches)
     }
+
+    /// Narrows a group to only the given tiers, recomputing its totals from what survives.
+    ///
+    /// Smart Scan's clean scope is safe-tier only (PLAN §6b): a category group built by
+    /// `ScanService` mixes tiers freely, so the safe total and the "needs review" total are two
+    /// different views of the same group rather than two different groups. Returns `nil` when
+    /// nothing in the requested tiers survives, same contract as ``filtered(by:)``.
+    public func filtered(byTiers tiers: Set<SweepTier>) -> InventoryGroup? {
+        let matches = items.filter { tiers.contains($0.tier) }
+        guard !matches.isEmpty else { return nil }
+        return InventoryGroup(id: id, title: title, symbol: symbol, items: matches)
+    }
 }
 
 public enum InventoryAggregate {
@@ -135,6 +147,13 @@ public enum InventoryAggregate {
 
     public static func filter(_ groups: [InventoryGroup], query: String) -> [InventoryGroup] {
         groups.compactMap { $0.filtered(by: query) }
+    }
+
+    /// Every group narrowed to `tiers`, dropping any that end up empty. Used to split one set of
+    /// category groups into a safe-tier "clean scope" view and a caution-tier "needs review"
+    /// view (PLAN §6b), without the scan engine ever computing two separate group sets.
+    public static func filterByTier(_ groups: [InventoryGroup], tiers: Set<SweepTier>) -> [InventoryGroup] {
+        groups.compactMap { $0.filtered(byTiers: tiers) }
     }
 }
 
@@ -209,5 +228,159 @@ public struct InventorySelection: Sendable, Hashable {
             for item in group.items where ids.contains(item.id) { total += 1 }
         }
         return total
+    }
+}
+
+// MARK: - Bounded expansion (PLAN §6b)
+
+/// Row-count constants for ``InventoryExpansion``.
+///
+/// macOS 26 corrupts a window's titlebar once its scroll content passes roughly 32,767 pt (the
+/// CG 2^15 limit; reproduced with `LazyVStack` and native `List` alike — PLAN §6b). These numbers
+/// keep every `InventoryList` far under that regardless of how many rows a scan finds: at the
+/// shipping 34 pt row height, `maxVisibleRows` is ~20,400 pt of rows plus a handful of 32 pt
+/// headers, comfortably under half the threshold.
+public enum InventoryBudget {
+    /// Rows an expanded group shows before its "Show all" control appears.
+    public static let initialRowsPerGroup = 50
+    /// Rows paged in per "Show all" tap, rather than jumping straight to the full count.
+    public static let pageSize = 200
+    /// Hard ceiling on rows rendered across every expanded group at once, enforced regardless of
+    /// how many groups a scan produced or how large any one of them is.
+    public static let maxVisibleRows = 600
+}
+
+/// Per-group disclosure and paging state for one ``InventoryList``.
+///
+/// Two things live here instead of a plain `Set<String>` of collapsed ids: how many rows of an
+/// expanded group are actually rendered (bounded, paged in with "Show all"), and the budget that
+/// keeps their sum under the macOS 26 titlebar limit no matter how many groups the user opens.
+/// The type owns the invariant; a view can only ask for `visibleCount(for:)` and never render more
+/// than that, so the titlebar bug is fixed by construction rather than by a call site remembering
+/// to check a limit.
+public struct InventoryExpansion: Sendable, Hashable {
+    private var collapsed: Set<String>
+    private var visibleCounts: [String: Int]
+    /// Ids in the order they were last expanded or paged, oldest first — the order the budget
+    /// evicts from when a new "Show all" tap would push the total over the ceiling.
+    private var touchOrder: [String]
+
+    public init(collapsedGroupIDs: Set<String> = []) {
+        self.collapsed = collapsedGroupIDs
+        self.visibleCounts = [:]
+        self.touchOrder = []
+    }
+
+    /// Applies the row budget up front, before any user interaction.
+    ///
+    /// Without this, a fresh `InventoryExpansion()` gives every group its default 50-row cap
+    /// with nothing collapsed — fine for the handful of groups Smart Scan shows, but System
+    /// Junk's per-*rule* grouping can produce dozens of groups, and a scan's rule catalog is not
+    /// bounded by this UI's row budget. 20-plus groups at 50 rows apiece would clear
+    /// `maxVisibleRows` on the very first frame, before a single disclosure triangle was
+    /// touched. Walking `groups` in order and collapsing whatever falls outside the budget makes
+    /// the invariant hold from frame one, the same way `enforceBudget` holds it after every
+    /// later interaction.
+    public static func initial(for groups: [InventoryGroup]) -> InventoryExpansion {
+        var expansion = InventoryExpansion()
+        var remaining = InventoryBudget.maxVisibleRows
+        for group in groups {
+            let want = min(InventoryBudget.initialRowsPerGroup, group.itemCount)
+            let allowed = max(0, min(want, remaining))
+            if group.itemCount > 0, allowed == 0 {
+                expansion.collapsed.insert(group.id)
+            } else if allowed < want {
+                expansion.visibleCounts[group.id] = allowed
+            }
+            remaining -= allowed
+        }
+        return expansion
+    }
+
+    public func isCollapsed(_ group: InventoryGroup) -> Bool { collapsed.contains(group.id) }
+
+    /// Rows of `group` actually rendered right now: 0 while collapsed, otherwise the paged-in
+    /// count clamped to how many items the group actually has.
+    public func visibleCount(for group: InventoryGroup) -> Int {
+        guard !isCollapsed(group) else { return 0 }
+        let requested = visibleCounts[group.id] ?? InventoryBudget.initialRowsPerGroup
+        return min(requested, group.itemCount)
+    }
+
+    /// Whether a "Show all N" control belongs under this group's rows.
+    public func hasMore(_ group: InventoryGroup) -> Bool {
+        visibleCount(for: group) < group.itemCount
+    }
+
+    /// Disclosure chevron. Expanding re-applies the budget, in case the group being opened is
+    /// large enough on its own to need room made for it.
+    public mutating func toggleCollapsed(_ group: InventoryGroup, in groups: [InventoryGroup]) {
+        if collapsed.contains(group.id) {
+            collapsed.remove(group.id)
+            touch(group.id)
+            enforceBudget(in: groups, keeping: group.id)
+        } else {
+            collapsed.insert(group.id)
+        }
+    }
+
+    /// Pages in up to `InventoryBudget.pageSize` more rows of `group`. If that would push the
+    /// total rendered rows over budget, the other groups the user opened longest ago are
+    /// collapsed first — never the group whose "Show all" was just pressed, since shrinking the
+    /// thing the user just asked to see more of would read as the control not working.
+    ///
+    /// Clamped to `maxVisibleRows` on its own, independent of `enforceBudget`: one group paged
+    /// past the *entire* budget stays a titlebar risk even after every other group is evicted to
+    /// zero, so a lone group repeatedly paged cannot itself become the unbounded content PLAN
+    /// §6b exists to prevent.
+    public mutating func showMore(_ group: InventoryGroup, in groups: [InventoryGroup]) {
+        let current = visibleCount(for: group)
+        let next = min(group.itemCount, current + InventoryBudget.pageSize, InventoryBudget.maxVisibleRows)
+        visibleCounts[group.id] = next
+        touch(group.id)
+        enforceBudget(in: groups, keeping: group.id)
+    }
+
+    /// Collapses back to the default row cap.
+    public mutating func showFewer(_ group: InventoryGroup) {
+        visibleCounts[group.id] = InventoryBudget.initialRowsPerGroup
+        touchOrder.removeAll { $0 == group.id }
+    }
+
+    private mutating func touch(_ id: String) {
+        touchOrder.removeAll { $0 == id }
+        touchOrder.append(id)
+    }
+
+    /// Evicts expanded groups until the sum of visible rows fits the budget again. `keptID` is
+    /// exempt: it is the group whose disclosure or "Show all" just fired, and shrinking the
+    /// thing the user just asked to see more of would read as the control not working.
+    ///
+    /// Two pools, in eviction order:
+    /// 1. Groups still at whatever ``initial(for:)`` gave them — never explicitly touched. These
+    ///    go first, from the end of `groups` backward, since that list is conventionally sorted
+    ///    by size descending and the tail is already the lowest-priority content on screen.
+    /// 2. Groups the user did explicitly expand or page, oldest-touched first — evicted only if
+    ///    emptying every untouched group still is not enough, so a deliberate "Show all" survives
+    ///    anything short of the user opening enough other groups to need the room back.
+    ///
+    /// Without pool 1, a group `initial(for:)` auto-collapsed to make budget could never be
+    /// re-opened past the budget line: nothing would ever be left to evict for it, because
+    /// nothing outside `touchOrder` was ever a candidate.
+    private mutating func enforceBudget(in groups: [InventoryGroup], keeping keptID: String) {
+        func total() -> Int { groups.reduce(0) { $0 + visibleCount(for: $1) } }
+        guard total() > InventoryBudget.maxVisibleRows else { return }
+
+        let untouched = groups
+            .filter { $0.id != keptID && !collapsed.contains($0.id) && !touchOrder.contains($0.id) }
+            .reversed()
+            .map(\.id)
+        let touched = touchOrder.filter { $0 != keptID && !collapsed.contains($0) }
+        var candidates = Array(untouched) + touched
+
+        while total() > InventoryBudget.maxVisibleRows, !candidates.isEmpty {
+            let victim = candidates.removeFirst()
+            collapsed.insert(victim)
+        }
     }
 }

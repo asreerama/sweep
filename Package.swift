@@ -23,5 +23,10 @@ let package = Package(
             ],
             path: "Sources/SweepApp"
         ),
+        .testTarget(
+            name: "SweepAppTests",
+            dependencies: ["SweepApp"],
+            path: "Tests/SweepAppTests"
+        ),
     ]
 )
