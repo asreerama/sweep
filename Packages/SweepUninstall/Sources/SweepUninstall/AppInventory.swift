@@ -54,6 +54,28 @@ public struct InstalledApp: Sendable, Hashable, Identifiable {
     }
 }
 
+/// Result of ``AppInventory/scanReportingCompleteness(directories:fileManager:)`` — the apps
+/// found, plus whether the scan is trustworthy as a complete picture of what is installed.
+public struct AppInventoryScan: Sendable {
+    public let apps: [InstalledApp]
+    /// `false` when at least one applications root that DOES exist could not be fully
+    /// enumerated — permission denied, an unexpected symlink/non-directory sitting where a real
+    /// directory should be, or a subdirectory whose contents could not be listed. A root that
+    /// simply does not exist (most machines have no `~/Applications` at all) does not count
+    /// against this: there is nothing hidden behind a directory that was never there.
+    ///
+    /// Codex Gate-U finding #1: an incomplete scan can never prove a leftover has no sibling
+    /// consumer — some other installed app might live exactly inside the directory this scan
+    /// could not read — so Gate U treats `isComplete == false` as a reason to cap every leftover's
+    /// evidence at manual review, never to promote anything.
+    public let isComplete: Bool
+
+    public init(apps: [InstalledApp], isComplete: Bool) {
+        self.apps = apps
+        self.isComplete = isComplete
+    }
+}
+
 /// Enumerates installed applications. Strictly read-only: `FileManager.contentsOfDirectory`
 /// and `Info.plist` reads only, never a write/remove/trash call.
 public enum AppInventory {
@@ -71,21 +93,53 @@ public enum AppInventory {
     ///
     /// Depth-limited by construction: a `.app` bundle is never descended into, and a plain
     /// subdirectory is only ever expanded one level past the roots given.
+    ///
+    /// Thin wrapper over ``scanReportingCompleteness(directories:fileManager:)`` for callers that
+    /// only ever wanted the app list (every call site before Codex Gate-U finding #1). New callers
+    /// that need to know whether the scan actually saw everywhere it was supposed to look should
+    /// call that instead.
     public static func scan(
         directories: [URL] = AppInventory.defaultApplicationsDirectories(),
         fileManager: FileManager = .default
     ) -> [InstalledApp] {
+        scanReportingCompleteness(directories: directories, fileManager: fileManager).apps
+    }
+
+    /// Same scan as ``scan(directories:fileManager:)``, plus a completeness signal (Codex Gate-U
+    /// finding #1): whether every root this scan was asked to look at was actually readable.
+    public static func scanReportingCompleteness(
+        directories: [URL] = AppInventory.defaultApplicationsDirectories(),
+        fileManager: FileManager = .default
+    ) -> AppInventoryScan {
         var bundleURLs: [URL] = []
         var seenPaths = Set<String>()
+        var isComplete = true
         for directory in directories {
-            // The root itself must be a real (non-symlink) directory — pins the device identity
-            // every descendant is checked against below. See finding #10 in the adversarial
-            // review.
+            // A root that simply does not exist is not incomplete — there is nothing behind it to
+            // miss. Only a root that exists but fails the "real, non-symlink directory" check
+            // (finding #10) or cannot be enumerated counts against completeness.
+            guard pathExists(directory) else { continue }
             guard let rootIdentity = FileIdentityReader.lstatIdentity(at: directory),
-                  rootIdentity.isDirectory, !rootIdentity.isSymbolicLink else { continue }
-            collectAppBundles(in: directory, remainingDepth: 1, rootDevice: rootIdentity.device, fileManager: fileManager, into: &bundleURLs, seenPaths: &seenPaths)
+                  rootIdentity.isDirectory, !rootIdentity.isSymbolicLink
+            else {
+                isComplete = false
+                continue
+            }
+            collectAppBundles(
+                in: directory, remainingDepth: 1, rootDevice: rootIdentity.device, fileManager: fileManager,
+                into: &bundleURLs, seenPaths: &seenPaths, isComplete: &isComplete
+            )
         }
-        return bundleURLs.compactMap { readAppInfo(at: $0) }
+        let apps = bundleURLs.compactMap { readAppInfo(at: $0) }
+        return AppInventoryScan(apps: apps, isComplete: isComplete)
+    }
+
+    /// Plain `lstat` existence check — never follows a trailing symlink, consistent with every
+    /// other identity read in this file. Used only to tell "this root was never there" (fine, not
+    /// incomplete) apart from "this root exists but something is wrong with it" (incomplete).
+    private static func pathExists(_ url: URL) -> Bool {
+        var info = stat()
+        return url.path.withCString { lstat($0, &info) } == 0
     }
 
     private static func collectAppBundles(
@@ -94,7 +148,8 @@ public enum AppInventory {
         rootDevice: dev_t,
         fileManager: FileManager,
         into result: inout [URL],
-        seenPaths: inout Set<String>
+        seenPaths: inout Set<String>,
+        isComplete: inout Bool
     ) {
         // Deliberately NOT `.skipsHiddenFiles`: on macOS 26, cryptex-relocated system apps
         // (Safari confirmed on this machine) are dot-less symlinks carrying the BSD `hidden`
@@ -107,7 +162,13 @@ public enum AppInventory {
             at: directory,
             includingPropertiesForKeys: [.isDirectoryKey],
             options: []
-        ) else { return }
+        ) else {
+            // Codex Gate-U finding #1: a directory that exists but could not be listed (permission
+            // denied, or it vanished in the instant between the caller's own check and this one)
+            // might be hiding a sibling app this scan can never now see.
+            isComplete = false
+            return
+        }
 
         for entry in entries {
             guard !entry.lastPathComponent.hasPrefix(".") else { continue }
@@ -136,7 +197,10 @@ public enum AppInventory {
             // and recursing into it would misattribute unrelated `.app` bundles found there as
             // installed at this (spoofed) location — finding #10 in the adversarial review.
             guard identity.isDirectory, !identity.isSymbolicLink, remainingDepth > 0 else { continue }
-            collectAppBundles(in: entry, remainingDepth: remainingDepth - 1, rootDevice: rootDevice, fileManager: fileManager, into: &result, seenPaths: &seenPaths)
+            collectAppBundles(
+                in: entry, remainingDepth: remainingDepth - 1, rootDevice: rootDevice, fileManager: fileManager,
+                into: &result, seenPaths: &seenPaths, isComplete: &isComplete
+            )
         }
     }
 

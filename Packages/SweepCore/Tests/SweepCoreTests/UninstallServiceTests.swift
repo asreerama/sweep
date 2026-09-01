@@ -34,7 +34,7 @@ final class UninstallServiceTests: XCTestCase {
         let home = try FixtureHome("gateU-e2e")
         try TrashAvailabilityProbe.skipIfUnavailable(near: home.url("probe"))
 
-        let bundle = try home.makeAppBundle(bundleIdentifier: "com.example.E2E")
+        let bundle = try home.makeAppBundle(bundleIdentifier: "com.example.E2E", codeSign: true)
         let leftoverA = try home.makeLeftover(root: .applicationSupport, name: "com.example.E2E")
         let leftoverB = try home.makeLeftover(root: .caches, name: "com.example.E2E")
         // Matched by suffix, not exact string equality: `SweepPolicy.authorize(externalRoot:)`
@@ -198,11 +198,159 @@ final class UninstallServiceTests: XCTestCase {
         XCTAssertTrue(outcome.detail?.contains("grace window") == true, "\(outcome.detail ?? "nil")")
     }
 
+    // MARK: - Bundle-last transactional safety (Codex Gate-U finding #4)
+
+    /// The regression this finding actually closed: a leftover reaches the real Trash during the
+    /// leftover phase, then the bundle fails its fresh, immediately-pre-staging revalidation
+    /// (simulated here as the app having been relaunched while the leftover phase was running).
+    /// Before the fix, the two phases were one combined `DeletionPlan`: the bundle would simply be
+    /// the next item processed, with no revalidation at all beyond the identity captured at
+    /// authorization time — this exact scenario would have trashed the bundle right along with
+    /// the leftover, or at best left the leftover permanently gone with the bundle still
+    /// installed. After the fix, the whole operation refuses, the bundle stays installed, and the
+    /// already-trashed leftover is restored to its original location.
+    func testLateBundleRefusalRestoresAlreadyTrashedLeftoverAndLeavesBundleInstalled() async throws {
+        let home = try FixtureHome("gateU-late-bundle-refusal")
+        try TrashAvailabilityProbe.skipIfUnavailable(near: home.url("probe"))
+        let bundle = try home.makeAppBundle(bundleIdentifier: "com.example.LateRefusal", codeSign: true)
+        let leftover = try home.makeLeftover(root: .applicationSupport, name: "com.example.LateRefusal")
+
+        // Calls 1–2 ("not running") satisfy the quit-verification preflight and `authorizeBundle`'s
+        // own running check, both of which happen BEFORE the leftover phase ever runs. Every call
+        // from #3 onward ("running") is only ever reached by
+        // `revalidateBundleImmediatelyBeforeStaging`, which runs strictly AFTER the leftover phase
+        // has already completed — simulating the app being relaunched during that window.
+        let counter = CallCounter()
+        let isRunning: @Sendable (String) -> Bool = { _ in counter.increment() > 2 }
+
+        let journalURL = home.url("uninstall-journal.jsonl")
+        let request = UninstallRequest(
+            bundlePath: bundle, expectedBundleIdentifier: "com.example.LateRefusal",
+            selectedLeftoverPaths: [leftover.path], manualOverrideConfirmedPaths: [],
+            journalURL: journalURL, home: home.root,
+            applicationsDirectories: [home.applicationsDirectory],
+            systemLaunchDaemonsDirectory: home.url("LaunchDaemons")
+        )
+
+        let events = try await Self.collectEvents(UninstallService.runPipeline(
+            request, isRunning: isRunning, receipts: EmptyPkgutilReceiptsProvider()
+        ))
+        let report = try XCTUnwrap(CleanServiceTests.finishedReport(in: events))
+
+        XCTAssertFalse(report.committed, "a late bundle refusal must never be reported as committed")
+        XCTAssertEqual(report.succeededCount, 0, "\(report.outcomes)")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: bundle.path), "the bundle must remain installed when staging is refused")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: leftover.path), "the leftover must be restored to its original location")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: leftover.appending(path: "data.bin").path), "the restored leftover's own content must survive intact")
+
+        let bundleOutcome = try XCTUnwrap(report.outcomes.first { $0.detectorSource == "gateU.bundle" })
+        XCTAssertEqual(bundleOutcome.outcome, .skipped)
+        XCTAssertNil(bundleOutcome.trashURL)
+        XCTAssertTrue(bundleOutcome.detail?.contains("is running") == true, "expected an appIsRunning refusal, got \(bundleOutcome.detail ?? "nil")")
+
+        let leftoverOutcome = try XCTUnwrap(report.outcomes.first { $0.detail?.contains("restored:") == true })
+        XCTAssertEqual(leftoverOutcome.outcome, .skipped)
+        XCTAssertNil(leftoverOutcome.trashURL, "a restored item's outcome must not still advertise a live Trash handle")
+
+        // The WAL's final recorded state for the restored leftover must match reality (restored),
+        // never the transient "succeeded" state it passed through on the way there. The
+        // corrective record must land under the SAME operation id the leftover's own original
+        // `planned`/`succeeded` records used — filing it under a different id would leave it an
+        // orphan correction that a per-operation recovery scan (`WALJournal.parse` groups
+        // `itemResult` outcomes by operation id) would never actually see.
+        let journal = try await WALJournal(url: journalURL)
+        let records = try await journal.records()
+        await journal.close()
+        let leftoverItemRecords = records.filter { $0.kind == .itemResult && $0.item?.path == leftoverOutcome.url?.path }
+        XCTAssertEqual(Set(leftoverItemRecords.map(\.operationID)).count, 1, "\(records)")
+        XCTAssertEqual(leftoverItemRecords.last?.outcome, .skipped, "\(records)")
+        XCTAssertEqual(leftoverItemRecords.first?.outcome, .succeeded, "the original success must still be a truthful part of the history, \(records)")
+    }
+
+    // MARK: - Durable manual-consent provenance (Codex Gate-U finding #2)
+
+    /// The WAL's `planned` record — not just the ephemeral report — must carry enough to prove
+    /// *why* a manual-review leftover was authorized: evidence, canonical identity, confirmation
+    /// timestamp and an operation-bound nonce. Before the fix, `AuthorizedUninstallItem.deletionItem`
+    /// discarded the `ManualOverrideToken` outright, so a crash-recovery scan over the WAL could
+    /// see a weakly-matched item moved with no durable record of the human confirmation that
+    /// allowed it.
+    func testManualConsentProvenanceIsPersistedInTheDurableWALPlannedRecord() async throws {
+        let home = try FixtureHome("gateU-manual-provenance")
+        try TrashAvailabilityProbe.skipIfUnavailable(near: home.url("probe"))
+        let bundle = try home.makeAppBundle(name: "ProvenanceApp", bundleIdentifier: "com.example.provenance.distinctnamespace", codeSign: true)
+        let manualLeftover = try home.makeLeftover(root: .applicationSupport, name: "ProvenanceApp")
+        let autoLeftover = try home.makeLeftover(root: .caches, name: "com.example.provenance.distinctnamespace")
+
+        let journalURL = home.url("uninstall-journal.jsonl")
+        let request = UninstallRequest(
+            bundlePath: bundle, expectedBundleIdentifier: "com.example.provenance.distinctnamespace",
+            selectedLeftoverPaths: [manualLeftover.path, autoLeftover.path],
+            manualOverrideConfirmedPaths: [manualLeftover.path],
+            journalURL: journalURL, home: home.root,
+            applicationsDirectories: [home.applicationsDirectory],
+            systemLaunchDaemonsDirectory: home.url("LaunchDaemons")
+        )
+
+        let events = try await Self.collectEvents(UninstallService.runPipeline(
+            request, isRunning: { _ in false }, receipts: EmptyPkgutilReceiptsProvider()
+        ))
+        let report = try XCTUnwrap(CleanServiceTests.finishedReport(in: events))
+        for outcome in report.outcomes {
+            if let trashURL = outcome.trashURL { try? FileManager.default.removeItem(at: trashURL) }
+        }
+
+        let journal = try await WALJournal(url: journalURL)
+        let records = try await journal.records()
+        await journal.close()
+
+        // The durable `planned` record — the one written before a single byte of the filesystem
+        // was touched — is what must carry this, not merely something reconstructed afterward.
+        // Codex Gate-U finding #4 splits execution into a leftover-phase plan and a bundle-phase
+        // plan, each with its own `planned` record — gathered across both, since either phase's
+        // record could carry the item under test.
+        let plannedItems = records.filter { $0.kind == .planned }.flatMap { $0.items ?? [] }
+        XCTAssertFalse(plannedItems.isEmpty)
+
+        let manualPlannedItem = try XCTUnwrap(plannedItems.first { $0.path.hasSuffix("/Library/Application Support/ProvenanceApp") })
+        let provenance = try XCTUnwrap(manualPlannedItem.manualConsentProvenance, "a manual-review admission must persist provenance into the planned WAL record")
+        XCTAssertTrue(provenance.manualConfirmed)
+        XCTAssertEqual(provenance.evidenceTag, "nameMatch")
+        XCTAssertEqual(provenance.canonicalPath, manualPlannedItem.path)
+        XCTAssertEqual(provenance.identity, manualPlannedItem.identity)
+        XCTAssertEqual(provenance.authorizationVersion, ManualConsentProvenance.currentVersion)
+
+        // The auto-admitted leftover (exact bundle id, verified bundle, no manual step involved)
+        // must carry no manual-consent provenance at all — it never needed one.
+        let autoPlannedItem = try XCTUnwrap(plannedItems.first { $0.path.hasSuffix("/Library/Caches/com.example.provenance.distinctnamespace") })
+        XCTAssertNil(autoPlannedItem.manualConsentProvenance)
+
+        // The bundle item itself never carries manual-consent provenance either.
+        let bundlePlannedItem = try XCTUnwrap(plannedItems.first { $0.path == bundle.path || $0.path.hasSuffix("/Applications/ProvenanceApp.app") })
+        XCTAssertNil(bundlePlannedItem.manualConsentProvenance)
+    }
+
     // MARK: - Helpers
 
     static func collectEvents(_ stream: AsyncThrowingStream<CleanEvent, Error>) async throws -> [CleanEvent] {
         var events: [CleanEvent] = []
         for try await event in stream { events.append(event) }
         return events
+    }
+}
+
+/// A thread-safe call counter for tests that need an `isRunning` closure whose answer changes
+/// partway through a pipeline run (Codex Gate-U finding #4: simulating an app that gets relaunched
+/// between the leftover phase and the bundle's own pre-staging revalidation).
+final class CallCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    @discardableResult
+    func increment() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        count += 1
+        return count
     }
 }

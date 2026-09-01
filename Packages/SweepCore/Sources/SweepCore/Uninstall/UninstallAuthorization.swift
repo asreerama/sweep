@@ -43,6 +43,21 @@ enum UninstallAuthorizationError: Error, Equatable, CustomStringConvertible {
     case lexicallyDenied(path: String)
     case appIsRunning(bundleIdentifier: String)
     case applicationsRootUnavailable(reason: SweepPolicy.DenialReason?)
+    /// Codex Gate-U finding #5: the path is not a real, validated `.app` bundle — a symlink
+    /// leaf (accepted by `SweepPolicy.authorize(externalRoot:)`'s own containment proof, which
+    /// never type-checks the leaf itself), a missing `.app` extension, a missing/non-directory
+    /// `Contents`, a missing/non-regular `Contents/Info.plist`, or `CFBundlePackageType != APPL`.
+    /// A system-resolving symlink (macOS cryptex-relocated apps) is refused earlier, by
+    /// ``protectedSystemLocation``, before this check ever runs — this exists for everything
+    /// else, most importantly a non-system planted symlink.
+    case bundleStructureInvalid(path: String, reason: String)
+    /// Codex Gate-U finding #4: the fresh, immediately-pre-staging revalidation
+    /// (``AuthorizedUninstallPlan/revalidateBundleImmediatelyBeforeStaging(_:expectedBundleIdentifier:isRunning:)``)
+    /// found the bundle's signature no longer validates end to end. Distinct from
+    /// ``bundleStructureInvalid``/``bundleIdentifierMismatch`` (which can also fire here) so the
+    /// specific "someone modified a sealed resource after we authorized this" case is
+    /// unambiguous in the report.
+    case bundleSignatureInvalidAtStaging(path: String)
 
     // MARK: Leftover-level (settle just that one selection)
     /// The re-derived matcher output has nothing at this path at all, or only an excluded root
@@ -75,6 +90,10 @@ enum UninstallAuthorizationError: Error, Equatable, CustomStringConvertible {
             "refused: \(bundleID) is running"
         case .applicationsRootUnavailable(let reason):
             "refused: no Applications root authorizes this bundle (\(reason?.description ?? "none resolved"))"
+        case .bundleStructureInvalid(let path, let reason):
+            "refused: \(path) is not a validated app bundle (\(reason))"
+        case .bundleSignatureInvalidAtStaging(let path):
+            "refused: \(path) failed fresh signature revalidation immediately before bundle staging"
         case .leftoverNotIndependentlyMatched(let path):
             "refused: \(path) was not independently matched by the re-derived leftover evidence"
         case .leftoverManualConfirmationRequired(let path):
@@ -98,10 +117,109 @@ enum UninstallAuthorizationError: Error, Equatable, CustomStringConvertible {
 /// audit provenance, surfaced back to the caller via `CleanItemOutcome.detectorSource`/`.detail`
 /// (see `UninstallService.swift`), never a token a caller can present to skip re-derivation.
 struct ManualOverrideToken: Sendable, Equatable {
-    let path: String
+    /// The caller's own selection string — kept only as an audit label for what the caller
+    /// originally named. Codex Gate-U finding #6: never itself trusted as an identity, and never
+    /// what the durable record below binds confirmation to.
+    let callerPath: String
+    /// The independently-matched candidate's own canonical path (`LeftoverCandidate.id`) —
+    /// finding #6's "bind confirmation to the canonical matched identity, not the caller
+    /// string." This, not `callerPath`, is what ``ManualConsentProvenance`` and the WAL record.
+    let canonicalPath: String
     let identity: FileIdentity
     let mintedAt: Date
     let operationID: UUID
+    /// Codex Gate-U finding #2: an unguessable, single-use receipt minted exactly once, here, the
+    /// moment this specific item is admitted — never re-derived from `manualOverrideConfirmedPaths`
+    /// at any later point, and never something a caller can mint or supply themselves (there is no
+    /// public initializer for this type outside `AuthorizedUninstallPlan.authorize`).
+    let nonce: UUID
+}
+
+/// Codex Gate-U finding #2: the durable proof, persisted into the `planned` WAL record via
+/// ``DeletionItem``/``JournalItem``, of why one manual-review leftover was admitted. Before this,
+/// `ManualOverrideToken` was minted at authorization time and then discarded the moment
+/// ``AuthorizedUninstallItem/deletionItem`` built a plain `DeletionItem` — after a crash, the WAL
+/// could show a weakly-matched item moved, but nothing durable explained why it had been allowed
+/// to. This closes that gap: every field a person or a recovery tool would need to audit the
+/// decision, without replaying `UninstallRequest.manualOverrideConfirmedPaths` (an ephemeral,
+/// in-memory-only caller value that never reaches the WAL at all).
+public struct ManualConsentProvenance: Sendable, Equatable, Codable {
+    /// Schema version for this provenance shape, so a future change to what gets recorded can
+    /// tell an old journal line apart from a new one instead of guessing.
+    public static let currentVersion = 1
+
+    /// Compact evidence tag (`OwnershipEvidence.journalTag`) — e.g. `"nameMatch"` or
+    /// `"exactBundleID"` for an item that was capped to manual review despite strong evidence
+    /// (Codex Gate-U finding #1: an unsigned/unverified bundle, or an incomplete inventory scan,
+    /// caps every leftover at manual review regardless of how strong its own evidence looks).
+    public let evidenceTag: String
+    /// Why this item needed manual review at all: either the evidence itself was only ever
+    /// `manualReview`-tier, or stronger evidence was capped down. Free text, for audit reading,
+    /// never parsed back by anything.
+    public let reviewReason: String
+    /// The matcher's own canonical path for this object (finding #6) — never the caller's raw
+    /// selection string.
+    public let canonicalPath: String
+    public let identity: FileIdentity
+    public let manualConfirmed: Bool
+    public let confirmedAt: Date
+    /// The same single-use nonce minted in `authorize()` — an operation-bound receipt, not a
+    /// second, independent check against a caller-supplied string set.
+    public let nonce: UUID
+    public let operationID: UUID
+    public let authorizationVersion: Int
+
+    init(evidence: OwnershipEvidence, reviewReason: String, token: ManualOverrideToken) {
+        self.evidenceTag = evidence.journalTag
+        self.reviewReason = reviewReason
+        self.canonicalPath = token.canonicalPath
+        self.identity = token.identity
+        self.manualConfirmed = true
+        self.confirmedAt = token.mintedAt
+        self.nonce = token.nonce
+        self.operationID = token.operationID
+        self.authorizationVersion = Self.currentVersion
+    }
+}
+
+/// Codex Gate-U finding #1: the only admissible proof that a live filesystem object really is the
+/// specific signed app it claims to be. Never constructible except through ``verify(bundleURL:liveBundleIdentifier:)``,
+/// which requires all of: an identity-pinned read (the caller already did this — `bundleURL` is
+/// always a path this authorization itself resolved, never a raw caller string), a full
+/// end-to-end `SecStaticCodeCheckValidity` pass (``SweepUninstall/SigningInfoReader/readVerified(at:)``
+/// — NOT the cheap header-only read `AppInventory` uses during a full-disk scan), a non-empty
+/// signing identifier, and proof that identifier agrees with the bundle's own live
+/// `CFBundleIdentifier`.
+///
+/// That last check is what actually closes the hole: a planted app can trivially set
+/// `CFBundleIdentifier` in its `Info.plist` to any string it likes, but it cannot make its own
+/// code signature's `kSecCodeInfoIdentifier` equal an id it was never signed under — `codesign`
+/// derives that identifier from the bundle id at signing time, and forging it would mean forging
+/// the signature itself. An exact-bundle-id leftover match is only as trustworthy as the bundle
+/// identity it is attributed to; without one of these, that identity is nothing more than an
+/// unvalidated `Info.plist` string.
+struct VerifiedBundle: Sendable, Equatable {
+    let bundleIdentifier: String
+    let signingIdentifier: String
+    let teamIdentifier: String?
+    let isAppleSigned: Bool
+
+    /// `nil` whenever the bundle is unsigned, ad-hoc-with-no-identifier, fails full validity
+    /// checking, or its signing identifier disagrees with its own live bundle id — every one of
+    /// which means "this object cannot be cryptographically vouched for as the app it claims to
+    /// be," never merely "this object could not be classified."
+    static func verify(bundleURL: URL, liveBundleIdentifier: String) -> VerifiedBundle? {
+        guard let signing = SigningInfoReader.readVerified(at: bundleURL), signing.isValiditySealed,
+              let signingIdentifier = signing.signingIdentifier, !signingIdentifier.isEmpty,
+              signingIdentifier == liveBundleIdentifier
+        else { return nil }
+        return VerifiedBundle(
+            bundleIdentifier: liveBundleIdentifier,
+            signingIdentifier: signingIdentifier,
+            teamIdentifier: signing.teamIdentifier,
+            isAppleSigned: signing.isAppleSigned
+        )
+    }
 }
 
 /// One item — the bundle, or one admitted leftover — inside an ``AuthorizedUninstallPlan``.
@@ -111,7 +229,13 @@ struct ManualOverrideToken: Sendable, Equatable {
 /// `UninstallService` mistake it for something this authorization actually proved.
 struct AuthorizedUninstallItem: Sendable, Equatable, Identifiable {
     enum Role: Sendable, Equatable {
-        case bundle
+        /// `wasVerified`: whether the bundle already had a ``VerifiedBundle`` at authorization
+        /// time. Codex Gate-U finding #1 explicitly keeps an unsigned/invalid app's bundle itself
+        /// explicitly trashable — only its leftovers are affected — so
+        /// ``AuthorizedUninstallPlan/revalidateBundleImmediatelyBeforeStaging(_:expectedBundleIdentifier:isRunning:)``
+        /// (finding #4) must never newly demand a signature that was never there to begin with;
+        /// it only refuses a *regression* — a bundle that WAS verifiable and no longer is.
+        case bundle(wasVerified: Bool)
         case leftover(evidence: OwnershipEvidence, manualOverride: ManualOverrideToken?)
     }
 
@@ -141,19 +265,33 @@ struct AuthorizedUninstallItem: Sendable, Equatable, Identifiable {
     /// The bridge into something `DeletionCoordinator` can execute — the uninstall-path
     /// counterpart of `DeletionItem.init(authorized: AuthorizedCleanPlan)`. `ruleID` stays `nil`
     /// on purpose (see the type's own doc comment: "Rule that claimed this path, when the scan
-    /// was rule-driven" — nothing here ever was); Gate U's own provenance (role, evidence, manual
-    /// override) is carried at this layer and at `CleanItemOutcome` only, exactly how the
-    /// code-sign-clone path already keeps `detectorSource` off `DeletionItem`/`JournalItem`
-    /// entirely and only ever surfaces it through the bridged report.
+    /// was rule-driven" — nothing here ever was); most of Gate U's own provenance (role, plain
+    /// evidence tag) is still carried only at this layer and at `CleanItemOutcome`, exactly how
+    /// the code-sign-clone path keeps `detectorSource` off `DeletionItem`/`JournalItem` entirely.
+    ///
+    /// Codex Gate-U finding #2 is the one deliberate exception: a manual-review admission's
+    /// ``ManualOverrideToken`` — previously minted here and then discarded — is now carried all
+    /// the way into `DeletionItem.manualConsentProvenance` and, from there, into the durable
+    /// `planned` WAL record via `JournalItem`. That is the only path where an explicit,
+    /// per-item human decision changes what authorization allows, so it is the only provenance
+    /// that must survive a crash, not just outlive this in-memory report.
     var deletionItem: DeletionItem {
-        DeletionItem(
+        var provenance: ManualConsentProvenance?
+        if case .leftover(let evidence, .some(let token)) = role {
+            let reason = evidence.contains(.exactBundleID) || evidence.contains(.receiptListed)
+                ? "evidence normally auto-selectable (\(evidence.journalTag)) but capped to manual review"
+                : "evidence \(evidence.journalTag) is manual-review tier"
+            provenance = ManualConsentProvenance(evidence: evidence, reviewReason: reason, token: token)
+        }
+        return DeletionItem(
             url: resolvedPath,
             identity: candidate.identity,
             parentIdentity: candidate.parentIdentity,
             action: .trash,
             tier: reportedTier,
             allocatedSize: candidate.allocatedSize,
-            ruleID: nil
+            ruleID: nil,
+            manualConsentProvenance: provenance
         )
     }
 }
@@ -176,13 +314,20 @@ struct AuthorizedUninstallPlan: Sendable {
     /// Roots `SweepUninstall.LeftoverMatcher` may find evidence under, but Gate U v1 never
     /// admits into an actual plan: `.pkgReceipt` (trashing a receipt plist without
     /// `pkgutil --forget` accomplishes nothing and PLAN §3 module 5 forbids "`pkgutil --forget`
-    /// as implicit cleanup" outright) and `.libraryLaunchDaemons` (root-owned; needs the
+    /// as implicit cleanup" outright), `.libraryLaunchDaemons` (root-owned; needs the
     /// privileged helper's `launchctl bootout` integration PLAN §3 module 5 already calls out as
     /// a prerequisite — "requires privileged launchctl bootout handling, never a plain delete" is
-    /// `OwnershipEvidence.launchDaemon`'s own doc comment). Both roots still count toward evidence
-    /// computation (a receipt can corroborate a *different*, admissible leftover's evidence), just
-    /// never toward what actually gets admitted here.
-    static let excludedLeftoverRoots: Set<SearchRoot> = [.pkgReceipt, .libraryLaunchDaemons]
+    /// `OwnershipEvidence.launchDaemon`'s own doc comment), and `.launchAgents` (Codex Gate-U
+    /// finding #3: a *loaded* LaunchAgent must be stopped with `launchctl bootout gui/<uid>/<label>`
+    /// before its plist is safe to remove — trashing a loaded agent's plist out from under
+    /// `launchd` leaves the in-memory job running with no on-disk definition. This wave adds no
+    /// bootout adapter at all, so every LaunchAgents entry stays manual-tier and excluded here
+    /// until a typed, fixed-path bootout adapter exists and can confirm the job actually stopped;
+    /// it "arrives with helper," per the task spec, not in this change). All three roots still
+    /// count toward evidence computation (a receipt or a LaunchAgent can corroborate a
+    /// *different*, admissible leftover's evidence), just never toward what actually gets
+    /// admitted here.
+    static let excludedLeftoverRoots: Set<SearchRoot> = [.pkgReceipt, .libraryLaunchDaemons, .launchAgents]
 
     /// Task item 2's ordering contract, achieved with zero new `DeletionCoordinator` logic:
     /// leftovers first, bundle last. `DeletionCoordinator.execute` already processes `plan.items`
@@ -272,10 +417,26 @@ struct AuthorizedUninstallPlan: Sendable {
             throw UninstallAuthorizationError.lexicallyDenied(path: bundlePath.path)
         }
 
+        // 3.5. Bundle-object validation (Codex Gate-U finding #5): a real directory, `.app`
+        // extension, `CFBundlePackageType == APPL`, and a validated `Contents/Info.plist`
+        // structure. Placed AFTER the protected-location check on purpose: a macOS
+        // cryptex-relocated system bundle is legitimately a symlink and is already refused above
+        // by `protectedSystemLocation` (or the Apple-namespace check) — this exists for
+        // everything `SweepPolicy.authorize(externalRoot:)`'s own leaf-agnostic containment proof
+        // would otherwise silently accept, most importantly a non-system planted symlink.
+        if let structureError = validateBundleStructure(bundlePath: bundlePath, identity: bundleIdentity) {
+            throw structureError
+        }
+
         // 4. NOT running.
         guard !isRunning(liveBundleIdentifier) else {
             throw UninstallAuthorizationError.appIsRunning(bundleIdentifier: liveBundleIdentifier)
         }
+
+        // Codex Gate-U finding #4's baseline: recorded now so the immediately-pre-staging
+        // revalidation can tell "never signed" (fine — finding #1 keeps an unsigned bundle
+        // explicitly trashable) apart from "was verified, and no longer is" (a real regression).
+        let wasVerified = VerifiedBundle.verify(bundleURL: bundlePath, liveBundleIdentifier: liveBundleIdentifier) != nil
 
         // 5. Confined to a real Applications root — `SweepPolicy.authorize(externalRoot:)` proves
         // symlink-free containment, volume-boundary safety and the full protected-area denylist
@@ -293,7 +454,7 @@ struct AuthorizedUninstallPlan: Sendable {
             case .allowed(let authorization):
                 let candidate = ScanCandidate(url: bundlePath, identity: bundleIdentity, allocatedSize: 0, ruleID: nil)
                 return AuthorizedUninstallItem(
-                    role: .bundle,
+                    role: .bundle(wasVerified: wasVerified),
                     candidate: candidate,
                     anchor: TrashOnlyAnchor(
                         key: .externalRoot(path: authorization.rootURL.path),
@@ -307,6 +468,87 @@ struct AuthorizedUninstallPlan: Sendable {
             }
         }
         throw UninstallAuthorizationError.applicationsRootUnavailable(reason: lastDenial)
+    }
+
+    // MARK: - Bundle-object structure validation (Codex Gate-U finding #5)
+
+    /// A real directory, `.app` extension, `CFBundlePackageType == APPL`, and a validated
+    /// `Contents/Info.plist` structure — the "mutation gate" refusal for a trailing symlink or a
+    /// hollowed-out fake bundle. `nil` means the structure is valid; returns (never throws) so the
+    /// same check can be reused both as a throwing gate in ``authorizeBundle`` and as a plain
+    /// yes/no answer in ``revalidateBundleImmediatelyBeforeStaging(_:expectedBundleIdentifier:isRunning:)``.
+    private static func validateBundleStructure(bundlePath: URL, identity: FileIdentity) -> UninstallAuthorizationError? {
+        guard bundlePath.pathExtension == "app" else {
+            return .bundleStructureInvalid(path: bundlePath.path, reason: "missing .app extension")
+        }
+        guard identity.kind == .directory else {
+            return .bundleStructureInvalid(path: bundlePath.path, reason: "not a real directory; a trailing symlink is refused")
+        }
+        let contentsURL = bundlePath.appendingPathComponent("Contents")
+        guard let contentsIdentity = try? FileIdentity.read(at: contentsURL), contentsIdentity.kind == .directory else {
+            return .bundleStructureInvalid(path: bundlePath.path, reason: "Contents is missing or not a real directory")
+        }
+        let infoPlistURL = contentsURL.appendingPathComponent("Info.plist")
+        guard let infoPlistIdentity = try? FileIdentity.read(at: infoPlistURL), infoPlistIdentity.kind == .file else {
+            return .bundleStructureInvalid(path: bundlePath.path, reason: "Contents/Info.plist is missing or not a real file")
+        }
+        guard (Bundle(url: bundlePath)?.infoDictionary?["CFBundlePackageType"] as? String) == "APPL" else {
+            return .bundleStructureInvalid(path: bundlePath.path, reason: "CFBundlePackageType is not APPL")
+        }
+        return nil
+    }
+
+    // MARK: - Bundle-last transactional safety (Codex Gate-U finding #4)
+
+    /// Everything ``authorizeBundle`` already proved, re-read live one more time, immediately
+    /// before the bundle is ever handed to `DeletionCoordinator` for staging. Leftovers execute
+    /// first (``orderedItems``'s own doc comment) and can take an arbitrary amount of real
+    /// wall-clock time — each one is a real rename plus a real `FileManager.trashItem` call —
+    /// during which nothing about "this app is safe to remove" is assumed to still hold.
+    ///
+    /// Distinct from `DeletionCoordinator.perform`'s own per-item identity re-check: that check
+    /// can only ever compare the bundle *directory's* own `stat` fields (mtime/ctime/size/
+    /// link-count/flags) against what authorization captured. A deep, in-place edit to a sealed
+    /// resource nested inside the bundle — replacing the signed executable without touching the
+    /// top-level directory entry at all — would not necessarily change any of those fields, but
+    /// would invalidate the signature. `VerifiedBundle.verify` catches exactly that, because it
+    /// runs a fresh `SecStaticCodeCheckValidity`, not a cached one.
+    static func revalidateBundleImmediatelyBeforeStaging(
+        _ item: AuthorizedUninstallItem,
+        expectedBundleIdentifier: String,
+        isRunning: @Sendable (String) -> Bool
+    ) -> UninstallAuthorizationError? {
+        guard case .bundle(let wasVerified) = item.role else { return nil }
+        let bundlePath = item.resolvedPath
+
+        let identity: FileIdentity
+        do {
+            identity = try FileIdentity.read(at: bundlePath)
+        } catch {
+            return .bundleNotFound(path: bundlePath.path)
+        }
+        if let structureError = validateBundleStructure(bundlePath: bundlePath, identity: identity) {
+            return structureError
+        }
+        guard let liveBundleIdentifier = Bundle(url: bundlePath)?.bundleIdentifier, !liveBundleIdentifier.isEmpty else {
+            return .bundleIdentifierUnreadable(path: bundlePath.path)
+        }
+        guard liveBundleIdentifier == expectedBundleIdentifier else {
+            return .bundleIdentifierMismatch(expected: expectedBundleIdentifier, found: liveBundleIdentifier)
+        }
+        // Only a *regression* is refused: a bundle that was never verifiable to begin with stays
+        // exactly as removable as `authorizeBundle` originally allowed (finding #1's "unsigned/
+        // invalid apps may still be explicitly trashed"). A bundle that WAS verified and no longer
+        // is means something changed a sealed resource after authorization — refused.
+        if wasVerified {
+            guard VerifiedBundle.verify(bundleURL: bundlePath, liveBundleIdentifier: liveBundleIdentifier) != nil else {
+                return .bundleSignatureInvalidAtStaging(path: bundlePath.path)
+            }
+        }
+        guard !isRunning(liveBundleIdentifier) else {
+            return .appIsRunning(bundleIdentifier: liveBundleIdentifier)
+        }
+        return nil
     }
 
     // MARK: - Leftover re-derivation
@@ -350,10 +592,30 @@ struct AuthorizedUninstallPlan: Sendable {
             isSystemLocation: UninstallProtection.isUnderSystemLocation(request.bundlePath, prefixes: ["/System/"])
         )
 
+        // Codex Gate-U finding #1: exact-bundle-id (and receipt-listed) admission requires a
+        // cryptographic ``VerifiedBundle``, not merely a `CFBundleIdentifier` string read from an
+        // unvalidated `Info.plist`. An unsigned or invalid app's bundle may still be explicitly
+        // trashed (that decision is `authorizeBundle`'s alone, already made before this function
+        // is ever reached) — but every one of its leftovers is capped at manual review below.
+        let verifiedBundle = VerifiedBundle.verify(bundleURL: request.bundlePath, liveBundleIdentifier: request.expectedBundleIdentifier)
+
         // Live, right now — never a caller-supplied inventory snapshot (an incomplete one could
         // only ever hide ambiguity `SharedOwnershipContext` would otherwise have flagged, never
         // manufacture it, which is exactly the wrong direction to trust a caller on).
-        let liveInventory = AppInventory.scan(directories: request.applicationsDirectories)
+        let inventoryScan = AppInventory.scanReportingCompleteness(directories: request.applicationsDirectories)
+
+        // Codex Gate-U finding #1: a scan that could not read everywhere it was supposed to look
+        // can never prove no sibling consumer exists for whatever leftover evidence it DID find —
+        // so an incomplete inventory caps everything at manual review too, exactly like an
+        // unverified bundle does.
+        let capReason: String?
+        if verifiedBundle == nil {
+            capReason = "the app's bundle is not a verified signed bundle (unsigned, invalid, or its signing identifier disagrees with its bundle id)"
+        } else if !inventoryScan.isComplete {
+            capReason = "the installed-applications inventory scan was incomplete; a sibling consumer of this leftover cannot be ruled out"
+        } else {
+            capReason = nil
+        }
 
         let recomputed = LeftoverMatcher.candidates(
             for: liveApp,
@@ -361,30 +623,36 @@ struct AuthorizedUninstallPlan: Sendable {
             homeDirectory: request.home,
             systemLaunchDaemonsDirectory: request.systemLaunchDaemonsDirectory,
             receipts: receipts,
-            installedApps: liveInventory
+            installedApps: inventoryScan.apps
         )
-        // Keyed by a symlink-resolved spelling, not the raw string: `FileManager`'s own directory
-        // enumeration (inside `RootWalker`, underneath `LeftoverMatcher`) surfaces entries through
-        // the real, firmlink-resolved path (`/private/var/...`), which need not be the exact
-        // spelling `selectedLeftoverPaths` happens to carry (`/var/...`, a caller's own
-        // un-resolved copy of the same `LeftoverCandidate.id`, or any other equivalent spelling of
-        // the same object). Normalizing both sides before comparing only ever widens *matching*,
-        // never *trust*: whether a selection is admitted still depends entirely on the evidence
-        // this recomputation independently found for whatever real object the path resolves to.
-        let byPath = Dictionary(
-            recomputed.map { (Self.normalizedPathKey($0.id), $0) }, uniquingKeysWith: { first, _ in first }
-        )
+        // Codex Gate-U finding #6: keyed by the matcher's own exact spelling. `resolvingSymlinksInPath()`
+        // previously resolved a caller-supplied path through EVERY symlink it happened to contain,
+        // not merely the narrow `/var` vs `/private/var` firmlink alias this was meant to
+        // accommodate — a caller path routed through any planted symlink could lexically collapse
+        // onto a completely different candidate's canonical path and be treated as a match for it.
+        // Matching is now exact-string-first; ``matchedCandidate(for:in:)`` is the only place an
+        // alias is still accepted, and only after `lstat`-verifying both spellings name the
+        // identical device/inode.
+        let byExactPath = Dictionary(recomputed.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
 
         var admitted: [AuthorizedUninstallItem] = []
         var unresolved: [UnresolvedLeftover] = []
 
         for path in request.selectedLeftoverPaths.sorted() {
-            guard let match = byPath[Self.normalizedPathKey(path)], !excludedLeftoverRoots.contains(match.root) else {
+            guard let match = matchedCandidate(for: path, in: byExactPath), !excludedLeftoverRoots.contains(match.root) else {
                 unresolved.append(.init(path: path, error: .leftoverNotIndependentlyMatched(path: path)))
                 continue
             }
 
-            switch match.confidence {
+            // Codex Gate-U finding #1: strong evidence (`exactBundleID`/`receiptListed`, which is
+            // what actually derives `.autoSelectable`) is downgraded to `.manualReview` whenever
+            // the bundle could not be cryptographically verified or the inventory scan was
+            // incomplete — regardless of how strong the matcher's own confidence looks.
+            let effectiveConfidence: MatchConfidence = (capReason != nil && match.confidence == .autoSelectable)
+                ? .manualReview
+                : match.confidence
+
+            switch effectiveConfidence {
             case .orphan:
                 // Unreachable in practice: `LeftoverMatcher.candidates(for:)` only ever emits
                 // non-empty evidence, and `MatchConfidence.derive` maps non-empty evidence to
@@ -422,8 +690,13 @@ struct AuthorizedUninstallPlan: Sendable {
                 continue
             }
 
-            let overrideToken: ManualOverrideToken? = match.confidence == .manualReview
-                ? ManualOverrideToken(path: path, identity: leftoverIdentity, mintedAt: now(), operationID: operationID)
+            // Codex Gate-U finding #6: bound to the matcher's own canonical path (`match.id`),
+            // never the caller's raw selection string.
+            let overrideToken: ManualOverrideToken? = effectiveConfidence == .manualReview
+                ? ManualOverrideToken(
+                    callerPath: path, canonicalPath: match.id, identity: leftoverIdentity,
+                    mintedAt: now(), operationID: operationID, nonce: UUID()
+                  )
                 : nil
 
             let candidate = ScanCandidate(url: match.url, identity: leftoverIdentity, allocatedSize: 0, ruleID: nil)
@@ -442,12 +715,24 @@ struct AuthorizedUninstallPlan: Sendable {
         return (admitted, unresolved)
     }
 
-    /// Symlink/firmlink-resolved spelling of a path string, used only to compare two spellings of
-    /// what may be the same object (`/var/...` vs `/private/var/...`) — never as an identity
-    /// proof. A nonexistent path resolves to itself lexically (nothing to follow), so a forged
-    /// selection still safely misses every real `LeftoverCandidate.id` in `byPath`.
-    private static func normalizedPathKey(_ path: String) -> String {
-        URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+    /// Codex Gate-U finding #6: matches a caller-supplied path against the independently
+    /// recomputed candidates, exact string first. Only when no exact match exists does this fall
+    /// back to a narrow, *identity*-verified alias check (the `/var` vs `/private/var` firmlink
+    /// case this existed for): both spellings are `lstat`'d and only accepted as the same object
+    /// when they name the identical device and inode — never merely the identical resolved
+    /// string, which is what let an arbitrary planted symlink alias onto a different candidate's
+    /// canonical path. Whichever way a match is found, everything downstream (identity,
+    /// `SweepPolicy` authorization, the eventual mutation) always proceeds against `match.url` —
+    /// the matcher's own canonical object — never the caller's string.
+    private static func matchedCandidate(
+        for path: String, in candidatesByExactPath: [String: LeftoverCandidate]
+    ) -> LeftoverCandidate? {
+        if let exact = candidatesByExactPath[path] { return exact }
+        guard let callerIdentity = try? FileIdentity.read(at: URL(fileURLWithPath: path)) else { return nil }
+        return candidatesByExactPath.values.first { candidate in
+            guard let candidateIdentity = try? FileIdentity.read(at: candidate.url) else { return false }
+            return candidateIdentity.deviceID == callerIdentity.deviceID && candidateIdentity.inode == callerIdentity.inode
+        }
     }
 }
 
@@ -471,11 +756,15 @@ enum UninstallProtection {
 }
 
 extension OwnershipEvidence {
-    /// Compact, greppable provenance tag for the bridged report (`CleanItemOutcome.detail`) —
-    /// never persisted into `JournalItem`/the real WAL (see `AuthorizedUninstallItem.deletionItem`'s
-    /// doc comment for why), only into the ephemeral, caller-inspectable
-    /// `CleanReport`/`CleanItemOutcome`, exactly how the code-sign-clone path's own
-    /// `detectorSource` is surfaced.
+    /// Compact, greppable provenance tag, always surfaced in the ephemeral, caller-inspectable
+    /// `CleanReport`/`CleanItemOutcome` (`.detail`) exactly how the code-sign-clone path's own
+    /// `detectorSource` is surfaced. For an auto-admitted item this is the only place the tag
+    /// appears — it is never persisted into `JournalItem`/the real WAL, per
+    /// `AuthorizedUninstallItem.deletionItem`'s doc comment. Codex Gate-U finding #2 is the one
+    /// exception: for a manual-review admission, this same tag is ALSO copied into
+    /// `ManualConsentProvenance.evidenceTag` and does reach the durable `planned` WAL record —
+    /// because that is the one case where explaining *why* something was authorized has to
+    /// survive a crash, not just outlive this report.
     var journalTag: String {
         var tags: [String] = []
         if contains(.exactBundleID) { tags.append("exactBundleID") }

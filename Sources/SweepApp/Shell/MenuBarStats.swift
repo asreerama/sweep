@@ -70,6 +70,68 @@ final class MenuBarActivationPolicy: NSObject, NSApplicationDelegate {
     }
 }
 
+/// In-app-menubar hand-off (PLAN §3 module 7, the P4-B decision-gate split): the in-app
+/// `MenuBarExtra` measured 92.6 MB idle against a 50 MB budget, floor traced to SwiftUI
+/// window/Scene machinery the main app needs for its real window regardless — so `SweepMenu`
+/// (`Sources/SweepMenu`) ships as a separate, unprivileged process with none of that machinery
+/// (measured ~45 MB idle; see that target's `main.swift`). Two processes both drawing a Sweep
+/// status item at once would be worse than either alone, so exactly one of them is ever inserted:
+/// `SweepMenu` if it is running, this in-app one otherwise. There is never a launch where neither
+/// is present — the in-app one is always the fallback, never the thing a user has to go turn on.
+enum MenuBarHandoffLogic {
+    /// `scripts/build-menu.sh`'s `CFBundleIdentifier` for the standalone menubar app.
+    static let menuAppBundleIdentifier = "com.aditya.sweep.menu"
+
+    /// Pure decision, injected running-apps list so it is testable without `NSWorkspace`
+    /// (`MenuBarHandoffLogicTests`): show the in-app menubar unless the standalone one is
+    /// currently among the running processes.
+    static func shouldShowInAppMenuBar(runningBundleIdentifiers: [String]) -> Bool {
+        !runningBundleIdentifiers.contains(menuAppBundleIdentifier)
+    }
+}
+
+/// Live wrapper around `MenuBarHandoffLogic`: watches `NSWorkspace` launch/terminate notifications
+/// for `SweepMenu`'s bundle id and republishes the decision as the observable state `SweepApp`
+/// binds its `MenuBarExtra` scene's `isInserted` to.
+@MainActor
+@Observable
+final class MenuBarHandoff {
+    static let shared = MenuBarHandoff()
+
+    var showsInAppMenuBar: Bool
+    private var didStart = false
+
+    private init() {
+        showsInAppMenuBar = Self.currentlyShouldShow()
+    }
+
+    /// Idempotent, same shape as `MenuBarActivationPolicy.start()` above: called from both
+    /// `SweepApp.swift`'s `Window` content (always reachable) and `MenuBarStats.onAppear` (only
+    /// reachable once the in-app item is already inserted), so whichever runs first is the one
+    /// and only run.
+    func start() {
+        guard !didStart else { return }
+        didStart = true
+        sync()
+        for name in [NSWorkspace.didLaunchApplicationNotification, NSWorkspace.didTerminateApplicationNotification] {
+            NSWorkspace.shared.notificationCenter.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
+                let bundleID = (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.bundleIdentifier
+                guard bundleID == MenuBarHandoffLogic.menuAppBundleIdentifier else { return }
+                MainActor.assumeIsolated { self?.sync() }
+            }
+        }
+    }
+
+    private func sync() {
+        showsInAppMenuBar = Self.currentlyShouldShow()
+    }
+
+    private static func currentlyShouldShow() -> Bool {
+        let runningBundleIdentifiers = NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier)
+        return MenuBarHandoffLogic.shouldShowInAppMenuBar(runningBundleIdentifiers: runningBundleIdentifiers)
+    }
+}
+
 /// Menubar popover: a compact stat stack and one action row (PLAN §5).
 ///
 /// Same rows as before, restyled onto `SweepStatRow`. Motion moment three lives here: the
@@ -133,7 +195,10 @@ struct MenuBarStats: View {
         }
         .padding(SweepTokens.s3)
         .frame(width: 268)
-        .onAppear { MenuBarActivationPolicy.shared.start() }
+        .onAppear {
+            MenuBarActivationPolicy.shared.start()
+            MenuBarHandoff.shared.start()
+        }
         .task {
             let sampler = StatsSampler()
             for await value in await sampler.snapshots() {

@@ -36,6 +36,11 @@ public struct DeletionItem: Sendable, Equatable, Identifiable {
     public let tier: Tier
     public let allocatedSize: Int64
     public let ruleID: String?
+    /// Codex Gate-U finding #2: durable proof of an explicit per-item manual-review confirmation
+    /// — `nil` for every Gate 1 item (nothing here ever sets it) and for a Gate U item that never
+    /// needed manual review. Carried through to ``JournalItem`` so the `planned` WAL record proves
+    /// *why* a manual-review item was authorized, not just that it moved.
+    public let manualConsentProvenance: ManualConsentProvenance?
 
     public var id: String { "\(identity.deviceID):\(identity.inode):\(url.path)" }
 
@@ -46,7 +51,8 @@ public struct DeletionItem: Sendable, Equatable, Identifiable {
         action: DeletionAction,
         tier: Tier,
         allocatedSize: Int64,
-        ruleID: String? = nil
+        ruleID: String? = nil,
+        manualConsentProvenance: ManualConsentProvenance? = nil
     ) {
         self.url = url
         self.identity = identity
@@ -55,6 +61,7 @@ public struct DeletionItem: Sendable, Equatable, Identifiable {
         self.tier = tier
         self.allocatedSize = allocatedSize
         self.ruleID = ruleID
+        self.manualConsentProvenance = manualConsentProvenance
     }
 
     init(candidate: ScanCandidate, action: DeletionAction, tier: Tier) {
@@ -102,7 +109,8 @@ public struct DeletionItem: Sendable, Equatable, Identifiable {
             action: action,
             tier: tier,
             allocatedSize: allocatedSize,
-            ruleID: ruleID
+            ruleID: ruleID,
+            manualConsentProvenance: manualConsentProvenance
         )
     }
 }

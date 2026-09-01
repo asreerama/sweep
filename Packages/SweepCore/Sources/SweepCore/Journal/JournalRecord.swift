@@ -66,6 +66,11 @@ public struct JournalItem: Sendable, Equatable, Codable {
     public let tier: Tier
     public let allocatedSize: Int64
     public let ruleID: String?
+    /// Codex Gate-U finding #2: durable manual-consent provenance, present only for a Gate U
+    /// leftover admitted after an explicit per-item manual-review confirmation. `nil` for every
+    /// other item, and for any journal written before this field existed (`decodeIfPresent`
+    /// semantics via the compiler-synthesized `Decodable` conformance below).
+    public let manualConsentProvenance: ManualConsentProvenance?
 
     public init(
         path: String,
@@ -74,7 +79,8 @@ public struct JournalItem: Sendable, Equatable, Codable {
         action: DeletionAction,
         tier: Tier,
         allocatedSize: Int64,
-        ruleID: String? = nil
+        ruleID: String? = nil,
+        manualConsentProvenance: ManualConsentProvenance? = nil
     ) {
         self.path = path
         self.identity = identity
@@ -83,6 +89,7 @@ public struct JournalItem: Sendable, Equatable, Codable {
         self.tier = tier
         self.allocatedSize = allocatedSize
         self.ruleID = ruleID
+        self.manualConsentProvenance = manualConsentProvenance
     }
 }
 

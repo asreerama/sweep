@@ -167,13 +167,19 @@ final class UninstallAuthorizationTests: XCTestCase {
         XCTAssertTrue(evidence.contains(.nameMatch))
         XCTAssertFalse(evidence.contains(.exactBundleID))
         let token = try XCTUnwrap(override, "a manual-review admission must mint an override token")
-        XCTAssertEqual(token.path, leftover.path)
+        // Codex Gate-U finding #6: the token binds to the matcher's own canonical path, never the
+        // caller's raw selection string — self-consistently checked against what was actually
+        // admitted, rather than assuming the fixture path needs no firmlink normalization.
+        XCTAssertEqual(token.canonicalPath, admitted.candidate.url.path)
+        XCTAssertEqual(token.callerPath, leftover.path)
         XCTAssertEqual(token.operationID, operationID)
     }
 
+    /// Codex Gate-U finding #1: exact-bundle-id admission now requires a `VerifiedBundle` — an
+    /// ad-hoc-signed fixture whose signing identifier agrees with its own bundle id.
     func testExactBundleIDLeftoverIsAdmittedWithoutAnOverrideToken() throws {
         let home = try FixtureHome("gateU-exact-bundle-id")
-        let bundle = try home.makeAppBundle(bundleIdentifier: "com.example.Exact")
+        let bundle = try home.makeAppBundle(bundleIdentifier: "com.example.Exact", codeSign: true)
         let leftover = try home.makeLeftover(root: .applicationSupport, name: "com.example.Exact")
 
         let request = Self.request(
@@ -189,6 +195,44 @@ final class UninstallAuthorizationTests: XCTestCase {
         }
         XCTAssertTrue(evidence.contains(.exactBundleID))
         XCTAssertNil(override, "an autoSelectable match never mints an override token")
+    }
+
+    /// Codex Gate-U finding #1: the SAME exact-bundle-id evidence, for an UNSIGNED bundle, must
+    /// drop to manual review instead of auto-admitting — the bundle itself may still be
+    /// explicitly trashed (that is `authorizeBundle`'s decision alone, unaffected), but none of
+    /// its leftovers may auto-admit without a verified signature.
+    func testExactBundleIDLeftoverIsCappedToManualReviewWhenBundleIsUnsigned() throws {
+        let home = try FixtureHome("gateU-exact-bundle-id-unsigned")
+        let bundle = try home.makeAppBundle(bundleIdentifier: "com.example.Unsigned")
+        let leftover = try home.makeLeftover(root: .applicationSupport, name: "com.example.Unsigned")
+
+        let request = Self.request(
+            home: home, bundlePath: bundle, expectedBundleIdentifier: "com.example.Unsigned",
+            selectedLeftoverPaths: [leftover.path]
+        )
+        let refusedPlan = try Self.authorize(request: request, isRunning: { _ in false })
+        XCTAssertTrue(refusedPlan.leftovers.isEmpty, "an unsigned bundle's exact-bundle-id leftover must never auto-admit")
+        guard case .leftoverManualConfirmationRequired = refusedPlan.unresolvedLeftovers.first?.error else {
+            return XCTFail("expected leftoverManualConfirmationRequired, got \(refusedPlan.unresolvedLeftovers)")
+        }
+
+        // The bundle authorizes on its own regardless — signing is never required to trash the
+        // app itself, only to auto-admit its leftovers.
+        XCTAssertEqual(refusedPlan.bundle.candidate.url.path, bundle.path)
+
+        // With an explicit override, the same strong evidence is still admitted — capped to
+        // manual, never refused outright.
+        let overriddenRequest = Self.request(
+            home: home, bundlePath: bundle, expectedBundleIdentifier: "com.example.Unsigned",
+            selectedLeftoverPaths: [leftover.path], manualOverrideConfirmedPaths: [leftover.path]
+        )
+        let admittedPlan = try Self.authorize(request: overriddenRequest, isRunning: { _ in false })
+        let admitted = try XCTUnwrap(admittedPlan.leftovers.first)
+        guard case .leftover(let evidence, let override) = admitted.role else {
+            return XCTFail("expected a leftover role, got \(admitted.role)")
+        }
+        XCTAssertTrue(evidence.contains(.exactBundleID))
+        XCTAssertNotNil(override, "capped-to-manual admission must still mint an override token")
     }
 
     /// PLAN §3 module 5: `/Library/LaunchDaemons` "requires privileged launchctl bootout
@@ -214,12 +258,149 @@ final class UninstallAuthorizationTests: XCTestCase {
         }
     }
 
+    /// Codex Gate-U finding #3: `~/Library/LaunchAgents` must be excluded exactly like
+    /// `/Library/LaunchDaemons` until a typed `launchctl bootout gui/<uid>/<label>` adapter can
+    /// confirm the job actually stopped — a loaded agent's plist must never be auto-admitted and
+    /// trashed out from under `launchd`.
+    func testLaunchAgentsRootIsNeverAdmittedEvenWithExactBundleIDEvidence() throws {
+        let home = try FixtureHome("gateU-launch-agents")
+        let bundle = try home.makeAppBundle(bundleIdentifier: "com.example.Agent", codeSign: true)
+        let agentEntry = try home.makeLeftover(root: .launchAgents, name: "com.example.Agent")
+
+        let request = Self.request(
+            home: home, bundlePath: bundle, expectedBundleIdentifier: "com.example.Agent",
+            selectedLeftoverPaths: [agentEntry.path]
+        )
+        let plan = try Self.authorize(request: request, isRunning: { _ in false })
+
+        XCTAssertTrue(plan.leftovers.isEmpty, "a ~/Library/LaunchAgents entry must never be admitted into a Gate U plan")
+        guard case .leftoverNotIndependentlyMatched = plan.unresolvedLeftovers.first?.error else {
+            return XCTFail("expected leftoverNotIndependentlyMatched, got \(plan.unresolvedLeftovers)")
+        }
+    }
+
+    // MARK: - Inventory completeness (Codex Gate-U finding #1)
+
+    /// A second applications root that exists but cannot be enumerated (permission denied) must
+    /// cap even the strongest evidence at manual review — a sibling consumer could be sitting
+    /// inside exactly the directory this scan could not read.
+    func testIncompleteInventoryScanCapsExactBundleIDLeftoverToManualReview() throws {
+        let home = try FixtureHome("gateU-incomplete-inventory")
+        let bundle = try home.makeAppBundle(bundleIdentifier: "com.example.Incomplete", codeSign: true)
+        let leftover = try home.makeLeftover(root: .applicationSupport, name: "com.example.Incomplete")
+
+        let unreadableRoot = home.url("OtherApplications")
+        try FileManager.default.createDirectory(at: unreadableRoot, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: unreadableRoot.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: unreadableRoot.path) }
+
+        let request = UninstallRequest(
+            bundlePath: bundle, expectedBundleIdentifier: "com.example.Incomplete",
+            selectedLeftoverPaths: [leftover.path], manualOverrideConfirmedPaths: [],
+            journalURL: home.url("unused-journal.jsonl"), home: home.root,
+            applicationsDirectories: [home.applicationsDirectory, unreadableRoot],
+            systemLaunchDaemonsDirectory: home.url("LaunchDaemons")
+        )
+        let refusedPlan = try Self.authorize(request: request, isRunning: { _ in false })
+        guard case .leftoverManualConfirmationRequired = refusedPlan.unresolvedLeftovers.first?.error else {
+            if refusedPlan.leftovers.isEmpty {
+                return XCTFail("expected leftoverManualConfirmationRequired, got \(refusedPlan.unresolvedLeftovers)")
+            }
+            throw XCTSkip("permission bits did not actually block enumeration in this environment (e.g. running as root)")
+        }
+        XCTAssertTrue(refusedPlan.leftovers.isEmpty, "an incomplete inventory scan must cap even exact-bundle-id evidence to manual review")
+
+        // With an explicit override, the same evidence is still admitted — capped, never refused.
+        let overriddenRequest = UninstallRequest(
+            bundlePath: bundle, expectedBundleIdentifier: "com.example.Incomplete",
+            selectedLeftoverPaths: [leftover.path], manualOverrideConfirmedPaths: [leftover.path],
+            journalURL: home.url("unused-journal.jsonl"), home: home.root,
+            applicationsDirectories: [home.applicationsDirectory, unreadableRoot],
+            systemLaunchDaemonsDirectory: home.url("LaunchDaemons")
+        )
+        let admittedPlan = try Self.authorize(request: overriddenRequest, isRunning: { _ in false })
+        let admitted = try XCTUnwrap(admittedPlan.leftovers.first)
+        guard case .leftover(let evidence, let override) = admitted.role else {
+            return XCTFail("expected a leftover role, got \(admitted.role)")
+        }
+        XCTAssertTrue(evidence.contains(.exactBundleID))
+        XCTAssertNotNil(override)
+    }
+
+    // MARK: - Bundle-object validation (Codex Gate-U finding #5)
+
+    /// A planted symlink standing in the Applications directory, pointing at a real bundle
+    /// elsewhere on disk, must never be accepted as the bundle to authorize — `SweepPolicy.authorize(externalRoot:)`'s
+    /// own containment proof never type-checks its leaf, so this refusal has to come from bundle
+    /// structure validation itself. Deliberately NOT a system location (that class of symlink is
+    /// already refused earlier, by `protectedSystemLocation` — see
+    /// `testProtectedSystemLocationResolvedSymlinkIsRefused`): this is the other case that check
+    /// does not cover.
+    func testNonSystemPlantedSymlinkBundlePathIsRefused() throws {
+        let home = try FixtureHome("gateU-planted-symlink-bundle")
+        let realTarget = try home.makeAppBundle(
+            name: "RealElsewhere", bundleIdentifier: "com.example.PlantedSymlink", relativeDirectory: "Elsewhere"
+        )
+        try FileManager.default.createDirectory(at: home.applicationsDirectory, withIntermediateDirectories: true)
+        let plantedSymlink = home.applicationsDirectory.appending(path: "Planted.app")
+        try FileManager.default.createSymbolicLink(at: plantedSymlink, withDestinationURL: realTarget)
+
+        let request = Self.request(
+            home: home, bundlePath: plantedSymlink, expectedBundleIdentifier: "com.example.PlantedSymlink"
+        )
+        XCTAssertThrowsError(try Self.authorize(request: request, isRunning: { _ in false })) { error in
+            guard case .bundleStructureInvalid(let path, _) = error as? UninstallAuthorizationError else {
+                return XCTFail("expected bundleStructureInvalid, got \(error)")
+            }
+            XCTAssertEqual(path, plantedSymlink.path)
+        }
+    }
+
+    // MARK: - normalizedPathKey aliasing (Codex Gate-U finding #6)
+
+    /// A symlink planted at a location the matcher never independently evidences (its own name
+    /// matches nothing) must never be treated as a match for a *different*, real candidate's
+    /// canonical path just because it happens to resolve there lexically. Before the fix,
+    /// `resolvingSymlinksInPath()` collapsed both the caller's selection and every candidate's own
+    /// id onto the same resolved string, so this exact symlink would have aliased onto the real
+    /// leftover below and been admitted in its place.
+    func testPlantedTrailingSymlinkCannotAliasOntoADifferentCandidatesCanonicalPath() throws {
+        let home = try FixtureHome("gateU-symlink-alias")
+        let bundle = try home.makeAppBundle(bundleIdentifier: "com.example.Alias", codeSign: true)
+        let realLeftover = try home.makeLeftover(root: .applicationSupport, name: "com.example.Alias")
+
+        let plantedSymlink = home.url("Library/Caches/NotAnEvidencedName")
+        try FileManager.default.createDirectory(at: plantedSymlink.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: plantedSymlink, withDestinationURL: realLeftover)
+
+        let request = Self.request(
+            home: home, bundlePath: bundle, expectedBundleIdentifier: "com.example.Alias",
+            selectedLeftoverPaths: [plantedSymlink.path]
+        )
+        let plan = try Self.authorize(request: request, isRunning: { _ in false })
+
+        XCTAssertTrue(plan.leftovers.isEmpty, "a caller-side symlink must never alias onto a different candidate's canonical path")
+        guard case .leftoverNotIndependentlyMatched(let path) = plan.unresolvedLeftovers.first?.error else {
+            return XCTFail("expected leftoverNotIndependentlyMatched, got \(plan.unresolvedLeftovers)")
+        }
+        XCTAssertEqual(path, plantedSymlink.path)
+
+        // The real leftover, selected directly by its own canonical path, is of course still
+        // admitted normally — the fix only closes the alias, never the legitimate direct match.
+        let directRequest = Self.request(
+            home: home, bundlePath: bundle, expectedBundleIdentifier: "com.example.Alias",
+            selectedLeftoverPaths: [realLeftover.path]
+        )
+        let directPlan = try Self.authorize(request: directRequest, isRunning: { _ in false })
+        XCTAssertEqual(directPlan.leftovers.count, 1)
+    }
+
     // MARK: - Identity-swap refusal between authorize and execute
 
     func testIdentitySwapBetweenAuthorizeAndExecuteIsRefused() async throws {
         let home = try FixtureHome("gateU-identity-swap")
         try TrashAvailabilityProbe.skipIfUnavailable(near: home.url("probe"))
-        let bundle = try home.makeAppBundle(bundleIdentifier: "com.example.Swap")
+        let bundle = try home.makeAppBundle(bundleIdentifier: "com.example.Swap", codeSign: true)
         let leftover = try home.makeLeftover(root: .applicationSupport, name: "com.example.Swap")
 
         let request = Self.request(
@@ -236,6 +417,22 @@ final class UninstallAuthorizationTests: XCTestCase {
         try FileManager.default.createDirectory(at: leftover, withIntermediateDirectories: true)
         try Data("replacement".utf8).write(to: leftover.appending(path: "different-content.bin"))
 
+        // Deliberately still the lower-level `execute(plan:journalURL:)` helper below, not
+        // `UninstallService.runPipeline`: that entry point always re-authorizes fresh immediately
+        // before it executes, so it can never observe "authorize captured X, then X changed on
+        // disk" from an *outside* caller's perspective — re-authorizing after the swap would just
+        // capture the replacement as legitimate. This suite instead reuses the SAME
+        // already-captured `plan` value across the swap, which is the only way this specific race
+        // is observable at all with the package's public surface.
+        //
+        // Codex Gate-U finding #4 is a *different* failure mode than this test, and is not what
+        // this test's bundle-succeeds assertion below is evidence against: an unrelated leftover
+        // failing its own identity check must never hold the bundle hostage, and that is still
+        // correct after finding #4's fix. See
+        // `UninstallServiceTests.testLateBundleRefusalRestoresAlreadyTrashedLeftoverAndLeavesBundleInstalled`
+        // for finding #4's actual gap: a late problem with the BUNDLE ITSELF now rolls the whole
+        // operation back through the real production pipeline, restoring any leftover already
+        // trashed, rather than leaving the bundle installed with its leftovers gone.
         let report = try await Self.execute(plan: plan, journalURL: home.url("uninstall-journal.jsonl"))
 
         // Compared against `plan`'s own (already-resolved, `/private/var/...`) paths, not the raw
@@ -251,7 +448,8 @@ final class UninstallAuthorizationTests: XCTestCase {
         )
 
         // The bundle, untouched by the swap, still proceeds normally — the swap only refuses the
-        // one item whose identity actually changed.
+        // one item whose identity actually changed; it is not a bundle-safety problem and must
+        // never block the bundle.
         let bundleOutcome = try XCTUnwrap(report.results.first { $0.item.url.path == plan.bundle.resolvedPath.path })
         XCTAssertEqual(bundleOutcome.outcome, .succeeded, "\(bundleOutcome)")
     }
@@ -290,11 +488,14 @@ final class UninstallAuthorizationTests: XCTestCase {
         )
     }
 
-    /// Replicates the wiring `UninstallService.run` does after authorization succeeds —
-    /// leftovers-first-bundle-last ordering, one `DeletionCoordinator` in `.trashOnly` mode, one
-    /// real `WALJournal` — without going through `UninstallService` itself, so this suite can
-    /// exercise the boundary between "authorize captured this identity" and "the coordinator
-    /// re-validates it" directly.
+    /// Replicates the wiring `UninstallService.run` used to do in a single combined
+    /// `DeletionPlan` — leftovers-first-bundle-last ordering, one `DeletionCoordinator` in
+    /// `.trashOnly` mode, one real `WALJournal` — without going through `UninstallService` itself,
+    /// so this suite can exercise the boundary between "authorize captured this identity" and
+    /// "the coordinator re-validates it" directly, reusing one already-captured
+    /// `AuthorizedUninstallPlan` across an on-disk change made after it was captured.
+    /// `UninstallService.runPipeline` cannot substitute for this: it always re-authorizes fresh
+    /// immediately before executing, so it never observes a plan going stale from outside.
     static func execute(plan: AuthorizedUninstallPlan, journalURL: URL) async throws -> DeletionReport {
         let journal = try await WALJournal(url: journalURL)
         let coordinator = try DeletionCoordinator(mode: .trashOnly(anchors: plan.anchors), journal: journal)

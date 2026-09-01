@@ -16,14 +16,37 @@ struct SweepApp: App {
     /// `RootView`'s `.dropDestination(for: URL.self)`, for a `.app` dropped on the window itself.
     @NSApplicationDelegateAdaptor(SweepAppDelegate.self) private var appDelegate
 
+    /// First-run onboarding (PLAN §4/§5): one `UserDefaults`-backed flag, presented as a sheet
+    /// over the main window rather than a window of its own — "never blocks the main window." A
+    /// plain `@State` (not `@Bindable`) is enough here: nothing below reads `$onboarding` itself,
+    /// only `onboarding.isPresented` through the hand-built `Binding` at the `.sheet` call site,
+    /// the same shape `SmartScanScreen` already uses for its own sheet (`cleanFlow`).
+    @State private var onboarding = OnboardingLaunchState.shared
+
+    /// In-app-menubar hand-off (PLAN §3 module 7, the P4-B split): `MenuBarHandoff` (Shell/
+    /// MenuBarStats.swift) tracks whether the standalone `SweepMenu` process is running, and this
+    /// scene's own `MenuBarExtra` below binds its `isInserted` to it — exactly one of the two ever
+    /// draws a Sweep status item.
+    @State private var menuBarHandoff = MenuBarHandoff.shared
+
     var body: some Scene {
         Window("Sweep", id: "main") {
             RootView(state: state)
                 .frame(minWidth: 900, minHeight: 600)
                 .task { await SnapshotHarness.runIfRequested(state: state) }
                 .task { await UninstallerSnapshotHarness.runIfRequested(state: state) }
+                .task { await OnboardingSnapshotHarness.runIfRequested() }
                 .task { _ = QuarantineWatch.checkAtStartup() }
                 .task { SentinelSettings.shared.apply() }
+                // FDA capability model (PLAN §4): starts the probe-and-recheck lifecycle once,
+                // at launch, independent of whether onboarding ever gets a chance to read it —
+                // a later Settings-triggered re-run should never show a stale first reading.
+                .task { CapabilityStore.shared.start() }
+                .sheet(isPresented: Binding(
+                    get: { onboarding.isPresented }, set: { onboarding.setPresented($0) }
+                )) {
+                    OnboardingFlow { _ in onboarding.markSeen() }
+                }
                 // Menubar accessory-mode switch (PLAN §2), started here rather than only from
                 // `MenuBarStats`'s own `.onAppear`: `MenuBarExtra`'s `.window`-style content
                 // closure is evaluated lazily — confirmed empirically, not just by inspection —
@@ -37,6 +60,11 @@ struct SweepApp: App {
                 // `SWEEP_MENUBAR_BUDGET` is set, but it has to be reachable without a popover
                 // open to measure the exact "main window closed, menubar only" state at all.
                 .task { await MenuBarBudgetHarness.runIfRequested() }
+                // Same reachability reason again, and load-bearing this time rather than just a
+                // measurement hook: `MenuBarExtra`'s content closure (and so `MenuBarStats.onAppear`)
+                // never runs while `isInserted` is false, which is exactly the state that must
+                // still watch for `SweepMenu` quitting so the in-app item can hand back.
+                .task { MenuBarHandoff.shared.start() }
                 .onAppear { appDelegate.attach(state) }
                 // `sweep://open-uninstall-orphan?bundleID=...` — the SmartDelete watcher's own
                 // offer accept action (`TrashOfferPanel`), and the one other place a `sweep://`
@@ -46,7 +74,9 @@ struct SweepApp: App {
         }
         .defaultSize(width: 1060, height: 700)
 
-        MenuBarExtra("Sweep", systemImage: "wind") {
+        // `isInserted` is the hand-off switch (PLAN §3 module 7): unchecked the instant `SweepMenu`
+        // is detected running, so there is never more than one Sweep status item on screen.
+        MenuBarExtra("Sweep", systemImage: "wind", isInserted: $menuBarHandoff.showsInAppMenuBar) {
             MenuBarStats()
         }
         .menuBarExtraStyle(.window)

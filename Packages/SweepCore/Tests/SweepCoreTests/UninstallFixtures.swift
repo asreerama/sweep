@@ -14,11 +14,19 @@ extension FixtureHome {
 
     /// Builds a real, readable `.app` bundle: `Contents/Info.plist` with the given identifier,
     /// plus a minimal executable so the bundle is fully bundle-shaped. Returns the bundle's URL.
+    ///
+    /// `codeSign`: Codex Gate-U finding #1 requires a `VerifiedBundle` (a full, live
+    /// `SecStaticCodeCheckValidity` pass whose signing identifier agrees with the bundle id)
+    /// before an `exactBundleID`/`receiptListed` leftover match may be auto-admitted, and before
+    /// every leftover of an app is no longer capped at manual review. Pass `true` for any fixture
+    /// whose test exercises that auto-admission path; ad-hoc signing (`codesign -s -`) needs no
+    /// real certificate, so this is portable across any Mac with the Xcode command line tools.
     @discardableResult
     func makeAppBundle(
         name: String = "FixtureApp",
         bundleIdentifier: String,
-        relativeDirectory: String = "Applications"
+        relativeDirectory: String = "Applications",
+        codeSign: Bool = false
     ) throws -> URL {
         let bundleURL = url("\(relativeDirectory)/\(name).app")
         let contents = bundleURL.appending(path: "Contents")
@@ -42,6 +50,10 @@ extension FixtureHome {
         try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
 
+        if codeSign {
+            try FixtureCodeSigning.adHocSign(bundleURL)
+        }
+
         return bundleURL
     }
 
@@ -58,6 +70,24 @@ extension FixtureHome {
         try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
         try Data("leftover".utf8).write(to: target.appending(path: "data.bin"))
         return target
+    }
+}
+
+/// Ad-hoc code-signing for fixture bundles (Codex Gate-U finding #1's `VerifiedBundle`).
+enum FixtureCodeSigning {
+    static func adHocSign(_ bundleURL: URL, file: StaticString = #filePath, line: UInt = #line) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+        process.arguments = ["-s", "-", "--force", bundleURL.path]
+        let stderrPipe = Pipe()
+        process.standardError = stderrPipe
+        process.standardOutput = Pipe()
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            let message = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            throw XCTSkip("codesign unavailable or failed in this environment: \(message)")
+        }
     }
 }
 

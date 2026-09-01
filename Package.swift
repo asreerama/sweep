@@ -54,5 +54,24 @@ let package = Package(
             ],
             path: "SweepHelper/Tests/SweepHelperTests"
         ),
+        // Standalone menubar process (PLAN §3 module 7, the P4-B decision-gate split): the in-app
+        // `MenuBarExtra` measured 92.6 MB idle against a 50 MB budget — the floor is SwiftUI
+        // window/Scene machinery the main app also needs for its real window, not anything this
+        // process requires. `SweepMenu` depends on nothing from `SweepApp`/`SweepCore`/
+        // `SweepPolicy`/`SweepUninstall` — only the two packages it actually needs to show live
+        // stats — so it can never grow the deletion/XPC/rules surface `SweepApp` carries.
+        .executableTarget(
+            name: "SweepMenu",
+            dependencies: [
+                .product(name: "SweepSystem", package: "SweepSystem"),
+                .product(name: "SweepUI", package: "SweepUI"),
+            ],
+            path: "Sources/SweepMenu"
+        ),
+        .testTarget(
+            name: "SweepMenuTests",
+            dependencies: ["SweepMenu"],
+            path: "Tests/SweepMenuTests"
+        ),
     ]
 )

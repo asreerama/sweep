@@ -233,20 +233,72 @@ public enum UninstallService {
             throw error
         }
 
-        // Leftovers first, bundle last (task item 2) — `AuthorizedUninstallPlan.orderedItems`'s
-        // own doc comment explains why this array order alone is sufficient.
-        let deletionPlan = DeletionPlan(operationID: operationID, items: orderedItems.map(\.deletionItem))
-
         continuation.yield(.started(operationID: operationID, itemCount: orderedItems.count))
         for outcome in settled { continuation.yield(.itemCompleted(outcome)) }
 
-        let report: DeletionReport
-        do {
-            report = try await coordinator.execute(deletionPlan)
-        } catch {
-            await journal.close()
-            throw error
+        // Codex Gate-U finding #4 (bundle-last transactional safety): leftovers execute first,
+        // through the coordinator, in their own `DeletionPlan` — the bundle is deliberately NOT
+        // part of it. Before, a single combined plan meant the bundle's own identity check ran
+        // only once, moments after authorization, then sat unchecked while every leftover's real
+        // rename-and-trash executed; a late bundle problem (relaunched, resigned, deep content
+        // tampered) could only ever be discovered *after* leftovers were already gone. Splitting
+        // the two phases is what makes a fresh revalidation "immediately before bundle staging"
+        // possible at all, and what makes restoring already-trashed leftovers on refusal
+        // meaningful: nothing here mutates the bundle until that revalidation passes.
+        var leftoverResults: [DeletionItemResult] = []
+        var leftoverJournalingDegraded = false
+        // Its own operation id, distinct from the outer `operationID` this whole request reports
+        // under: kept so a compensating restore below corrects THIS phase's own `itemResult`
+        // records (`WALJournal.parse` tracks the latest outcome per path *within one operation
+        // id*), rather than filing an orphan correction under an id that has no `planned`/
+        // `started` record of its own.
+        let leftoverPlanOperationID = UUID()
+        if !plan.leftovers.isEmpty {
+            let leftoverPlan = DeletionPlan(operationID: leftoverPlanOperationID, items: plan.leftovers.map(\.deletionItem))
+            do {
+                let leftoverReport = try await coordinator.execute(leftoverPlan)
+                leftoverResults = leftoverReport.results
+                leftoverJournalingDegraded = leftoverReport.journalingDegraded || !leftoverReport.committed
+            } catch {
+                await journal.close()
+                throw error
+            }
         }
+
+        var allResults = leftoverResults
+        let committed: Bool
+
+        if leftoverJournalingDegraded {
+            // Mirrors the pre-existing single-plan behavior exactly (Codex G1 finding #1): a
+            // degraded journal during the leftover phase means the bundle is never attempted at
+            // all, and the operation is never reported as committed. The journal itself is what
+            // is unreliable here, not the bundle's own safety, so already-settled leftovers are
+            // left exactly as they ended up rather than compensated.
+            committed = false
+        } else if let revalidationError = AuthorizedUninstallPlan.revalidateBundleImmediatelyBeforeStaging(
+            plan.bundle, expectedBundleIdentifier: request.expectedBundleIdentifier, isRunning: isRunning
+        ) {
+            // Pre-mutation refusal of the whole plan, not a per-item settle that still leaves the
+            // rest trashed: every leftover that already reached the real Trash during the phase
+            // above is restored, and the bundle is never staged at all.
+            allResults = await restoreLeftoversAfterBundleRefusal(leftoverResults, journal: journal, operationID: leftoverPlanOperationID)
+            let (reason, description) = classify(revalidationError)
+            allResults.append(DeletionItemResult(
+                item: plan.bundle.deletionItem, outcome: SweepCore.outcome(for: reason), failureReason: reason, detail: description
+            ))
+            committed = false
+        } else {
+            let bundlePlan = DeletionPlan(operationID: UUID(), items: [plan.bundle.deletionItem])
+            do {
+                let bundleReport = try await coordinator.execute(bundlePlan)
+                allResults.append(contentsOf: bundleReport.results)
+                committed = bundleReport.committed
+            } catch {
+                await journal.close()
+                throw error
+            }
+        }
+
         await journal.close()
 
         let after = VolumeCapacity.sample(volumes: sampleVolumes)
@@ -254,7 +306,7 @@ public enum UninstallService {
 
         var allOutcomes = settled
         var bytesSoFar: Int64 = 0
-        for result in report.results {
+        for result in allResults {
             let outcome = CleanItemOutcome(uninstallResult: result, item: itemsByIdentity[result.item.identity])
             allOutcomes.append(outcome)
             if result.outcome == .succeeded { bytesSoFar += result.item.allocatedSize }
@@ -263,10 +315,83 @@ public enum UninstallService {
         }
 
         continuation.yield(.finished(CleanReport(
-            operationID: operationID, outcomes: allOutcomes, committed: report.committed,
-            catalogDigest: noCatalogDigestSentinel, journalingDegraded: report.journalingDegraded,
+            operationID: operationID, outcomes: allOutcomes, committed: committed,
+            catalogDigest: noCatalogDigestSentinel, journalingDegraded: leftoverJournalingDegraded,
             freedBytesEstimate: freed
         )))
+    }
+
+    /// Codex Gate-U finding #4's compensating half. `DeletionCoordinator`/`TrashStaging` stage
+    /// and trash a `.trash` item in one atomic step — Gate 1's shared, already-audited machinery
+    /// has no "stage now, commit later" mode, and this change does not invent one inside it — so
+    /// "roll back what is still in quarantine" becomes "move what already reached the real Trash
+    /// back to where it came from," verified the same way every other mutation in this codebase
+    /// is verified: by re-reading identity after the fact, never by trusting the move call's own
+    /// success report alone. A leftover that did NOT actually reach the Trash (skipped, failed,
+    /// changed) is passed through untouched — there is nothing to restore.
+    private static func restoreLeftoversAfterBundleRefusal(
+        _ results: [DeletionItemResult], journal: WALJournal, operationID: UUID
+    ) async -> [DeletionItemResult] {
+        var restored: [DeletionItemResult] = []
+        restored.reserveCapacity(results.count)
+        for result in results {
+            guard result.outcome == .succeeded else {
+                restored.append(result)
+                continue
+            }
+            let (outcome, failureReason, detail) = restoreFromTrash(result)
+            restored.append(DeletionItemResult(item: result.item, outcome: outcome, failureReason: failureReason, detail: detail))
+            // Best-effort: the in-memory result above is already the source of truth for this
+            // run's own report. This corrects the WAL's final recorded outcome for the item too
+            // (`WALJournal.parse` keeps only the latest `itemResult` per path), so a crash-
+            // recovery scan sees "restored," never a stale "succeeded" that no longer holds.
+            try? await journal.appendItemResult(
+                operationID: operationID, item: result.item.journalItem, outcome: outcome,
+                failureReason: failureReason, trashURL: nil, quarantineURL: nil, detail: detail
+            )
+        }
+        return restored
+    }
+
+    /// Moves a trashed leftover back to its original location and verifies it actually landed —
+    /// never trusting `FileManager.moveItem`'s own success return alone, the same discipline
+    /// every mutation in this codebase already follows.
+    private static func restoreFromTrash(_ result: DeletionItemResult) -> (ItemOutcome, ItemFailureReason, String) {
+        let originalPath = result.item.url.path
+        guard let trashURL = result.trashURL else {
+            return (
+                .movedRecoveryRequired, .rollbackFailed,
+                "bundle authorization was refused after this item reached the Trash, but no restore handle "
+                    + "was recorded; manual recovery required at \(originalPath)"
+            )
+        }
+        guard !FileManager.default.fileExists(atPath: originalPath) else {
+            return (
+                .movedRecoveryRequired, .rollbackFailed,
+                "bundle authorization was refused after this item reached the Trash, but \(originalPath) is "
+                    + "already occupied; manual recovery required, item left at \(trashURL.path)"
+            )
+        }
+        do {
+            try FileManager.default.moveItem(at: trashURL, to: result.item.url)
+        } catch {
+            return (
+                .movedRecoveryRequired, .rollbackFailed,
+                "bundle authorization was refused after this item reached the Trash, and restoring it failed "
+                    + "(\(error)); manual recovery required, item left at \(trashURL.path)"
+            )
+        }
+        guard FileManager.default.fileExists(atPath: originalPath) else {
+            return (
+                .movedRecoveryRequired, .rollbackFailed,
+                "restore move reported success but \(originalPath) is not present afterward; manual recovery required"
+            )
+        }
+        return (
+            .skipped, .notAuthorized,
+            "restored: bundle authorization was refused immediately before bundle staging, after this leftover "
+                + "had already reached the Trash; moved back from \(trashURL.path)"
+        )
     }
 
     private static func finishSingleOutcome(
@@ -376,7 +501,9 @@ extension CleanItemOutcome {
             if let override {
                 detectorSource = "gateU.leftover.manualOverride"
                 let mintedAtDescription = ISO8601DateFormatter().string(from: override.mintedAt)
-                detail = "manual override confirmed by caller for \(override.path); evidence=\(evidence.journalTag); mintedAt=\(mintedAtDescription)"
+                detail = "manual override confirmed by caller for \(override.callerPath) "
+                    + "(canonical: \(override.canonicalPath), nonce: \(override.nonce.uuidString)); "
+                    + "evidence=\(evidence.journalTag); mintedAt=\(mintedAtDescription)"
             } else {
                 detectorSource = "gateU.leftover.auto"
                 detail = result.detail ?? "evidence=\(evidence.journalTag)"
