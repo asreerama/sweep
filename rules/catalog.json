@@ -1,0 +1,601 @@
+{
+  "schemaVersion": 1,
+  "rules": [
+    {
+      "id": "system-junk-user-caches",
+      "title": "User Application Caches",
+      "group": "systemJunk",
+      "root": "userCaches",
+      "pattern": "*",
+      "itemTypes": [
+        "directory"
+      ],
+      "tier": "safe",
+      "action": "trash",
+      "undo": "trashRestore",
+      "rationale": "Application caches in ~/Library/Caches regenerate on next launch. Safe to clean."
+    },
+    {
+      "id": "system-junk-user-logs",
+      "title": "User Application Logs",
+      "group": "systemJunk",
+      "root": "userLogs",
+      "pattern": "*",
+      "itemTypes": [
+        "directory"
+      ],
+      "minAgeDays": 7,
+      "tier": "safe",
+      "action": "trash",
+      "undo": "trashRestore",
+      "rationale": "User logs in ~/Library/Logs older than 7 days are safe to remove."
+    },
+    {
+      "id": "system-junk-chrome-cache",
+      "title": "Chrome Cache",
+      "group": "systemJunk",
+      "root": "browserCaches",
+      "pattern": "*/Cache",
+      "itemTypes": [
+        "directory"
+      ],
+      "tier": "safe",
+      "action": "trash",
+      "undo": "trashRestore",
+      "rationale": "Chrome browser cache directory regenerates automatically."
+    },
+    {
+      "id": "system-junk-firefox-cache",
+      "title": "Firefox Cache",
+      "group": "systemJunk",
+      "root": "browserCaches",
+      "pattern": "*/cache2",
+      "itemTypes": [
+        "directory"
+      ],
+      "tier": "safe",
+      "action": "trash",
+      "undo": "trashRestore",
+      "rationale": "Firefox profile cache2 directory regenerates automatically."
+    },
+    {
+      "id": "system-junk-safari-cache",
+      "title": "Safari Cache",
+      "group": "systemJunk",
+      "root": "browserCaches",
+      "pattern": "*/Library/Caches",
+      "itemTypes": [
+        "directory"
+      ],
+      "tier": "safe",
+      "action": "trash",
+      "undo": "trashRestore",
+      "rationale": "Safari container cache directory regenerates automatically."
+    },
+    {
+      "id": "system-junk-crash-reports",
+      "title": "Crash Reports",
+      "group": "systemJunk",
+      "root": "crashReports",
+      "pattern": "*.crash",
+      "itemTypes": [
+        "file"
+      ],
+      "minAgeDays": 0,
+      "tier": "safe",
+      "action": "trash",
+      "undo": "trashRestore",
+      "rationale": "Crash report files can be safely removed; archived in Apple servers."
+    },
+    {
+      "id": "system-junk-diagnostic-logs",
+      "title": "Diagnostic Reports",
+      "group": "systemJunk",
+      "root": "crashReports",
+      "pattern": "*.diag",
+      "itemTypes": [
+        "file"
+      ],
+      "tier": "safe",
+      "action": "trash",
+      "undo": "trashRestore",
+      "rationale": "Diagnostic report files can be safely removed."
+    },
+    {
+      "id": "xcode-derived-data",
+      "title": "Xcode Derived Data",
+      "group": "systemJunk",
+      "root": "xcodeDerivedData",
+      "pattern": "*",
+      "itemTypes": [
+        "directory"
+      ],
+      "minAgeDays": 0,
+      "tier": "safe",
+      "action": "trash",
+      "undo": "trashRestore",
+      "rationale": "Xcode DerivedData regenerates on build; safe to remove to reclaim space."
+    },
+    {
+      "id": "xcode-archives",
+      "title": "Xcode Archives",
+      "group": "systemJunk",
+      "root": "developerToolCaches",
+      "pattern": "Library/Developer/Xcode/Archives/*",
+      "itemTypes": [
+        "directory"
+      ],
+      "tier": "caution",
+      "action": "trash",
+      "undo": "trashRestore",
+      "rationale": "Archives may be needed for debugging; marked caution for safety."
+    },
+    {
+      "id": "xcode-device-support",
+      "title": "Xcode Unused Device Support",
+      "group": "systemJunk",
+      "root": "xcodeDeviceSupport",
+      "pattern": "*",
+      "itemTypes": [
+        "directory"
+      ],
+      "minAgeDays": 0,
+      "tier": "safe",
+      "action": "trash",
+      "undo": "regenerated",
+      "rationale": "Unused iOS/tvOS/watchOS DeviceSupport packages can be re-downloaded from Apple."
+    },
+    {
+      "id": "xcode-simulators",
+      "title": "Unavailable iOS Simulators",
+      "group": "systemJunk",
+      "root": "developerToolCaches",
+      "pattern": "CoreSimulator/Devices/*",
+      "itemTypes": [
+        "directory"
+      ],
+      "tier": "safe",
+      "action": "commandPreview",
+      "command": "simctlDeleteUnavailable",
+      "undo": "regenerated",
+      "rationale": "Obsolete simulator runtimes can be safely removed via xcrun simctl."
+    },
+    {
+      "id": "homebrew-cache",
+      "title": "Homebrew Cache",
+      "group": "homebrew",
+      "root": "homebrewCache",
+      "pattern": "*",
+      "itemTypes": [
+        "directory",
+        "file"
+      ],
+      "tier": "safe",
+      "action": "commandPreview",
+      "command": "brewCleanup",
+      "undo": "regenerated",
+      "rationale": "Homebrew downloads cache regenerates on next install; safe to clean via brew cleanup."
+    },
+    {
+      "id": "npm-cache",
+      "title": "npm Cache",
+      "group": "developer",
+      "root": "developerToolCaches",
+      "pattern": ".npm/_cacache/*",
+      "itemTypes": [
+        "directory",
+        "file"
+      ],
+      "tier": "safe",
+      "action": "trash",
+      "undo": "regenerated",
+      "rationale": "npm _cacache directory regenerates on next package install."
+    },
+    {
+      "id": "pip-cache",
+      "title": "Python pip Cache",
+      "group": "developer",
+      "root": "userCaches",
+      "pattern": "pip/*",
+      "itemTypes": [
+        "directory",
+        "file"
+      ],
+      "tier": "safe",
+      "action": "trash",
+      "undo": "regenerated",
+      "rationale": "pip cache regenerates on next package download."
+    },
+    {
+      "id": "gradle-cache",
+      "title": "Gradle Build Cache",
+      "group": "developer",
+      "root": "developerToolCaches",
+      "pattern": ".gradle/caches/*",
+      "itemTypes": [
+        "directory",
+        "file"
+      ],
+      "tier": "safe",
+      "action": "trash",
+      "undo": "regenerated",
+      "rationale": "Gradle caches regenerate on next build."
+    },
+    {
+      "id": "gradle-wrapper",
+      "title": "Gradle Wrapper Downloads",
+      "group": "developer",
+      "root": "developerToolCaches",
+      "pattern": ".gradle/wrapper/*",
+      "itemTypes": [
+        "directory",
+        "file"
+      ],
+      "tier": "safe",
+      "action": "trash",
+      "undo": "regenerated",
+      "rationale": "Gradle wrapper cache regenerates on next use."
+    },
+    {
+      "id": "android-studio-cache",
+      "title": "Android Studio Cache",
+      "group": "developer",
+      "root": "userCaches",
+      "pattern": "Google/AndroidStudio*/*",
+      "itemTypes": [
+        "directory",
+        "file"
+      ],
+      "tier": "safe",
+      "action": "trash",
+      "undo": "regenerated",
+      "rationale": "Android Studio caches regenerate on next startup."
+    },
+    {
+      "id": "jetbrains-ide-cache",
+      "title": "JetBrains IDE Cache",
+      "group": "developer",
+      "root": "userCaches",
+      "pattern": "JetBrains/*",
+      "itemTypes": [
+        "directory",
+        "file"
+      ],
+      "tier": "safe",
+      "action": "trash",
+      "undo": "regenerated",
+      "rationale": "JetBrains IDE caches regenerate on next launch."
+    },
+    {
+      "id": "jetbrains-ide-logs",
+      "title": "JetBrains IDE Logs",
+      "group": "developer",
+      "root": "userLogs",
+      "pattern": "JetBrains/*",
+      "itemTypes": [
+        "directory",
+        "file"
+      ],
+      "minAgeDays": 7,
+      "tier": "safe",
+      "action": "trash",
+      "undo": "trashRestore",
+      "rationale": "JetBrains IDE logs older than 7 days are safe to remove."
+    },
+    {
+      "id": "vscode-cache",
+      "title": "VS Code Cache",
+      "group": "developer",
+      "root": "developerToolCaches",
+      "pattern": "Library/Application Support/Code/Cache/*",
+      "itemTypes": [
+        "directory",
+        "file"
+      ],
+      "tier": "safe",
+      "action": "trash",
+      "undo": "regenerated",
+      "rationale": "VS Code Cache directory regenerates on startup."
+    },
+    {
+      "id": "vscode-gpucache",
+      "title": "VS Code GPU Cache",
+      "group": "developer",
+      "root": "developerToolCaches",
+      "pattern": "Library/Application Support/Code/GPUCache/*",
+      "itemTypes": [
+        "directory",
+        "file"
+      ],
+      "tier": "safe",
+      "action": "trash",
+      "undo": "regenerated",
+      "rationale": "VS Code GPUCache directory regenerates automatically."
+    },
+    {
+      "id": "vscode-cached-data",
+      "title": "VS Code Cached Data",
+      "group": "developer",
+      "root": "developerToolCaches",
+      "pattern": "Library/Application Support/Code/CachedData/*",
+      "itemTypes": [
+        "directory",
+        "file"
+      ],
+      "tier": "safe",
+      "action": "trash",
+      "undo": "regenerated",
+      "rationale": "VS Code cached data regenerates on next startup."
+    },
+    {
+      "id": "vscode-cached-extensions",
+      "title": "VS Code Extension Cache",
+      "group": "developer",
+      "root": "developerToolCaches",
+      "pattern": "Library/Application Support/Code/CachedExtensions/*",
+      "itemTypes": [
+        "directory",
+        "file"
+      ],
+      "tier": "safe",
+      "action": "trash",
+      "undo": "regenerated",
+      "rationale": "VS Code extension cache regenerates on next startup."
+    },
+    {
+      "id": "cursor-cache",
+      "title": "Cursor IDE Cache",
+      "group": "developer",
+      "root": "developerToolCaches",
+      "pattern": "Library/Application Support/Cursor/Cache/*",
+      "itemTypes": [
+        "directory",
+        "file"
+      ],
+      "tier": "safe",
+      "action": "trash",
+      "undo": "regenerated",
+      "rationale": "Cursor IDE Cache directory regenerates on startup."
+    },
+    {
+      "id": "cursor-gpucache",
+      "title": "Cursor GPU Cache",
+      "group": "developer",
+      "root": "developerToolCaches",
+      "pattern": "Library/Application Support/Cursor/GPUCache/*",
+      "itemTypes": [
+        "directory",
+        "file"
+      ],
+      "tier": "safe",
+      "action": "trash",
+      "undo": "regenerated",
+      "rationale": "Cursor GPUCache regenerates automatically."
+    },
+    {
+      "id": "cursor-cached-data",
+      "title": "Cursor Cached Data",
+      "group": "developer",
+      "root": "developerToolCaches",
+      "pattern": "Library/Application Support/Cursor/CachedData/*",
+      "itemTypes": [
+        "directory",
+        "file"
+      ],
+      "tier": "safe",
+      "action": "trash",
+      "undo": "regenerated",
+      "rationale": "Cursor cached data regenerates on next startup."
+    },
+    {
+      "id": "zed-cache",
+      "title": "Zed Editor Cache",
+      "group": "developer",
+      "root": "userCaches",
+      "pattern": "Zed/*",
+      "itemTypes": [
+        "directory",
+        "file"
+      ],
+      "tier": "safe",
+      "action": "trash",
+      "undo": "regenerated",
+      "rationale": "Zed editor cache regenerates on next launch."
+    },
+    {
+      "id": "deno-cache",
+      "title": "Deno Cache",
+      "group": "developer",
+      "root": "userCaches",
+      "pattern": "deno/*",
+      "itemTypes": [
+        "directory",
+        "file"
+      ],
+      "tier": "safe",
+      "action": "trash",
+      "undo": "regenerated",
+      "rationale": "Deno runtime cache regenerates on next execution."
+    },
+    {
+      "id": "cocoapods-cache",
+      "title": "CocoaPods Cache",
+      "group": "developer",
+      "root": "userCaches",
+      "pattern": "CocoaPods/*",
+      "itemTypes": [
+        "directory",
+        "file"
+      ],
+      "tier": "safe",
+      "action": "trash",
+      "undo": "regenerated",
+      "rationale": "CocoaPods cache regenerates on next pod install."
+    },
+    {
+      "id": "carthage-cache",
+      "title": "Carthage Cache",
+      "group": "developer",
+      "root": "userCaches",
+      "pattern": "org.carthage.CarthageKit/*",
+      "itemTypes": [
+        "directory",
+        "file"
+      ],
+      "tier": "safe",
+      "action": "trash",
+      "undo": "regenerated",
+      "rationale": "Carthage dependency cache regenerates on next build."
+    },
+    {
+      "id": "composer-cache",
+      "title": "Composer Cache",
+      "group": "developer",
+      "root": "developerToolCaches",
+      "pattern": ".composer/cache/*",
+      "itemTypes": [
+        "directory",
+        "file"
+      ],
+      "tier": "safe",
+      "action": "trash",
+      "undo": "regenerated",
+      "rationale": "PHP Composer cache regenerates on next package install."
+    },
+    {
+      "id": "poetry-cache",
+      "title": "Poetry Cache",
+      "group": "developer",
+      "root": "userCaches",
+      "pattern": "pypoetry/*",
+      "itemTypes": [
+        "directory",
+        "file"
+      ],
+      "tier": "safe",
+      "action": "trash",
+      "undo": "regenerated",
+      "rationale": "Poetry cache regenerates on next dependency install."
+    },
+    {
+      "id": "pub-cache",
+      "title": "Pub Cache",
+      "group": "developer",
+      "root": "developerToolCaches",
+      "pattern": ".pub-cache/*",
+      "itemTypes": [
+        "directory",
+        "file"
+      ],
+      "tier": "safe",
+      "action": "trash",
+      "undo": "regenerated",
+      "rationale": "Dart/Flutter pub cache regenerates on next package fetch."
+    },
+    {
+      "id": "swiftpm-cache",
+      "title": "Swift Package Manager Cache",
+      "group": "developer",
+      "root": "developerToolCaches",
+      "pattern": ".swiftpm/*",
+      "itemTypes": [
+        "directory",
+        "file"
+      ],
+      "tier": "safe",
+      "action": "trash",
+      "undo": "regenerated",
+      "rationale": "Swift PM cache regenerates on next package build."
+    },
+    {
+      "id": "uv-cache",
+      "title": "uv Python Package Cache",
+      "group": "developer",
+      "root": "developerToolCaches",
+      "pattern": ".cache/uv/*",
+      "itemTypes": [
+        "directory",
+        "file"
+      ],
+      "tier": "safe",
+      "action": "trash",
+      "undo": "regenerated",
+      "rationale": "uv Python package cache regenerates on next install."
+    },
+    {
+      "id": "yarn-cache",
+      "title": "Yarn Package Cache",
+      "group": "developer",
+      "root": "developerToolCaches",
+      "pattern": ".cache/yarn/*",
+      "itemTypes": [
+        "directory",
+        "file"
+      ],
+      "tier": "safe",
+      "action": "trash",
+      "undo": "regenerated",
+      "rationale": "Yarn cache regenerates on next install."
+    },
+    {
+      "id": "nix-user-cache",
+      "title": "Nix User Cache",
+      "group": "developer",
+      "root": "developerToolCaches",
+      "pattern": ".cache/nix/*",
+      "itemTypes": [
+        "directory",
+        "file"
+      ],
+      "tier": "safe",
+      "action": "trash",
+      "undo": "regenerated",
+      "rationale": "User-level Nix cache regenerates on next nix command."
+    },
+    {
+      "id": "maintenance-apfs-snapshots",
+      "title": "Thin APFS Snapshots",
+      "group": "maintenance",
+      "root": "systemLogs",
+      "pattern": ".",
+      "itemTypes": [
+        "directory"
+      ],
+      "tier": "caution",
+      "action": "commandPreview",
+      "command": "tmutilThin",
+      "undo": "regenerated",
+      "rationale": "APFS local snapshots thin via tmutil; removed snapshots can reclaim space."
+    },
+    {
+      "id": "maintenance-dns-flush",
+      "title": "Flush DNS Cache",
+      "group": "maintenance",
+      "root": "systemCaches",
+      "pattern": ".",
+      "itemTypes": [
+        "directory"
+      ],
+      "tier": "safe",
+      "action": "commandPreview",
+      "command": "dnsFlush",
+      "undo": "regenerated",
+      "rationale": "DNS cache flush resolves stale cached records without data loss."
+    },
+    {
+      "id": "maintenance-spotlight-reindex",
+      "title": "Rebuild Spotlight Index",
+      "group": "maintenance",
+      "root": "systemCaches",
+      "pattern": ".",
+      "itemTypes": [
+        "directory"
+      ],
+      "tier": "safe",
+      "action": "commandPreview",
+      "command": "mdutilReindex",
+      "undo": "regenerated",
+      "rationale": "Spotlight index rebuilds on next indexing cycle; removal forces fresh index."
+    }
+  ]
+}
