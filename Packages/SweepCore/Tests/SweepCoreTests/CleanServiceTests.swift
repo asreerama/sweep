@@ -383,10 +383,11 @@ final class CleanServiceTests: XCTestCase {
     static func request(
         home: FixtureHome,
         receipts: [SelectionReceipt],
-        selecting ids: Set<String>
+        selecting ids: Set<String>,
+        mintedAt: Date = Date()
     ) throws -> CleanRequest {
         CleanRequest(
-            batch: try Self.batch(receipts), selectedCandidateIDs: ids,
+            batch: try Self.batch(receipts, mintedAt: mintedAt), selectedCandidateIDs: ids,
             journalURL: home.url("journal.jsonl"), home: home.root
         )
     }
@@ -402,5 +403,54 @@ final class CleanServiceTests: XCTestCase {
             if case .finished(let report) = event { return report }
         }
         return nil
+    }
+}
+
+extension CleanServiceTests {
+    /// Codex G1 verdict 3, controlling reason: the pinned digest must be REPORTED and JOURNALED,
+    /// not just cached. Report must carry it; the WAL planned record must carry the same value.
+    func testReportAndPlannedWALRecordCarryThePinnedCatalogDigest() async throws {
+        let home = try FixtureHome("cs-digest")
+        try home.write("Library/Logs/DigestApp/junk.log")
+        let rule = AuthorizedCleanPlanTests.cautionTrashRule(id: "test.userlogs.digest", tier: .safe)
+        try BundledCatalogFixture.install(RuleCatalog(rules: [rule]), atRoot: home.root)
+
+        let receipt = try home.receipt(at: "Library/Logs/DigestApp", ruleID: rule.id)
+        let request = try Self.request(home: home, receipts: [receipt], selecting: [receipt.id])
+        let events = try await Self.collect(CleanService.runPipeline(request))
+        let report = try XCTUnwrap(Self.finishedReport(in: events))
+
+        let pinnedDigest = try CleanService.currentCatalogDigest()
+        XCTAssertEqual(report.catalogDigest, pinnedDigest)
+        XCTAssertFalse(report.journalingDegraded)
+
+        let journalData = try Data(contentsOf: home.url("journal.jsonl"))
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let planned = try journalData.split(separator: UInt8(ascii: "\n"))
+            .map { try decoder.decode(JournalRecord.self, from: Data($0)) }
+            .first { $0.kind == .planned }
+        XCTAssertEqual(try XCTUnwrap(planned).catalogDigest, pinnedDigest,
+                       "planned WAL record must journal the digest the operation executed under")
+    }
+
+    /// Codex G1 verdict 3: a future-dated batch is as untrustworthy as a stale one.
+    func testFutureMintedSelectionBatchIsRejected() async throws {
+        let home = try FixtureHome("cs-future-batch")
+        try home.write("Library/Logs/FutureApp/junk.log")
+        let rule = AuthorizedCleanPlanTests.cautionTrashRule(id: "test.userlogs.future", tier: .safe)
+        try BundledCatalogFixture.install(RuleCatalog(rules: [rule]), atRoot: home.root)
+
+        let receipt = try home.receipt(at: "Library/Logs/FutureApp", ruleID: rule.id)
+        let request = try Self.request(
+            home: home, receipts: [receipt], selecting: [receipt.id],
+            mintedAt: Date().addingTimeInterval(3600)
+        )
+        do {
+            _ = try await Self.collect(CleanService.runPipeline(request))
+            XCTFail("future-minted batch must be rejected")
+        } catch CleanServiceError.staleSelectionBatch {
+            // expected
+        }
     }
 }

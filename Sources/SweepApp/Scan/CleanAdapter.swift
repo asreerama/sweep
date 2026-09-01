@@ -203,6 +203,11 @@ struct CleanAdapter: CleanBackend {
                         failureReason = Self.describe(outcome)
                     }
                 case .finished(let report):
+                    if (report.journalingDegraded || !report.committed), failureReason == nil {
+                        failureReason = report.journalingDegraded
+                            ? "Stopped early: the safety journal could not record progress. Nothing unrecorded was touched."
+                            : "The operation did not fully commit; review the report."
+                    }
                     // The capacity-delta estimate for *this* node's own scan+clean pass — see
                     // the type doc for why this is N independent estimates summed rather than
                     // one measured across the whole batch.

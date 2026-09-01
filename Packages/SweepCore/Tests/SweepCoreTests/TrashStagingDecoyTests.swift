@@ -80,3 +80,35 @@ final class TrashStagingDecoyTests: XCTestCase {
         return MutationRequest(url: file, relativeComponents: components, expected: identity, expectedParent: nil)
     }
 }
+
+extension TrashStagingDecoyTests {
+    /// Codex G1 verdict 3: a *different* occupant at the slot leaf after a claimed success used
+    /// to slip through (`try?` + isSameFile treated "present but different" as absence). Any
+    /// occupant is indeterminate and must be reported as stranded, never success.
+    func testDifferentOccupantAfterTrashIsNeverReportedAsSuccess() throws {
+        let fixture = try TempTree("trash-decoy-swap")
+        let file = try fixture.write("caches/original.bin", bytes: 32)
+        let root = try OpenDirectory.openRoot(fixture.root)
+        let operationDirectory = try Self.makeOperationDirectory(under: root)
+        let request = try Self.request(for: file, relativeTo: fixture.root)
+
+        XCTAssertThrowsError(
+            try TrashStaging.trash(
+                request: request, anchoredAt: root, operationQuarantine: operationDirectory,
+                performTrashItem: { url in
+                    // "Trash" the object, then plant a decoy at the same slot path before the
+                    // executor's post-trash verification runs.
+                    try FileManager.default.removeItem(at: url)
+                    try Data(repeating: 0xAB, count: 16).write(to: url)
+                    return URL(fileURLWithPath: "/Users/tester/.Trash/\(url.lastPathComponent)")
+                }
+            )
+        ) { error in
+            guard let descriptorError = error as? FileDescriptorError,
+                  case .strandedInQuarantine = descriptorError
+            else {
+                return XCTFail("expected strandedInQuarantine for a swapped occupant, got \(error)")
+            }
+        }
+    }
+}

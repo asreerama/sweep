@@ -74,8 +74,8 @@ actor SelectiveFailureJournal: JournalWriting {
         self.rollbackFailedFailuresRemaining = rollbackFailedFailureCount
     }
 
-    func appendPlanned(operationID: UUID, planVersion: Int, items: [JournalItem]) async throws {
-        try await real.appendPlanned(operationID: operationID, planVersion: planVersion, items: items)
+    func appendPlanned(operationID: UUID, planVersion: Int, items: [JournalItem], catalogDigest: String?) async throws {
+        try await real.appendPlanned(operationID: operationID, planVersion: planVersion, items: items, catalogDigest: catalogDigest)
     }
 
     func appendStarted(operationID: UUID) async throws {

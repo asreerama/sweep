@@ -118,6 +118,9 @@ public struct JournalRecord: Sendable, Equatable, Codable {
     public let operationID: UUID
     public let recordedAt: Date
     public let planVersion: Int?
+    /// SHA-256 of the catalog the operation executes under; set on `planned` records
+    /// (optional so pre-digest journals still decode).
+    public let catalogDigest: String?
     public let items: [JournalItem]?
     public let item: JournalItem?
     public let outcome: ItemOutcome?
@@ -134,6 +137,7 @@ public struct JournalRecord: Sendable, Equatable, Codable {
         operationID: UUID,
         recordedAt: Date = Date(),
         planVersion: Int? = nil,
+        catalogDigest: String? = nil,
         items: [JournalItem]? = nil,
         item: JournalItem? = nil,
         outcome: ItemOutcome? = nil,
@@ -147,6 +151,7 @@ public struct JournalRecord: Sendable, Equatable, Codable {
         self.operationID = operationID
         self.recordedAt = recordedAt
         self.planVersion = planVersion
+        self.catalogDigest = catalogDigest
         self.items = items
         self.item = item
         self.outcome = outcome

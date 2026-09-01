@@ -123,17 +123,21 @@ public struct DeletionPlan: Sendable, Equatable, Identifiable {
     public let operationID: UUID
     public let createdAt: Date
     public let items: [DeletionItem]
+    /// SHA-256 of the catalog this plan was authorized under; journaled on the planned record.
+    public let catalogDigest: String?
 
     public var id: UUID { operationID }
 
     init(
         version: Int = DeletionPlan.currentVersion,
         operationID: UUID = UUID(),
+        catalogDigest: String? = nil,
         createdAt: Date = Date(),
         items: [DeletionItem]
     ) {
         self.version = version
         self.operationID = operationID
+        self.catalogDigest = catalogDigest
         self.createdAt = createdAt
         self.items = items
     }

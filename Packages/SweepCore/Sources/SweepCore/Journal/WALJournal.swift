@@ -34,7 +34,7 @@ public enum JournalError: Error, Equatable, CustomStringConvertible {
 /// filesystem failure actually happening during a test run. Every real caller still only ever
 /// constructs a genuine ``WALJournal``; nothing about production wiring changes.
 protocol JournalWriting: Sendable {
-    func appendPlanned(operationID: UUID, planVersion: Int, items: [JournalItem]) async throws
+    func appendPlanned(operationID: UUID, planVersion: Int, items: [JournalItem], catalogDigest: String?) async throws
     func appendStarted(operationID: UUID) async throws
     func appendItemResult(
         operationID: UUID,
@@ -119,11 +119,14 @@ public actor WALJournal {
 
     // MARK: - Appends
 
-    public func appendPlanned(operationID: UUID, planVersion: Int, items: [JournalItem]) async throws {
+    public func appendPlanned(
+        operationID: UUID, planVersion: Int, items: [JournalItem], catalogDigest: String? = nil
+    ) async throws {
         try await append(JournalRecord(
             kind: .planned,
             operationID: operationID,
             planVersion: planVersion,
+            catalogDigest: catalogDigest,
             items: items
         ))
     }

@@ -77,8 +77,17 @@ extension ScanResult {
     ///     ``SelectionBatch/maxAge``.
     public func sealedBatch(
         selecting receiptIDs: Set<String>? = nil,
+        catalogDigest: String
+    ) throws -> SelectionBatch {
+        try sealedBatch(selecting: receiptIDs, catalogDigest: catalogDigest, mintedAt: Date())
+    }
+
+    /// Internal seam: tests mint stale/future batches; production callers cannot
+    /// (Codex G1 verdict 3: a public `mintedAt` defeats the freshness window).
+    internal func sealedBatch(
+        selecting receiptIDs: Set<String>? = nil,
         catalogDigest: String,
-        mintedAt: Date = Date()
+        mintedAt: Date
     ) throws -> SelectionBatch {
         let selected = receiptIDs.map { ids in receipts.filter { ids.contains($0.id) } } ?? receipts
         return try SelectionBatch(

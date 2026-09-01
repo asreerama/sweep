@@ -243,7 +243,8 @@ public actor DeletionCoordinator {
             try await journal.appendPlanned(
                 operationID: plan.operationID,
                 planVersion: plan.version,
-                items: plan.items.map(\.journalItem)
+                items: plan.items.map(\.journalItem),
+                catalogDigest: plan.catalogDigest
             )
             try await journal.appendStarted(operationID: plan.operationID)
         } catch {

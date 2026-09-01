@@ -216,6 +216,12 @@ public struct CleanReport: Sendable, Equatable {
     public let operationID: UUID
     public let outcomes: [CleanItemOutcome]
     public let committed: Bool
+    /// SHA-256 of the exact catalog bytes this operation executed under (Codex G1: the
+    /// accepted read-once trust design requires the digest be reported, not just cached).
+    public let catalogDigest: String
+    /// True when a post-mutation journal append failed twice and the operation stopped early;
+    /// the UI must never present a degraded operation as a plain success.
+    public let journalingDegraded: Bool
     /// From a volume-capacity delta (`statfs` before/after), never scan-time sizes — PLAN §2:
     /// "freed" is only ever reported this way, and only ever as an estimate. Zero when nothing
     /// was actually attempted.
@@ -345,7 +351,9 @@ public enum CleanService {
         guard request.batch.catalogDigest == pinned.sha256Hex else {
             throw CleanServiceError.catalogMismatch
         }
-        guard Date().timeIntervalSince(request.batch.mintedAt) <= SelectionBatch.maxAge else {
+        let batchAge = Date().timeIntervalSince(request.batch.mintedAt)
+        guard batchAge >= 0, batchAge <= SelectionBatch.maxAge else {
+            // Future-dated batches are as untrustworthy as stale ones (Codex G1 verdict 3).
             throw CleanServiceError.staleSelectionBatch
         }
 
@@ -423,7 +431,8 @@ public enum CleanService {
 
         guard !toExecute.isEmpty else {
             continuation.yield(.finished(CleanReport(
-                operationID: operationID, outcomes: settled, committed: true, freedBytesEstimate: 0
+                operationID: operationID, outcomes: settled, committed: true,
+                catalogDigest: pinned.sha256Hex, journalingDegraded: false, freedBytesEstimate: 0
             )))
             return
         }
@@ -446,7 +455,7 @@ public enum CleanService {
         // Codex G1 finding #4: the plan must carry the *same* operation id already emitted in
         // `.started` above (and used in the final `.finished` report below) — not a fresh one of
         // its own, which is what let the WAL disagree with the service's own report.
-        let plan = DeletionPlan(operationID: operationID, items: toExecute.map { DeletionItem(authorized: $0) })
+        let plan = DeletionPlan(operationID: operationID, catalogDigest: pinned.sha256Hex, items: toExecute.map { DeletionItem(authorized: $0) })
         let report: DeletionReport
         do {
             report = try await coordinator.execute(plan)
@@ -470,7 +479,9 @@ public enum CleanService {
         }
 
         continuation.yield(.finished(CleanReport(
-            operationID: operationID, outcomes: allOutcomes, committed: report.committed, freedBytesEstimate: freed
+            operationID: operationID, outcomes: allOutcomes, committed: report.committed,
+            catalogDigest: pinned.sha256Hex, journalingDegraded: report.journalingDegraded,
+            freedBytesEstimate: freed
         )))
     }
 

@@ -329,7 +329,23 @@ enum TrashStaging {
         // so silently renaming it back could leave that bookkeeping pointing at a phantom entry.
         // Reported exactly like a failed-rollback stranding instead: recovery required, at the
         // slot location, never silently suppressed into a claimed success.
-        if let stillPresent = try? slot.identity(ofChild: leaf, volume: actual.volume), stillPresent.isSameFile(as: actual) {
+        // Codex G1 verdict 3: only a clean ENOENT proves absence. Any occupant (same object,
+        // decoy replacement) or any stat failure after a claimed trashItem success leaves the
+        // outcome indeterminate and must surface as recovery-required, never as success.
+        let leafState: FileIdentity?
+        do {
+            leafState = try slot.identity(ofChild: leaf, volume: actual.volume)
+        } catch FileDescriptorError.statFailed(_, let code) where code == ENOENT {
+            leafState = nil
+        } catch {
+            let quarantinedPath = URL(fileURLWithPath: slot.path).appending(path: leaf).path
+            throw FileDescriptorError.strandedInQuarantine(
+                quarantinePath: quarantinedPath,
+                underlyingReason: "post-trash verification could not stat the slot leaf: \(error)",
+                rollbackReason: "verification failed; object state indeterminate"
+            )
+        }
+        if leafState != nil { // same object or a decoy occupant: both indeterminate
             let quarantinedPath = URL(fileURLWithPath: slot.path).appending(path: leaf).path
             throw FileDescriptorError.strandedInQuarantine(
                 quarantinePath: quarantinedPath,
