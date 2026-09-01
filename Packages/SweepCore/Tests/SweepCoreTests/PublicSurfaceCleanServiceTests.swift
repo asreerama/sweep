@@ -55,13 +55,12 @@ final class PublicSurfaceCleanServiceTests: XCTestCase {
         XCTAssertEqual(request.selectedCandidateIDs, ["some-id"])
     }
 
-    /// Gate 1 is closed in this build (`CleanService.isEnabled == false`), and `execute` is the
-    /// *only* public entry point capable of ever mutating anything. Even with a well-formed
-    /// public request, it refuses before looking at a single candidate — and, since finding #1,
-    /// before the catalog is even loaded, and since finding #5, before the batch's digest or age
-    /// is even checked.
+    /// Gate 1 is open since M3. This public-surface process deliberately configures no bundled
+    /// catalog, so the security property under test becomes: with the gate open but no pinned
+    /// catalog available, `execute` fails closed before touching anything — it must not fall
+    /// back to any caller-supplied rules (finding #1) or proceed catalog-less.
     func testExecuteRefusesEvenAWellFormedRequestWhileTheGateIsClosed() async throws {
-        XCTAssertFalse(CleanService.isEnabled)
+        XCTAssertTrue(CleanService.isEnabled)
         let scan = try await Self.emptyScan()
         let digest = (try? CleanService.currentCatalogDigest()) ?? "no-catalog-in-this-test-process"
         let batch = try scan.sealedBatch(catalogDigest: digest)
@@ -69,11 +68,12 @@ final class PublicSurfaceCleanServiceTests: XCTestCase {
 
         do {
             for try await _ in CleanService.execute(request) {
-                XCTFail("no event should be produced while the gate is closed")
+                XCTFail("no event may be produced without a pinned catalog")
             }
-            XCTFail("expected gateClosed")
-        } catch let error as CleanServiceError {
-            guard error == .gateClosed else { return XCTFail("expected gateClosed, got \(error)") }
+            XCTFail("expected a catalog-unavailable failure")
+        } catch {
+            XCTAssertTrue(String(describing: error).contains("no bundled rule catalog"),
+                          "must fail closed on the missing catalog, got: \(error)")
         }
     }
 

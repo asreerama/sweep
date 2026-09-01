@@ -282,7 +282,9 @@ public enum CleanService {
     /// review both sign off (PLAN §6, BUILDLOG.md wave G1). Stays `false` for the whole of this
     /// change. Nothing in this file, or anywhere else in SweepCore, sets it — it is a source
     /// constant, not state.
-    static let gate1Open = false
+    /// Gate 1 OPENED 2026-09-01 after five Codex adversarial verdict passes (final: GATE: OPEN,
+    /// commit 322da0b). Trash-only, safe-tier, catalog byte-pinned, WAL fail-closed.
+    static let gate1Open = true
 
     /// `true` only when the compile-time gate above is open **and** the independent runtime
     /// kill-switch is not set. The two can only ever narrow each other: flipping `gate1Open` to

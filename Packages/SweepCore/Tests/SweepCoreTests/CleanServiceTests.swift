@@ -28,18 +28,13 @@ final class CleanServiceTests: XCTestCase {
 
     // MARK: - The gate itself
 
-    func testExecuteThrowsGateClosedWhileGate1IsClosed() async throws {
-        XCTAssertFalse(CleanService.isEnabled, "gate1Open must still be false in this build")
-        let request = CleanRequest(batch: try Self.batch([]), selectedCandidateIDs: [])
-
-        do {
-            for try await _ in CleanService.execute(request) {
-                XCTFail("no event should ever be produced while the gate is closed")
-            }
-            XCTFail("expected gateClosed to be thrown")
-        } catch let error as CleanServiceError {
-            XCTAssertEqual(error, .gateClosed)
-        }
+    /// Gate 1 opened 2026-09-01 (five adversarial verdict passes; final GATE: OPEN). The
+    /// compile-time constant is now expected true, and the runtime kill switch remains the
+    /// deny-only override: with it set, `isEnabled` must be false regardless of the constant.
+    func testGateIsOpenAndKillSwitchStillCloses() {
+        XCTAssertTrue(CleanService.gate1Open, "gate 1 was opened at M3; if this is intentional rollback, update this test with the verdict reference")
+        XCTAssertTrue(CleanService.isRuntimeDisabled(environment: ["SWEEP_CLEAN_SERVICE_DISABLED": "1"]))
+        XCTAssertFalse(CleanService.isRuntimeDisabled(environment: [:]))
     }
 
     /// The runtime kill switch is independent of the compile-time gate, and it can only ever
