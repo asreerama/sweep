@@ -132,7 +132,7 @@
     },
     {
       "id": "xcode-device-support",
-      "title": "Xcode Unused Device Support",
+      "title": "Xcode Device Support",
       "group": "systemJunk",
       "root": "xcodeDeviceSupport",
       "pattern": "*",
@@ -140,10 +140,10 @@
         "directory"
       ],
       "minAgeDays": 0,
-      "tier": "safe",
+      "tier": "caution",
       "action": "trash",
       "undo": "regenerated",
-      "rationale": "Unused iOS/tvOS/watchOS DeviceSupport packages can be re-downloaded from Apple."
+      "rationale": "Symbols repopulate on next device connect, but no unusedness check exists yet; caution until an installed-runtime predicate ships."
     },
     {
       "id": "xcode-simulators",
@@ -491,21 +491,6 @@
       "action": "trash",
       "undo": "regenerated",
       "rationale": "Dart/Flutter pub cache regenerates on next package fetch."
-    },
-    {
-      "id": "swiftpm-cache",
-      "title": "Swift Package Manager Cache",
-      "group": "developer",
-      "root": "developerToolCaches",
-      "pattern": ".swiftpm/*",
-      "itemTypes": [
-        "directory",
-        "file"
-      ],
-      "tier": "safe",
-      "action": "trash",
-      "undo": "regenerated",
-      "rationale": "Swift PM cache regenerates on next package build."
     },
     {
       "id": "uv-cache",
