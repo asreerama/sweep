@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:CleanMyMac Clone}",
+            "name": "Debug SweepApp",
+            "target": "SweepApp",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug SweepApp"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:CleanMyMac Clone}",
+            "name": "Release SweepApp",
+            "target": "SweepApp",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release SweepApp"
+        }
+    ]
+}

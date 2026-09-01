@@ -11,7 +11,7 @@ struct SweepApp: App {
         .defaultSize(width: 980, height: 640)
 
         MenuBarExtra("Sweep", systemImage: "wind") {
-            MenuBarPlaceholder()
+            MenuBarStats()
         }
         .menuBarExtraStyle(.window)
     }
@@ -54,18 +54,76 @@ struct MainWindowPlaceholder: View {
     }
 }
 
-struct MenuBarPlaceholder: View {
+struct MenuBarStats: View {
+    @State private var snapshot: SystemSnapshot?
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: SweepTokens.s2) {
             Text("Sweep").font(.headline)
-            Text("Live stats land at M1 (SweepSystem).")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            if let s = snapshot {
+                statRow("memorychip", "Memory",
+                        used: s.memory.totalBytes - s.memory.freeBytes,
+                        total: s.memory.totalBytes,
+                        tint: pressureTint(s.memoryPressure))
+                statRow("cpu", "CPU", percent: 100 - s.cpu.aggregateIdlePercent)
+                if let disk = s.disks.first(where: { $0.isInternal }) ?? s.disks.first {
+                    statRow("internaldrive", disk.volumeName,
+                            used: disk.totalBytes - disk.availableBytes,
+                            total: disk.totalBytes,
+                            tint: SweepTokens.accent)
+                }
+            } else {
+                ProgressView().controlSize(.small)
+            }
             Divider()
             Button("Quit Sweep") { NSApp.terminate(nil) }
                 .keyboardShortcut("q")
         }
-        .padding(12)
+        .padding(SweepTokens.s3)
         .frame(width: 260)
+        .task {
+            let sampler = StatsSampler()
+            for await snap in await sampler.snapshots() {
+                snapshot = snap
+            }
+        }
+    }
+
+    private func pressureTint(_ level: MemoryPressureLevel) -> Color {
+        switch level {
+        case .normal: SweepTokens.accent
+        case .warning: SweepTokens.tierCaution
+        case .critical: SweepTokens.tierExpert
+        }
+    }
+
+    @ViewBuilder
+    private func statRow(_ symbol: String, _ title: String, used: UInt64, total: UInt64, tint: Color) -> some View {
+        let fraction = total > 0 ? Double(used) / Double(total) : 0
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Label(title, systemImage: symbol).font(.caption)
+                Spacer()
+                Text("\(format(used)) / \(format(total))")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            ProgressView(value: fraction).tint(tint).controlSize(.small)
+        }
+    }
+
+    @ViewBuilder
+    private func statRow(_ symbol: String, _ title: String, percent: Double) -> some View {
+        HStack {
+            Label(title, systemImage: symbol).font(.caption)
+            Spacer()
+            Text(String(format: "%.0f%%", percent))
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func format(_ bytes: UInt64) -> String {
+        ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .memory)
     }
 }

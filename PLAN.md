@@ -120,6 +120,14 @@ Duplicates finder, space lens (treemap), mail attachments, privacy cleaner (brow
 
 Identity: **instrument, not toy**. Utility first, motion signals speed.
 
+**Bar (user-set, 2026-08-31):** design must satisfy a lead-designer-at-Swiggy level reviewer (user's reference: Saptarshi). Measured, polished motion only; every animation must justify itself. Claude Design MCP used when connectable (down this session).
+
+**Efficiency contract (user-set, no bloat):**
+- Zero third-party dependencies. Apple frameworks + SF Symbols only; no Lottie, no bundled images/fonts.
+- Motion = SwiftUI springs/Core Animation, no canvas-heavy effects; animations pause when window occluded.
+- Budgets, CI-checked at M1/M5: release app binary < 12 MB, menubar idle < 50 MB RSS + <0.5% CPU at 2 s sampling, cold launch < 400 ms to first frame.
+- Every dependency/asset addition requires a plan edit + justification line. Default answer = no.
+
 - **Layout.** Two-tier grouped sidebar (Smart Scan + CLEAN/SPEED/APPS primary; Toolbox quieter, bottom, smaller type + tighter rows), large content pane. Hierarchy carried by weight + spacing, not color. Menubar popover = compact stat stack, one action row.
 - **Type.** SF Pro throughout (platform face right choice here), SF Pro Display tight tracking for big numbers, SF Mono for paths + byte counts, tabular figures wherever data aligns. Oversized animated number (GB found, GB freed) = visual signature.
 - **Color.** System materials (sidebar translucency, `.ultraThinMaterial` popover), graphite surfaces, single kinetic accent only for progress, results, scan sweep. Semantic colors (warning amber, danger red) reserved for safety tiers. Follows system light/dark.
