@@ -9,6 +9,19 @@ import SweepPolicy
 enum TrashAnchorKey: Sendable, Hashable {
     case operationRoot(SweepPolicy.OperationRoot)
     case codeSignCloneRoot
+    /// Gate U (uninstall execution, `UninstallAuthorization.swift`): any authorization-derived
+    /// external root the uninstall pipeline resolves for itself — the Applications directory the
+    /// target bundle lives under, or one of `SweepUninstall.SearchRoot`'s per-category leftover
+    /// roots (Application Support, Caches, Preferences, Containers, ...). Unlike
+    /// `codeSignCloneRoot` (exactly one external root ever exists for that detector), Gate U's
+    /// authorization can legitimately produce many distinct real roots in one plan, so this case
+    /// is keyed by the root's own resolved path — each is already a device/inode-pinned root in
+    /// its own right (`SweepPolicy.authorize(externalRoot:...)`, the same primitive
+    /// `codeSignCloneRoot` uses) — so two items resolved under two different real directories
+    /// never collide in the coordinator's one-descriptor-per-key anchor map. Purely additive: no
+    /// existing switch anywhere matches exhaustively over `TrashAnchorKey` (verified by search),
+    /// so this changes no existing behavior.
+    case externalRoot(path: String)
 }
 
 /// One root Gate 1's trash-only mode is allowed to descend into: a symbolic or external root

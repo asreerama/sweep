@@ -66,7 +66,7 @@ struct RootView: View {
         case .memory:
             MemoryScreen()
         case .maintenance:
-            ModulePlaceholderScreen(destination: .maintenance, arrival: "Arrives at M4, behind typed command adapters.")
+            MaintenanceScreen()
         case .startupItems:
             StartupItemsScreen()
         case .uninstaller:

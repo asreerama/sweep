@@ -19,6 +19,26 @@
             "target": "SweepApp",
             "configuration": "release",
             "preLaunchTask": "swift: Build Release SweepApp"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:CleanMyMac Clone}",
+            "name": "Debug SweepHelper",
+            "target": "SweepHelper",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug SweepHelper"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:CleanMyMac Clone}",
+            "name": "Release SweepHelper",
+            "target": "SweepHelper",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release SweepHelper"
         }
     ]
 }
