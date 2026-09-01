@@ -107,6 +107,11 @@ struct MemoryScreen: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             footer
         }
+        // Pin the whole screen to the detail column and top-align it (mirrors SystemJunkScreen).
+        // Without this the VStack sizes to its full content height; under RootView's `.id()`
+        // rebuild + layout spring on navigation, an unpinned oversized VStack shoves the header
+        // off the top and content bleeds over the titlebar/sidebar (user-reported).
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .task {
             // Own sampler instance: this screen is not the menubar, and `StatsSampler` is cheap
             // and stateless between callers (see its own doc comment). Cancelled automatically
@@ -141,19 +146,28 @@ struct MemoryScreen: View {
 
     @ViewBuilder
     private var content: some View {
-        if let snapshot {
-            ScrollView {
-                VStack(alignment: .leading, spacing: SweepTokens.s5) {
-                    pressureSection(snapshot)
-                    breakdownSection(snapshot)
-                    swapSection(snapshot)
-                    processesSection(snapshot)
+        ZStack {
+            if let snapshot {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: SweepTokens.s5) {
+                        pressureSection(snapshot)
+                        breakdownSection(snapshot)
+                        swapSection(snapshot)
+                        processesSection(snapshot)
+                    }
+                    .padding(SweepTokens.s5)
                 }
-                .padding(SweepTokens.s5)
+            } else {
+                InventoryEmptyState(symbol: "memorychip", title: "Reading memory stats\u{2026}")
             }
-        } else {
-            InventoryEmptyState(symbol: "memorychip", title: "Reading memory stats\u{2026}")
         }
+        // The first snapshot lands ~2s after this screen appears, swapping the empty state for a
+        // much taller ScrollView. Without this, that swap inherits RootView's navigation layout
+        // spring (`.animation(SweepMotion.layout, value: destination)`) and animates a large
+        // height change, leaving the ScrollView scrolled off its top under NavigationSplitView on
+        // macOS 26 (user-reported "clicking Memory screws up the UI"). A fixed ZStack container
+        // plus a no-op transaction on the swap keeps the frame stable.
+        .transaction { $0.animation = nil }
     }
 
     // MARK: - Sections

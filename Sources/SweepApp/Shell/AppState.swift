@@ -24,6 +24,11 @@ final class AppState {
     init(environment: ScanEnvironment) {
         self.environment = environment
         self.scan = ScanModel(environment: environment)
+        // Debug: launch straight into a destination for live screenshot/repro (never set in normal use).
+        if let raw = ProcessInfo.processInfo.environment["SWEEP_START_DESTINATION"],
+           let dest = Destination(rawValue: raw) {
+            self.destination = dest
+        }
     }
 
     // MARK: - Uninstaller deep links (PLAN §3 module 5, AppCleaner parity)

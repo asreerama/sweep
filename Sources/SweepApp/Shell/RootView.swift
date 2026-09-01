@@ -15,16 +15,23 @@ struct RootView: View {
             )
             .navigationSplitViewColumnWidth(min: 196, ideal: 216, max: 260)
         } detail: {
-            // Module navigation (PLAN §5, "Motion continuity"): a crossfade with a slight
-            // vertical drift, never a hard swap. `.id` gives each destination's content its own
-            // identity so the transition actually has an insert/remove to animate, rather than
-            // SwiftUI diffing two same-shaped views in place.
-            detail
-                .id(state.destination)
-                .transition(
-                    .opacity.combined(with: .offset(y: 6))
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            // A GeometryReader pins the detail to the column's *proposed* size and hands each
+            // screen a definite height. Without it, a screen whose content has a large ideal
+            // height (Memory's stacked stat cards + process table, ~1175pt) leaks that ideal up
+            // through NavigationSplitView on macOS 26, which sizes the whole split view to the
+            // content instead of the window (measured: a 700pt window rendering a 1349pt split
+            // view offset to y=-298), shoving the header off the top. Clamping to `proxy.size`
+            // forces the screen's own ScrollView to scroll internally instead.
+            GeometryReader { proxy in
+                // Module navigation (PLAN §5, "Motion continuity"): a crossfade with a slight
+                // vertical drift, never a hard swap. `.id` gives each destination's content its
+                // own identity so the transition has an insert/remove to animate.
+                detail
+                    .id(state.destination)
+                    .transition(
+                        .opacity.combined(with: .offset(y: 6))
+                    )
+                    .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
                 // Palette v2's tinted ground, set explicitly rather than left to the system
                 // default: `Color(nsColor: .windowBackgroundColor)` (what an unset background
                 // otherwise resolves to) is an `NSColor` bridge, and — like every other `NSColor`
@@ -32,7 +39,8 @@ struct RootView: View {
                 // inside this app's offscreen screenshot harness, even though it works correctly
                 // in a normally-composited window. `SweepTokens.ground` sidesteps that whole
                 // class of bridge (see its doc comment) and is correct in both places.
-                .background(SweepTokens.ground)
+                    .background(SweepTokens.ground)
+            }
         }
         .animation(reduceMotion ? SweepMotion.crossfade : SweepMotion.layout, value: state.destination)
         .navigationTitle(state.destination.title)

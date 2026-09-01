@@ -49,6 +49,15 @@ enum SnapshotHarness {
 
         await capture(window, to: output, "\(prefix)-01-smart-scan-idle", state: state)
 
+        if environment["SWEEP_SNAPSHOT_MEMORY_ONLY"] == "1" {
+            state.destination = .memory
+            await settle(seconds: 5.0)
+            if let root = window.contentView { dump(root, depth: 0) }
+            await capture(window, to: output, "\(prefix)-06c-memory", state: state)
+            if environment["SWEEP_SNAPSHOT_EXIT"] == "1" { await settle(seconds: 0.3); await MainActor.run { NSApp.terminate(nil) } }
+            return
+        }
+
         state.scan.start()
         await settle(seconds: scanHold)
         await capture(window, to: output, "\(prefix)-02-smart-scan-scanning", state: state)
@@ -114,6 +123,10 @@ enum SnapshotHarness {
         state.destination = .homebrew
         await settle(seconds: 20.0)
         await capture(window, to: output, "\(prefix)-06b-toolbox-homebrew", state: state)
+
+        state.destination = .memory
+        await settle(seconds: 4.0)
+        await capture(window, to: output, "\(prefix)-06c-memory", state: state)
 
         // Minimum supported window: 900x600. Everything above must still fit here.
         state.destination = .smartScan
