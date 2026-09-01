@@ -28,10 +28,19 @@ final class JournalFile: @unchecked Sendable {
 
     /// Opens the journal for appending, exclusively, and makes its existence durable.
     ///
-    /// Three things happen here that did not before:
+    /// Four things happen here that did not before:
     ///
+    /// - The containing directory is opened by descriptor first, and the journal file itself is
+    ///   opened `openat(dirFD, name, O_NOFOLLOW)` relative to it — never `open(fullPath)` — so a
+    ///   pre-planted symlink named `clean-journal.jsonl` is refused outright (`ELOOP`) instead of
+    ///   silently followed into appending WAL JSON onto an arbitrary writable target (review
+    ///   finding #2).
     /// - `O_APPEND`, so every write lands at the real end of file. A one-time `seekToEnd` was
     ///   only correct while exactly one instance existed (review finding #7).
+    /// - The opened file is `fstat`'d and refused unless it is a regular file, owned by this
+    ///   account, and not writable by group or other — closing the other half of finding #2:
+    ///   even a non-symlink node planted at that path (a FIFO, a device node, a file some other
+    ///   uid or a looser mode controls) is refused before a single byte is ever written to it.
     /// - `flock(LOCK_EX | LOCK_NB)`, held for the descriptor's life, so a second owner is told
     ///   so instead of silently interleaving records with the first.
     /// - `fsync` of the containing directory and of every ancestor this call created, so the
@@ -41,11 +50,38 @@ final class JournalFile: @unchecked Sendable {
         let directory = url.deletingLastPathComponent()
         let created = try createDirectories(at: directory, journalURL: url)
 
-        let path = url.path
-        let fd = path.withCString { Darwin.open($0, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0o600) }
-        guard fd >= 0 else {
-            throw JournalError.cannotCreate(url: url, reason: String(cString: strerror(errno)))
+        // Ancestors above the directory legitimately contain symlinks (`/var` -> `/private/var`);
+        // only the *leaf* journal file itself must never be one, which is what `O_NOFOLLOW` below
+        // enforces. `realpath` here only collapses the (already-created) containing directory's
+        // own spelling, mirroring `OpenDirectory.openRoot`.
+        let resolvedDirectoryPath = realpathOf(directory.standardizedFileURL.path) ?? directory.standardizedFileURL.path
+        let dirFD = resolvedDirectoryPath.withCString { Darwin.open($0, O_RDONLY | O_DIRECTORY | O_CLOEXEC) }
+        guard dirFD >= 0 else {
+            throw JournalError.cannotCreate(
+                url: url, reason: "open(\(resolvedDirectoryPath)): \(String(cString: strerror(errno)))"
+            )
         }
+        defer { Darwin.close(dirFD) }
+
+        let filename = url.lastPathComponent
+        let fd = filename.withCString {
+            Darwin.openat(dirFD, $0, O_RDWR | O_CREAT | O_APPEND | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        }
+        guard fd >= 0 else {
+            let code = errno
+            let reason = code == ELOOP
+                ? "refused: \(filename) is a symlink; the journal is never opened through one"
+                : String(cString: strerror(code))
+            throw JournalError.cannotCreate(url: url, reason: reason)
+        }
+
+        do {
+            try verifyOwnedPrivateRegularFile(fd: fd, filename: filename)
+        } catch {
+            Darwin.close(fd)
+            throw error
+        }
+
         let file = JournalFile(fd: fd, url: url)
 
         guard flock(fd, LOCK_EX | LOCK_NB) == 0 else {
@@ -62,6 +98,33 @@ final class JournalFile: @unchecked Sendable {
             file.syncedDirectories.append(path)
         }
         return file
+    }
+
+    /// Refuses anything opened above that is not exactly what this process created or already
+    /// owns exclusively: a regular file (never a FIFO or device node slipped in under a name
+    /// `O_NOFOLLOW` would not catch), owned by this account, with no group/other write access.
+    private static func verifyOwnedPrivateRegularFile(fd: Int32, filename: String) throws {
+        var status = stat()
+        guard fstat(fd, &status) == 0 else {
+            throw JournalError.cannotCreate(
+                url: URL(fileURLWithPath: filename), reason: "fstat: \(String(cString: strerror(errno)))"
+            )
+        }
+        guard status.st_mode & S_IFMT == S_IFREG else {
+            throw JournalError.cannotCreate(
+                url: URL(fileURLWithPath: filename), reason: "refused: \(filename) is not a regular file"
+            )
+        }
+        guard status.st_uid == getuid() else {
+            throw JournalError.cannotCreate(
+                url: URL(fileURLWithPath: filename), reason: "refused: \(filename) is not owned by this account"
+            )
+        }
+        guard status.st_mode & (S_IWGRP | S_IWOTH) == 0 else {
+            throw JournalError.cannotCreate(
+                url: URL(fileURLWithPath: filename), reason: "refused: \(filename) is writable by group or other"
+            )
+        }
     }
 
     /// Creates missing ancestors of `directory`, returning the ones this call actually created,
@@ -128,12 +191,41 @@ final class JournalFile: @unchecked Sendable {
         }
     }
 
+    /// Reads the journal's current contents via `pread` against the same locked descriptor
+    /// every append uses — never `Data(contentsOf: url)`. A pathname re-read here is exactly the
+    /// other half of review finding #2: even with the open itself hardened, re-reading by
+    /// pathname for recovery/replay would let a swap of the pathname *after* open cause recovery
+    /// to see a different file than the one being appended to and locked.
     func readAll() throws -> Data {
-        do {
-            return try Data(contentsOf: url)
-        } catch {
-            throw JournalError.cannotCreate(url: url, reason: error.localizedDescription)
+        guard !closed else { throw JournalError.closed }
+        var status = stat()
+        guard fstat(fd, &status) == 0 else {
+            throw JournalError.writeFailed(reason: "fstat: \(String(cString: strerror(errno)))")
         }
+        let length = Int(status.st_size)
+        guard length > 0 else { return Data() }
+
+        var buffer = Data(count: length)
+        var readError: Int32?
+        let bytesRead: Int = buffer.withUnsafeMutableBytes { raw in
+            guard let base = raw.baseAddress else { return 0 }
+            var readSoFar = 0
+            while readSoFar < length {
+                let n = pread(fd, base.advanced(by: readSoFar), length - readSoFar, off_t(readSoFar))
+                if n < 0 {
+                    if errno == EINTR { continue }
+                    readError = errno
+                    return readSoFar
+                }
+                if n == 0 { break }   // file shrank concurrently; stop at what is actually there
+                readSoFar += n
+            }
+            return readSoFar
+        }
+        if let readError {
+            throw JournalError.writeFailed(reason: "pread: \(String(cString: strerror(readError)))")
+        }
+        return buffer.prefix(bytesRead)
     }
 
     func close() {

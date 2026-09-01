@@ -110,6 +110,7 @@ public actor WALJournal {
         outcome: ItemOutcome,
         failureReason: ItemFailureReason? = nil,
         trashURL: URL? = nil,
+        quarantineURL: URL? = nil,
         detail: String? = nil
     ) async throws {
         try await append(JournalRecord(
@@ -119,12 +120,45 @@ public actor WALJournal {
             outcome: outcome,
             failureReason: failureReason,
             trashURL: trashURL,
+            quarantineURL: quarantineURL,
             detail: detail
         ))
     }
 
     public func appendCommitted(operationID: UUID, detail: String? = nil) async throws {
         try await append(JournalRecord(kind: .committed, operationID: operationID, detail: detail))
+    }
+
+    // MARK: - Quarantine lifecycle (review finding #5)
+
+    /// Durable *before* the coordinator ever calls the executor for a trash-action item: names
+    /// the deterministic slot the item is about to be renamed into, so a record identifying the
+    /// slot exists before the item is ever moved there.
+    func appendStagePlanned(operationID: UUID, item: JournalItem, quarantineURL: URL) async throws {
+        try await append(JournalRecord(
+            kind: .stagePlanned, operationID: operationID, item: item, quarantineURL: quarantineURL
+        ))
+    }
+
+    /// The rename into the slot named by the preceding `stagePlanned` record succeeded.
+    func appendStaged(operationID: UUID, item: JournalItem, quarantineURL: URL) async throws {
+        try await append(JournalRecord(
+            kind: .staged, operationID: operationID, item: item, quarantineURL: quarantineURL
+        ))
+    }
+
+    /// `FileManager.trashItem` succeeded for the staged item.
+    func appendTrashed(operationID: UUID, item: JournalItem, trashURL: URL?) async throws {
+        try await append(JournalRecord(kind: .trashed, operationID: operationID, item: item, trashURL: trashURL))
+    }
+
+    /// Staging succeeded but neither reaching the Trash nor rolling back succeeded. Never
+    /// suppressed: this is always appended when it happens, independent of whatever the final
+    /// `itemResult` record also says.
+    func appendRollbackFailed(operationID: UUID, item: JournalItem, quarantineURL: URL, reason: String) async throws {
+        try await append(JournalRecord(
+            kind: .rollbackFailed, operationID: operationID, item: item, quarantineURL: quarantineURL, detail: reason
+        ))
     }
 
     /// Append + fsync. Any failure throws; callers abort rather than continue unlogged.
@@ -231,6 +265,11 @@ public actor WALJournal {
                 }
             case .committed:
                 result.states[record.operationID] = .committed
+            case .stagePlanned, .staged, .trashed, .rollbackFailed:
+                // Supplementary quarantine-lifecycle records (review finding #5): informative for
+                // a stranded-slot recovery pass, but they never change an operation's committed
+                // state, which is decided solely by `planned`/`started`/`committed` as before.
+                break
             }
         }
 

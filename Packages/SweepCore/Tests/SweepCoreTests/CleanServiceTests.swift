@@ -3,21 +3,34 @@ import XCTest
 import SweepPolicy
 
 /// `CleanService` is Gate 1's public entry point (BUILDLOG.md "Pinned API contract"). These
-/// tests exercise the real pipeline — authorization, the three hard filters, trash-only
-/// execution, the WAL, capacity-delta reporting — through `CleanService.runPipeline`, which is
-/// package-internal precisely so the whole thing can be proven correct while `gate1Open` stays
-/// `false`. `CleanService.execute` itself is covered separately: it must refuse to run any of
-/// this while the gate is closed, which is exactly what it does below.
+/// tests exercise the real pipeline — catalog loading, authorization, the three hard filters,
+/// trash-only execution, the WAL, capacity-delta reporting — through `CleanService.runPipeline`,
+/// which is package-internal precisely so the whole thing can be proven correct while
+/// `gate1Open` stays `false`. `CleanService.execute` itself is covered separately: it must
+/// refuse to run any of this while the gate is closed, which is exactly what it does below.
 ///
 /// `.userLogs` stands in for a real cache root throughout, for the same reason
 /// `AuthorizedCleanPlanTests` uses it: it is fully `home`-relative, unlike `.userCaches`.
 final class CleanServiceTests: XCTestCase {
 
+    override func setUp() {
+        super.setUp()
+        // Codex G1 finding #1: `CleanService` loads its own catalog from a write-once directory
+        // rather than accepting one from the request. Reset first so each test's fixture catalog
+        // (installed via `BundledCatalogFixture.install`) is the one actually loaded.
+        CleanService.resetBundledCatalogDirectoryForTesting()
+    }
+
+    override func tearDown() {
+        CleanService.resetBundledCatalogDirectoryForTesting()
+        super.tearDown()
+    }
+
     // MARK: - The gate itself
 
     func testExecuteThrowsGateClosedWhileGate1IsClosed() async throws {
         XCTAssertFalse(CleanService.isEnabled, "gate1Open must still be false in this build")
-        let request = CleanRequest(catalog: RuleCatalog(rules: []), scan: Self.emptyScanResult(), selectedCandidateIDs: [])
+        let request = CleanRequest(receipts: [], selectedCandidateIDs: [])
 
         do {
             for try await _ in CleanService.execute(request) {
@@ -38,15 +51,51 @@ final class CleanServiceTests: XCTestCase {
         XCTAssertTrue(CleanService.isRuntimeDisabled(environment: ["SWEEP_CLEAN_SERVICE_DISABLED": "1"]))
     }
 
+    // MARK: - Codex G1 finding #1: the catalog is never the caller's
+
+    func testCleanServiceLoadsItsOwnCatalogNeverTheRequests() async throws {
+        let home = try FixtureHome("cs-own-catalog")
+        try home.write("Library/Logs/JunkApp/junk.log")
+        let realRule = AuthorizedCleanPlanTests.cautionTrashRule(id: "test.userlogs.real", tier: .safe)
+        try BundledCatalogFixture.install(RuleCatalog(rules: [realRule]), atRoot: home.root)
+
+        // Even though `CleanRequest` has no `catalog` parameter at all any more, forge the point
+        // home by authorizing against a rule id that exists ONLY in the bundled fixture catalog
+        // above, never anywhere the request itself could have carried it.
+        let receipt = try home.receipt(at: "Library/Logs/JunkApp", ruleID: realRule.id)
+        let request = Self.request(home: home, receipts: [receipt], selecting: [receipt.id])
+
+        let events = try await Self.collect(CleanService.runPipeline(request))
+        let report = try XCTUnwrap(Self.finishedReport(in: events))
+
+        XCTAssertEqual(report.succeededCount, 1, "\(report.outcomes)")
+        XCTAssertFalse(home.exists("Library/Logs/JunkApp"))
+    }
+
+    func testCleanServiceRefusesToRunWithNoBundledCatalogAvailable() async throws {
+        let home = try FixtureHome("cs-no-catalog")
+        // No `BundledCatalogFixture.install` call: no injected directory, and this test process's
+        // `Bundle.main` (the xctest runner) carries no `rules/catalog.json` resource either.
+        let request = Self.request(home: home, receipts: [], selecting: [])
+
+        do {
+            _ = try await Self.collect(CleanService.runPipeline(request))
+            XCTFail("expected the run to fail before anything else without a bundled catalog")
+        } catch {
+            // Any thrown error is correct here; the property under test is "it does not proceed
+            // silently with an empty/default catalog."
+        }
+    }
+
     // MARK: - Hard filters, exercised through the real (gate-independent) pipeline
 
     func testCautionTierRuleIsFilteredOutWithAReportedOutcomeNeverExecuted() async throws {
         let home = try FixtureHome("cs-caution")
         try home.write("Library/Logs/CautionApp/junk.log")
         let rule = AuthorizedCleanPlanTests.cautionTrashRule(id: "test.userlogs.caution", tier: .caution)
-        let catalog = RuleCatalog(rules: [rule])
-        let candidate = try home.candidate(at: "Library/Logs/CautionApp", ruleID: rule.id)
-        let request = Self.request(home: home, catalog: catalog, candidates: [candidate], selecting: [candidate.id])
+        try BundledCatalogFixture.install(RuleCatalog(rules: [rule]), atRoot: home.root)
+        let receipt = try home.receipt(at: "Library/Logs/CautionApp", ruleID: rule.id)
+        let request = Self.request(home: home, receipts: [receipt], selecting: [receipt.id])
 
         let events = try await Self.collect(CleanService.runPipeline(request))
         let report = try XCTUnwrap(Self.finishedReport(in: events))
@@ -65,9 +114,9 @@ final class CleanServiceTests: XCTestCase {
             pattern: "*", itemTypes: [.directory], tier: .safe, action: .delete, undo: .none,
             rationale: "exercises the action hard filter"
         )
-        let catalog = RuleCatalog(rules: [rule])
-        let candidate = try home.candidate(at: "Library/Logs/DeleteApp", ruleID: rule.id)
-        let request = Self.request(home: home, catalog: catalog, candidates: [candidate], selecting: [candidate.id])
+        try BundledCatalogFixture.install(RuleCatalog(rules: [rule]), atRoot: home.root)
+        let receipt = try home.receipt(at: "Library/Logs/DeleteApp", ruleID: rule.id)
+        let request = Self.request(home: home, receipts: [receipt], selecting: [receipt.id])
 
         let events = try await Self.collect(CleanService.runPipeline(request))
         let report = try XCTUnwrap(Self.finishedReport(in: events))
@@ -80,7 +129,8 @@ final class CleanServiceTests: XCTestCase {
 
     func testUnresolvableSelectedIDProducesAReportedOutcome() async throws {
         let home = try FixtureHome("cs-unknown-id")
-        let request = Self.request(home: home, catalog: RuleCatalog(rules: []), candidates: [], selecting: ["nonexistent-id"])
+        try BundledCatalogFixture.install(RuleCatalog(rules: []), atRoot: home.root)
+        let request = Self.request(home: home, receipts: [], selecting: ["nonexistent-id"])
 
         let events = try await Self.collect(CleanService.runPipeline(request))
         let report = try XCTUnwrap(Self.finishedReport(in: events))
@@ -90,21 +140,13 @@ final class CleanServiceTests: XCTestCase {
         XCTAssertEqual(report.outcomes.first?.outcome, .skipped)
     }
 
-    /// A denylist re-check independent of the one already inside `AuthorizedCleanPlan.authorize`:
-    /// a candidate whose authorization somehow still succeeded but whose path is lexically
-    /// protected is skipped here too. Constructed by authorizing against a rule broad enough to
-    /// match a path that also happens to sit under the injected fixture's own `.Trash` — which is
-    /// legitimately a `trash`-tier-safe root — then independently poisoning the denylist check via
-    /// `SweepPolicy.isDeniedLexically`'s real behavior on the real home is not reachable from a
-    /// fixture; this test instead proves the dispatch path exists by checking the log ordering
-    /// contract: HARD FILTERS run before anything is journaled.
     func testEventsAlwaysStartBeforeAnyItemCompletes() async throws {
         let home = try FixtureHome("cs-ordering")
         try home.write("Library/Logs/App/junk.log")
         let rule = AuthorizedCleanPlanTests.cautionTrashRule(id: "test.userlogs.ordering", tier: .caution)
-        let catalog = RuleCatalog(rules: [rule])
-        let candidate = try home.candidate(at: "Library/Logs/App", ruleID: rule.id)
-        let request = Self.request(home: home, catalog: catalog, candidates: [candidate], selecting: [candidate.id])
+        try BundledCatalogFixture.install(RuleCatalog(rules: [rule]), atRoot: home.root)
+        let receipt = try home.receipt(at: "Library/Logs/App", ruleID: rule.id)
+        let request = Self.request(home: home, receipts: [receipt], selecting: [receipt.id])
 
         let events = try await Self.collect(CleanService.runPipeline(request))
         guard case .started = events.first else {
@@ -115,11 +157,43 @@ final class CleanServiceTests: XCTestCase {
         }
     }
 
+    // MARK: - Codex G1 finding #4: WAL / report / event operation ids all agree
+
+    func testOperationIDIsSharedAcrossStartedEventFinishedReportAndEveryWALRecord() async throws {
+        let home = try FixtureHome("cs-opid")
+        try home.write("Library/Logs/JunkApp/first.log")
+        let rule = AuthorizedCleanPlanTests.cautionTrashRule(id: "test.userlogs.opid", tier: .safe)
+        try BundledCatalogFixture.install(RuleCatalog(rules: [rule]), atRoot: home.root)
+        let receipt = try home.receipt(at: "Library/Logs/JunkApp", ruleID: rule.id)
+        let journalURL = home.url("clean-journal.jsonl")
+        let request = CleanRequest(
+            receipts: [receipt], selectedCandidateIDs: [receipt.id], journalURL: journalURL, home: home.root
+        )
+
+        let events = try await Self.collect(CleanService.runPipeline(request))
+
+        guard case .started(let startedID, _) = try XCTUnwrap(events.first) else {
+            return XCTFail("expected .started as the first event")
+        }
+        let report = try XCTUnwrap(Self.finishedReport(in: events))
+
+        let journal = try await WALJournal(url: journalURL)
+        let records = try await journal.records()
+        await journal.close()
+
+        XCTAssertFalse(records.isEmpty)
+        let recordIDs = Set(records.map(\.operationID))
+
+        XCTAssertEqual(startedID, report.operationID, "started event and finished report must share one id")
+        XCTAssertEqual(recordIDs, [report.operationID], "every WAL record must carry the same operation id, \(recordIDs)")
+    }
+
     // MARK: - Code-sign-clone dispatch (never touches the real X directory; mirrors
     // CodeSignCloneDetectorTests's own rule of never calling the confstr-resolving entry point)
 
     func testCodeSignCloneDispatchReachesTheParallelAuthorizationPathAndFailsSafelyForANonexistentClone() async throws {
         let home = try FixtureHome("cs-clone-dispatch")
+        try BundledCatalogFixture.install(RuleCatalog(rules: []), atRoot: home.root)
         let bundleID = "com.sweep.test.\(UUID().uuidString)"
         // Deliberately never created on disk: `FileIdentity.read` never runs against this path,
         // proving the pipeline reaches `AuthorizedCleanPlan.authorize(codeSignClone:)` and fails
@@ -135,7 +209,7 @@ final class CleanServiceTests: XCTestCase {
         let clone = CodeSignCloneCandidate(candidate: scanCandidate, bundleIdentifier: bundleID)
 
         let request = CleanRequest(
-            catalog: RuleCatalog(rules: []), scan: Self.emptyScanResult(), codeSignClones: [clone],
+            receipts: [], codeSignClones: [clone],
             selectedCandidateIDs: [clone.id], journalURL: home.url("journal.jsonl"), home: home.root
         )
 
@@ -166,16 +240,17 @@ final class CleanServiceTests: XCTestCase {
         }
 
         let rule = AuthorizedCleanPlanTests.cautionTrashRule(id: "test.userlogs.e2e", tier: .safe)
-        let catalog = RuleCatalog(rules: [rule])
+        try BundledCatalogFixture.install(RuleCatalog(rules: [rule]), atRoot: home.root)
 
         let resolvedRoot = try XCTUnwrap(SweepPolicy.resolvedRoots(for: .userLogs, home: home.root).first)
         let engine = ScanEngine()
         let scanResult = try await engine.run(ScanRequest(roots: [resolvedRoot.url], ruleID: rule.id))
         let junkAppCandidate = try XCTUnwrap(scanResult.candidates.first { $0.url.lastPathComponent == "JunkApp" })
+        let receipt = try XCTUnwrap(scanResult.receipt(forCandidateID: junkAppCandidate.id))
 
         let journalURL = home.url("clean-journal.jsonl")
         let request = CleanRequest(
-            catalog: catalog, scan: scanResult, selectedCandidateIDs: [junkAppCandidate.id],
+            receipts: [receipt], selectedCandidateIDs: [receipt.id],
             journalURL: journalURL, home: home.root
         )
 
@@ -201,6 +276,10 @@ final class CleanServiceTests: XCTestCase {
         XCTAssertTrue(records.contains { $0.kind == .planned })
         XCTAssertTrue(records.contains { $0.kind == .committed })
         XCTAssertTrue(records.contains { $0.outcome == .succeeded })
+        // Codex G1 finding #5: the quarantine lifecycle is journaled in its own right, not just
+        // folded into the final summary record.
+        XCTAssertTrue(records.contains { $0.kind == .stagePlanned })
+        XCTAssertTrue(records.contains { $0.kind == .trashed })
         await journal.close()
 
         if case .started(_, let itemCount) = try XCTUnwrap(events.first) {
@@ -216,14 +295,15 @@ final class CleanServiceTests: XCTestCase {
         let home = try FixtureHome("cs-forged-canary")
         try home.writeCanary()
         let rule = AuthorizedCleanPlanTests.cautionTrashRule(id: "test.userlogs.forged", tier: .safe)
-        let catalog = RuleCatalog(rules: [rule])
+        try BundledCatalogFixture.install(RuleCatalog(rules: [rule]), atRoot: home.root)
 
         let canaryDirectory = home.url("Library/Application Support/Code/User")
         let identity = try FileIdentity.read(at: canaryDirectory)
         // Forged: claims the safe rule's id, but the path has nothing to do with `userLogs`.
         let forgedCandidate = ScanCandidate(url: canaryDirectory, identity: identity, allocatedSize: 0, ruleID: rule.id)
+        let forgedReceipt = SelectionReceipt(candidate: forgedCandidate, scanSessionID: UUID())
 
-        let request = Self.request(home: home, catalog: catalog, candidates: [forgedCandidate], selecting: [forgedCandidate.id])
+        let request = Self.request(home: home, receipts: [forgedReceipt], selecting: [forgedReceipt.id])
         let events = try await Self.collect(CleanService.runPipeline(request))
         let report = try XCTUnwrap(Self.finishedReport(in: events))
 
@@ -233,6 +313,34 @@ final class CleanServiceTests: XCTestCase {
             home.exists("Library/Application Support/Code/User/FIXTURE_CANARY_DO_NOT_DELETE.txt"),
             "the canary must survive even a forged selection"
         )
+    }
+
+    /// Codex G1 finding #6: a receipt whose on-disk object changed since the reviewed scan (here,
+    /// simulated by swapping the fixture root's *symlink target* after the receipt was minted but
+    /// before `CleanService` runs) must never be authorized against the stale identity the
+    /// receipt carries. This is the "post-session symlink swap between plan build and execute"
+    /// case Codex called out as missing (finding #8).
+    func testReceiptWhoseTargetWasSwappedAfterMintingIsRefused() async throws {
+        let home = try FixtureHome("cs-post-mint-swap")
+        try home.write("Library/Logs/RealApp/junk.log")
+        let rule = AuthorizedCleanPlanTests.cautionTrashRule(id: "test.userlogs.swap", tier: .safe)
+        try BundledCatalogFixture.install(RuleCatalog(rules: [rule]), atRoot: home.root)
+
+        let targetDirectory = home.url("Library/Logs/RealApp")
+        let receipt = try home.receipt(at: "Library/Logs/RealApp", ruleID: rule.id)
+
+        // Swap the reviewed directory out from under its own path: remove it and put a fresh
+        // directory with the same name (and even the same file inside) in its place. Same path,
+        // different inode — exactly the class of attack a stale receipt must not survive.
+        try FileManager.default.removeItem(at: targetDirectory)
+        try home.write("Library/Logs/RealApp/junk.log")
+
+        let request = Self.request(home: home, receipts: [receipt], selecting: [receipt.id])
+        let events = try await Self.collect(CleanService.runPipeline(request))
+        let report = try XCTUnwrap(Self.finishedReport(in: events))
+
+        XCTAssertEqual(report.succeededCount, 0, "the swapped-in replacement must never be authorized against the stale receipt")
+        XCTAssertTrue(home.exists("Library/Logs/RealApp/junk.log"), "the replacement survives untouched")
     }
 
     // MARK: - Pure-function capacity delta
@@ -256,25 +364,13 @@ final class CleanServiceTests: XCTestCase {
 
     // MARK: - Helpers
 
-    static func emptyScanResult() -> ScanResult {
-        ScanResult(
-            summary: ScanSummary(scanID: UUID(), totals: ScanTotals(), issues: [], duration: 0, cancelled: false),
-            candidates: []
-        )
-    }
-
     static func request(
         home: FixtureHome,
-        catalog: RuleCatalog,
-        candidates: [ScanCandidate],
+        receipts: [SelectionReceipt],
         selecting ids: Set<String>
     ) -> CleanRequest {
-        let scan = ScanResult(
-            summary: ScanSummary(scanID: UUID(), totals: ScanTotals(), issues: [], duration: 0, cancelled: false),
-            candidates: candidates
-        )
-        return CleanRequest(
-            catalog: catalog, scan: scan, selectedCandidateIDs: ids,
+        CleanRequest(
+            receipts: receipts, selectedCandidateIDs: ids,
             journalURL: home.url("journal.jsonl"), home: home.root
         )
     }

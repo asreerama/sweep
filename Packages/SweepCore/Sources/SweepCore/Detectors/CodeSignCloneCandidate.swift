@@ -40,7 +40,13 @@ public struct CodeSignCloneCandidate: Sendable, Hashable, Codable, Identifiable 
 
     public var id: String { candidate.id }
 
-    public init(
+    /// Internal (Codex G1 finding #7): the UI reads these from ``CodeSignCloneDetector/scan()``,
+    /// it never constructs one. A public initializer would let a caller stamp any owner/age/kind
+    /// it likes onto `candidate.identity` and have `AuthorizedCleanPlan.authorize(codeSignClone:)`
+    /// treat it as if the detector itself had found it — that authorization now re-reads identity
+    /// live from disk rather than trusting this candidate's, but sealing the initializer removes
+    /// the forgery surface entirely rather than relying on the live re-read alone.
+    init(
         candidate: ScanCandidate,
         bundleIdentifier: String,
         group: RuleGroup = .systemJunk,

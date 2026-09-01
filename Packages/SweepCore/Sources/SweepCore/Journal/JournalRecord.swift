@@ -9,6 +9,14 @@ public enum ItemOutcome: String, Sendable, Codable, CaseIterable {
     case failed
     case skipped
     case changed
+    /// Review finding #5: the item was renamed into its quarantine slot (a real mutation
+    /// happened — it is no longer at its original location) but neither reaching the real Trash
+    /// nor rolling back to the original location succeeded. Distinct from `.failed` (no mutation
+    /// ever happened) on purpose: a plain "failed" reads as "nothing changed," which is false
+    /// here and would send an operator looking in the wrong place. See
+    /// `CleanItemOutcome.quarantineLocation` / `DeletionItemResult.quarantineLocation` for where
+    /// it actually is.
+    case movedRecoveryRequired
 }
 
 /// Why an item did not succeed. Permission denial, policy refusal, disappearance and
@@ -36,6 +44,9 @@ public enum ItemFailureReason: String, Sendable, Codable, CaseIterable {
     /// quit first. Distinct from ``policyDenied`` so the two trust boundaries are never conflated
     /// in the journal or the UI.
     case notAuthorized
+    /// The item reached its quarantine slot but could neither be trashed nor rolled back to its
+    /// original location; goes with ``ItemOutcome/movedRecoveryRequired`` (review finding #5).
+    case rollbackFailed
 }
 
 /// One item as recorded in the log: the identity is the record, the path is a label.
@@ -79,6 +90,22 @@ public struct JournalRecord: Sendable, Equatable, Codable {
         case started
         case itemResult
         case committed
+        /// Review finding #5: recorded durably for a `trash`-action item *before* the coordinator
+        /// ever calls the executor, naming the deterministic slot the item will be renamed into —
+        /// so a record identifying the slot exists before the item is ever moved there, closing
+        /// "the item is renamed into quarantine before any record identifies its slot."
+        case stagePlanned
+        /// The rename into the quarantine slot named by the preceding `stagePlanned` record is
+        /// known to have succeeded (the executor call that performs it returned successfully or
+        /// hit `strandedInQuarantine`, both of which imply staging itself landed).
+        case staged
+        /// `FileManager.trashItem` succeeded for the staged item; `trashURL` carries the restore
+        /// handle. Recorded in addition to (not instead of) the summary `itemResult` record.
+        case trashed
+        /// Staging succeeded but the subsequent failure could not be rolled back either. Never
+        /// suppressed — this is the record that turns a silent `try?` into a durable, surfaced
+        /// fact (review finding #5).
+        case rollbackFailed
     }
 
     public let version: Int
@@ -92,6 +119,9 @@ public struct JournalRecord: Sendable, Equatable, Codable {
     public let failureReason: ItemFailureReason?
     /// Where `trashItem` actually put it, so restore is possible.
     public let trashURL: URL?
+    /// Where a `stagePlanned`/`staged`/`rollbackFailed` record's slot lives (or would live), so
+    /// a recovery pass can locate a stranded item without re-deriving the naming scheme.
+    public let quarantineURL: URL?
     public let detail: String?
 
     init(
@@ -104,6 +134,7 @@ public struct JournalRecord: Sendable, Equatable, Codable {
         outcome: ItemOutcome? = nil,
         failureReason: ItemFailureReason? = nil,
         trashURL: URL? = nil,
+        quarantineURL: URL? = nil,
         detail: String? = nil
     ) {
         self.version = Self.currentVersion
@@ -116,6 +147,7 @@ public struct JournalRecord: Sendable, Equatable, Codable {
         self.outcome = outcome
         self.failureReason = failureReason
         self.trashURL = trashURL
+        self.quarantineURL = quarantineURL
         self.detail = detail
     }
 }

@@ -148,6 +148,17 @@ public struct FileIdentity: Sendable, Hashable, Codable {
             && flags == other.flags
     }
 
+    /// ``isUnchanged(from:)`` plus ownership. Ownership is deliberately excluded from
+    /// `isUnchanged` (see its doc comment) because most callers only care "is this the same,
+    /// untouched object" independent of who owns it. Codex Gate-1 findings #6/#7 need a stricter
+    /// question at two specific points — ``CleanService``'s live re-verification of a
+    /// ``SelectionReceipt`` between review and execution, and code-sign-clone authorization's
+    /// live re-read — where a same-inode object whose owner silently changed between the
+    /// reviewed scan and the clean request must never be waved through on identity alone.
+    public func isFullyIdentical(to other: FileIdentity) -> Bool {
+        isUnchanged(from: other) && ownerUserID == other.ownerUserID
+    }
+
     /// The device/inode pair, in the vocabulary ``SweepPolicy`` speaks.
     public var pathIdentity: PathIdentity {
         PathIdentity(deviceID: deviceID, inode: inode)

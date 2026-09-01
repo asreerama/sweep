@@ -25,7 +25,14 @@ let package = Package(
         ),
         .testTarget(
             name: "SweepAppTests",
-            dependencies: ["SweepApp"],
+            dependencies: [
+                "SweepApp",
+                // Codex G1 finding #8: the CleanAdapter-level execution test needs `@testable
+                // import SweepCore` to reach `CleanService.runPipeline` (the internal test seam)
+                // and the write-once bundled-catalog test hooks, without ever flipping
+                // `gate1Open`.
+                .product(name: "SweepCore", package: "SweepCore"),
+            ],
             path: "Tests/SweepAppTests"
         ),
     ]

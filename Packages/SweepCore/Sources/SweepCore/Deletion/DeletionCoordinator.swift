@@ -242,7 +242,7 @@ public actor DeletionCoordinator {
         results.reserveCapacity(plan.items.count)
 
         for item in plan.items {
-            let result = await perform(item)
+            let result = await perform(item, operationID: plan.operationID)
             do {
                 try await journal.appendItemResult(
                     operationID: plan.operationID,
@@ -250,6 +250,7 @@ public actor DeletionCoordinator {
                     outcome: result.outcome,
                     failureReason: result.failureReason,
                     trashURL: result.trashURL,
+                    quarantineURL: result.quarantineLocation,
                     detail: result.detail
                 )
             } catch {
@@ -266,6 +267,12 @@ public actor DeletionCoordinator {
         } catch {
             throw DeletionError.journalUnavailable(String(describing: error))
         }
+
+        // Best-effort hygiene, after the operation is durably committed: an empty per-operation
+        // quarantine directory (review finding #3) is removed rather than left to accumulate
+        // forever. A directory that still holds a stranded slot is never touched here — that is
+        // exactly what `QuarantineRecovery` exists to surface.
+        await executor.finishOperation(plan.operationID)
 
         return DeletionReport(operationID: plan.operationID, results: results, committed: true)
     }
@@ -327,11 +334,16 @@ public actor DeletionCoordinator {
 
     // MARK: - Per-item execution
 
-    private func perform(_ item: DeletionItem) async -> DeletionItemResult {
+    private func perform(_ item: DeletionItem, operationID: UUID) async -> DeletionItemResult {
         // 1. Mode containment, re-checked per item. Plan validation already covers this; the
         //    duplicate is deliberate defense in depth around the only mutating call site.
         let components: [String]
         let anchorRoot: TrashAnchorKey?
+        // Best-effort, for the pre-mutation stage journal entry only (review finding #5): the
+        // real anchor is whichever `OpenDirectory` the executor itself holds, re-resolved by
+        // descriptor inside `TrashStaging`. This is never used to decide anything, only to
+        // compose a human/recovery-readable path alongside the deterministic slot name.
+        let anchorRootPath: String
 
         switch mode.kind {
         case .fixtureOnly(let root):
@@ -347,6 +359,7 @@ public actor DeletionCoordinator {
             }
             components = resolved
             anchorRoot = nil
+            anchorRootPath = root.path
 
         case .trashOnly(let anchors):
             guard let matched = Self.matchingAnchor(for: item.url, among: anchors),
@@ -372,6 +385,7 @@ public actor DeletionCoordinator {
             }
             components = resolved
             anchorRoot = matched.key
+            anchorRootPath = matched.url.path
 
         case .live:
             return DeletionItemResult(
@@ -456,13 +470,58 @@ public actor DeletionCoordinator {
             relativeComponents: components,
             expected: item.identity,
             expectedParent: item.parentIdentity,
-            anchorRoot: anchorRoot
+            anchorRoot: anchorRoot,
+            operationID: operationID
         )
         do {
             switch item.action {
             case .trash:
-                let trashURL = try await executor.trash(request)
-                return DeletionItemResult(item: item, outcome: .succeeded, trashURL: trashURL)
+                // Review finding #5: a record identifying the deterministic slot this item is
+                // about to be renamed into is made durable *before* the executor ever runs —
+                // closing "the item is renamed into quarantine before any record identifies its
+                // slot." The name is computed the same way `TrashStaging` computes it, from the
+                // object's own device/inode, so the two can never drift.
+                let approximateQuarantineURL = URL(fileURLWithPath: anchorRootPath)
+                    .appending(path: FileDescriptorExecutor.quarantineDirectoryName)
+                    .appending(path: operationID.uuidString)
+                    .appending(path: TrashStaging.slotName(for: item.identity))
+                    .appending(path: item.url.lastPathComponent)
+                try? await journal.appendStagePlanned(
+                    operationID: operationID, item: item.journalItem, quarantineURL: approximateQuarantineURL
+                )
+
+                do {
+                    let trashURL = try await executor.trash(request)
+                    // The rename into the slot above is now known to have succeeded (the executor
+                    // would have thrown otherwise), and so is the subsequent `trashItem` call.
+                    try? await journal.appendStaged(
+                        operationID: operationID, item: item.journalItem, quarantineURL: approximateQuarantineURL
+                    )
+                    try? await journal.appendTrashed(operationID: operationID, item: item.journalItem, trashURL: trashURL)
+                    return DeletionItemResult(item: item, outcome: .succeeded, trashURL: trashURL)
+                } catch let descriptorError as FileDescriptorError {
+                    if case .strandedInQuarantine(let quarantinePath, _, let rollbackReason) = descriptorError {
+                        // Staging succeeded — the item really did move — but it could be neither
+                        // trashed nor rolled back. This is never suppressed: it is journaled in
+                        // its own right, distinct from (and in addition to) the `itemResult`
+                        // record `execute(_:)` appends right after this returns.
+                        try? await journal.appendStaged(
+                            operationID: operationID, item: item.journalItem, quarantineURL: approximateQuarantineURL
+                        )
+                        try? await journal.appendRollbackFailed(
+                            operationID: operationID, item: item.journalItem,
+                            quarantineURL: URL(fileURLWithPath: quarantinePath), reason: rollbackReason
+                        )
+                        return DeletionItemResult(
+                            item: item,
+                            outcome: .movedRecoveryRequired,
+                            failureReason: .rollbackFailed,
+                            quarantineLocation: URL(fileURLWithPath: quarantinePath),
+                            detail: descriptorError.description
+                        )
+                    }
+                    throw descriptorError
+                }
             case .delete:
                 // `executor` is typed `any TrashCapable`; only a `FileMutating` conformer (the
                 // fixture/gate-2 executor) can also delete. `TrashOnlyFileDescriptorExecutor`
@@ -552,4 +611,6 @@ struct NoMutation: FileMutating {
     func delete(_ request: MutationRequest) async throws {
         throw DeletionError.liveModeNotEnabled
     }
+
+    func finishOperation(_ operationID: UUID) async {}
 }

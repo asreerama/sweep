@@ -5,22 +5,30 @@ import SweepPolicy
 
 /// Everything ``CleanService/execute(_:)`` needs, and nothing it can be tricked by.
 ///
-/// `catalog`, `scan` and `selectedCandidateIDs` are exactly the pinned triple
-/// (catalog + `Set<candidateID>` + scan result). There is no way to hand this type a tier, an
-/// action, or a path that was not already the URL inside a `ScanCandidate` the scan itself
-/// produced — resolving a selection into something executable happens entirely inside
-/// `CleanService`, through ``AuthorizedCleanPlan``.
+/// Codex Gate-1 finding #1: this used to also carry a caller-supplied `catalog: RuleCatalog`,
+/// which let any caller define what a rule id means. There is no `catalog` parameter any more —
+/// `CleanService` loads and hash-pins the bundled catalog itself (``CleanService/loadPinnedBundledCatalog()``)
+/// and is the only thing inside SweepCore that ever calls `RuleCatalogLoader.loadBundled`.
+///
+/// Finding #6: `scan`/`selectedCandidateIDs` (a whole `ScanResult` plus a set of ids to pick out
+/// of it) is gone too, replaced by ``receipts``: opaque proof, mintable only from a real scan,
+/// about exactly the paths under consideration. There is no way to hand this type a tier, an
+/// action, or a path that was not already the URL inside a `ScanCandidate` a scan produced —
+/// resolving a selection into something executable happens entirely inside `CleanService`,
+/// through a live re-verification of each receipt and then ``AuthorizedCleanPlan``.
 public struct CleanRequest: Sendable {
-    public let catalog: RuleCatalog
-    public let scan: ScanResult
+    /// Exactly what the review screen showed, as unforgeable receipts from a real scan. Never a
+    /// raw `ScanResult`: a caller cannot re-scope what "the reviewed scan" means by handing in a
+    /// differently-selected result, because a receipt is fine-grained to one path already.
+    public let receipts: [SelectionReceipt]
     /// Code-sign-clone candidates the caller wants considered, from a separate
     /// ``CodeSignCloneDetector`` pass (deliverable #1c's parallel authorized path). Empty by
     /// default: most requests are catalog-rule-only.
     public let codeSignClones: [CodeSignCloneCandidate]
-    /// IDs the *caller* selected, matched against `scan.candidates` and `codeSignClones` by
-    /// ``ScanCandidate/id``/``CodeSignCloneCandidate/id``. An id that matches neither is reported
-    /// as an unresolvable outcome, never silently ignored and never treated as "select the whole
-    /// scan".
+    /// IDs the *caller* selected, matched against `receipts` and `codeSignClones` by
+    /// ``SelectionReceipt/id``/``CodeSignCloneCandidate/id``. An id that matches neither is
+    /// reported as an unresolvable outcome, never silently ignored and never treated as "select
+    /// everything offered".
     public let selectedCandidateIDs: Set<String>
 
     /// Where the WAL for this run lives. Not part of the public initializer — a caller names
@@ -33,14 +41,12 @@ public struct CleanRequest: Sendable {
     let home: URL
 
     public init(
-        catalog: RuleCatalog,
-        scan: ScanResult,
+        receipts: [SelectionReceipt],
         codeSignClones: [CodeSignCloneCandidate] = [],
         selectedCandidateIDs: Set<String>
     ) {
         self.init(
-            catalog: catalog,
-            scan: scan,
+            receipts: receipts,
             codeSignClones: codeSignClones,
             selectedCandidateIDs: selectedCandidateIDs,
             journalURL: CleanRequest.defaultJournalURL(),
@@ -51,15 +57,13 @@ public struct CleanRequest: Sendable {
     /// Test seam. Not reachable from outside the package: the public initializer above is the
     /// only one an external caller can name.
     init(
-        catalog: RuleCatalog,
-        scan: ScanResult,
+        receipts: [SelectionReceipt],
         codeSignClones: [CodeSignCloneCandidate] = [],
         selectedCandidateIDs: Set<String>,
         journalURL: URL,
         home: URL
     ) {
-        self.catalog = catalog
-        self.scan = scan
+        self.receipts = receipts
         self.codeSignClones = codeSignClones
         self.selectedCandidateIDs = selectedCandidateIDs
         self.journalURL = journalURL
@@ -88,6 +92,9 @@ public struct CleanItemOutcome: Sendable, Equatable, Identifiable {
     public let failureReason: ItemFailureReason?
     /// Restore handle for a trashed item.
     public let trashURL: URL?
+    /// Set only when `outcome == .movedRecoveryRequired` (review finding #5): the item left its
+    /// original location and landed here, but could be neither trashed nor rolled back.
+    public let quarantineLocation: URL?
     public let allocatedSize: Int64
     public let detail: String?
 
@@ -101,6 +108,7 @@ public struct CleanItemOutcome: Sendable, Equatable, Identifiable {
         outcome: ItemOutcome,
         failureReason: ItemFailureReason?,
         trashURL: URL?,
+        quarantineLocation: URL? = nil,
         allocatedSize: Int64,
         detail: String?
     ) {
@@ -113,6 +121,7 @@ public struct CleanItemOutcome: Sendable, Equatable, Identifiable {
         self.outcome = outcome
         self.failureReason = failureReason
         self.trashURL = trashURL
+        self.quarantineLocation = quarantineLocation
         self.allocatedSize = allocatedSize
         self.detail = detail
     }
@@ -128,20 +137,38 @@ public struct CleanItemOutcome: Sendable, Equatable, Identifiable {
 
     /// ``AuthorizedCleanPlan`` construction failed before a plan ever existed.
     init(candidate: ScanCandidate, ruleID: String?, detectorSource: String?, authorizationError error: any Error) {
-        let reason: ItemFailureReason
-        let description: String
-        if let authError = error as? AuthorizationError {
-            description = authError.description
-            if case .policyDenied = authError { reason = .policyDenied } else { reason = .notAuthorized }
-        } else {
-            description = String(describing: error)
-            reason = .notAuthorized
-        }
+        let (reason, description) = CleanItemOutcome.classify(error)
         self.init(
             id: candidate.id, url: candidate.url, ruleID: ruleID, detectorSource: detectorSource,
-            tier: nil, requestedAction: nil, outcome: .skipped, failureReason: reason,
+            tier: nil, requestedAction: nil, outcome: SweepCore.outcome(for: reason), failureReason: reason,
             trashURL: nil, allocatedSize: candidate.allocatedSize, detail: description
         )
+    }
+
+    /// A ``SelectionReceipt``'s live re-verification (finding #6) or authorization failed before
+    /// a plan ever existed — the receipt-path counterpart of the `candidate:` initializer above,
+    /// used when there is no fresh `ScanCandidate` to report from because verification itself is
+    /// what failed.
+    init(receipt: SelectionReceipt, authorizationError error: any Error) {
+        let (reason, description) = CleanItemOutcome.classify(error)
+        self.init(
+            id: receipt.id, url: receipt.url, ruleID: receipt.ruleID, detectorSource: nil,
+            tier: nil, requestedAction: nil, outcome: SweepCore.outcome(for: reason), failureReason: reason,
+            trashURL: nil, allocatedSize: receipt.allocatedSize, detail: description
+        )
+    }
+
+    private static func classify(_ error: any Error) -> (ItemFailureReason, String) {
+        guard let authError = error as? AuthorizationError else {
+            return (.notAuthorized, String(describing: error))
+        }
+        let reason: ItemFailureReason
+        switch authError {
+        case .policyDenied: reason = .policyDenied
+        case .identityChangedSinceScan(_, let vanished): reason = vanished ? .vanished : .identityChanged
+        default: reason = .notAuthorized
+        }
+        return (reason, authError.description)
     }
 
     /// Hard-filtered out after authorization succeeded (tier, action, or denylist re-check).
@@ -168,6 +195,7 @@ public struct CleanItemOutcome: Sendable, Equatable, Identifiable {
             outcome: result.outcome,
             failureReason: result.failureReason,
             trashURL: result.trashURL,
+            quarantineLocation: result.quarantineLocation,
             allocatedSize: result.item.allocatedSize,
             detail: result.detail
         )
@@ -282,27 +310,35 @@ public enum CleanService {
         _ request: CleanRequest,
         into continuation: AsyncThrowingStream<CleanEvent, Error>.Continuation
     ) async throws {
-        let candidatesByID = Dictionary(request.scan.candidates.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        // Codex G1 finding #1: the catalog is never the caller's. Loaded, hash-pinned and
+        // validated fresh for this run, before a single receipt is even looked at.
+        let pinned = try loadPinnedBundledCatalog()
+        let catalog = pinned.catalog
+
+        let receiptsByID = Dictionary(request.receipts.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let clonesByID = Dictionary(request.codeSignClones.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
 
         var authorized: [AuthorizedCleanPlan] = []
         var settled: [CleanItemOutcome] = []
 
         for id in request.selectedCandidateIDs.sorted() {
-            if let candidate = candidatesByID[id] {
-                guard let ruleID = candidate.ruleID else {
-                    settled.append(CleanItemOutcome(
-                        candidate: candidate, ruleID: nil, detectorSource: nil,
-                        authorizationError: AuthorizationError.noRuleID
-                    ))
+            if let receipt = receiptsByID[id] {
+                guard let ruleID = receipt.ruleID else {
+                    settled.append(CleanItemOutcome(receipt: receipt, authorizationError: AuthorizationError.noRuleID))
                     continue
                 }
                 do {
+                    // Finding #6: re-verify identity live (fresh lstat, full `FileIdentity`
+                    // including owner UID) instead of trusting the receipt's scan-time snapshot
+                    // or re-scanning the subtree under it. `AuthorizedCleanPlan.authorize` then
+                    // runs its usual gauntlet (root/pattern rematch, age, running-app) against
+                    // this freshly-verified candidate.
+                    let liveCandidate = try Self.liveVerifiedCandidate(for: receipt)
                     authorized.append(try AuthorizedCleanPlan.authorize(
-                        ruleID: ruleID, candidate: candidate, catalog: request.catalog, home: request.home
+                        ruleID: ruleID, candidate: liveCandidate, catalog: catalog, home: request.home
                     ))
                 } catch {
-                    settled.append(CleanItemOutcome(candidate: candidate, ruleID: ruleID, detectorSource: nil, authorizationError: error))
+                    settled.append(CleanItemOutcome(receipt: receipt, authorizationError: error))
                 }
             } else if let clone = clonesByID[id] {
                 do {
@@ -373,7 +409,10 @@ public enum CleanService {
             throw error
         }
 
-        let plan = DeletionPlan(items: toExecute.map { DeletionItem(authorized: $0) })
+        // Codex G1 finding #4: the plan must carry the *same* operation id already emitted in
+        // `.started` above (and used in the final `.finished` report below) — not a fresh one of
+        // its own, which is what let the WAL disagree with the service's own report.
+        let plan = DeletionPlan(operationID: operationID, items: toExecute.map { DeletionItem(authorized: $0) })
         let report: DeletionReport
         do {
             report = try await coordinator.execute(plan)
@@ -399,6 +438,32 @@ public enum CleanService {
         continuation.yield(.finished(CleanReport(
             operationID: operationID, outcomes: allOutcomes, committed: report.committed, freedBytesEstimate: freed
         )))
+    }
+
+    /// Codex G1 finding #6: the live re-verification a ``SelectionReceipt`` exists for. Reads
+    /// `receipt.url` fresh, right now, and refuses unless it is *fully* identical (device, inode,
+    /// kind, mtime, ctime, size, link count, flags **and owner UID**) to what the receipt says
+    /// the reviewed scan saw — strictly stronger than the plain identity check the rest of the
+    /// pipeline uses elsewhere, because a receipt can be handed to `CleanService` an arbitrary
+    /// amount of time after the scan that produced it. The live identity — not the receipt's
+    /// stale one — is what gets carried into authorization from here on.
+    private static func liveVerifiedCandidate(for receipt: SelectionReceipt) throws -> ScanCandidate {
+        let current: FileIdentity
+        do {
+            current = try FileIdentity.read(at: receipt.url, volume: receipt.scannedIdentity.volume)
+        } catch let error as FileIdentityError {
+            throw AuthorizationError.identityChangedSinceScan(path: receipt.url.path, vanished: error.isNotFound)
+        }
+        guard current.isFullyIdentical(to: receipt.scannedIdentity) else {
+            throw AuthorizationError.identityChangedSinceScan(path: receipt.url.path, vanished: false)
+        }
+        return ScanCandidate(
+            url: receipt.url,
+            identity: current,
+            parentIdentity: receipt.scannedParentIdentity,
+            allocatedSize: receipt.allocatedSize,
+            ruleID: receipt.ruleID
+        )
     }
 }
 

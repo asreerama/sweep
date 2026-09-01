@@ -149,6 +149,10 @@ public struct DeletionItemResult: Sendable, Equatable, Identifiable {
     public let outcome: ItemOutcome
     public let failureReason: ItemFailureReason?
     public let trashURL: URL?
+    /// Set only when `outcome == .movedRecoveryRequired` (review finding #5): the item was
+    /// renamed into this quarantine location and neither reached the Trash nor could be rolled
+    /// back to where it started.
+    public let quarantineLocation: URL?
     public let detail: String?
 
     public var id: String { item.id }
@@ -158,12 +162,14 @@ public struct DeletionItemResult: Sendable, Equatable, Identifiable {
         outcome: ItemOutcome,
         failureReason: ItemFailureReason? = nil,
         trashURL: URL? = nil,
+        quarantineLocation: URL? = nil,
         detail: String? = nil
     ) {
         self.item = item
         self.outcome = outcome
         self.failureReason = failureReason
         self.trashURL = trashURL
+        self.quarantineLocation = quarantineLocation
         self.detail = detail
     }
 }
@@ -192,6 +198,10 @@ public struct DeletionReport: Sendable, Equatable {
     public var failedCount: Int { results(with: .failed).count }
     public var skippedCount: Int { results(with: .skipped).count }
     public var changedCount: Int { results(with: .changed).count }
+    /// Moved out of place but not confirmed in the Trash and not rolled back either — distinct
+    /// from `failedCount` on purpose (review finding #5): these items require operator recovery,
+    /// not a retry from the original location, because they are not there any more.
+    public var recoveryRequiredCount: Int { results(with: .movedRecoveryRequired).count }
 
     public var plannedBytesRemoved: Int64 {
         results.reduce(0) { $0 + ($1.outcome == .succeeded ? $1.item.allocatedSize : 0) }

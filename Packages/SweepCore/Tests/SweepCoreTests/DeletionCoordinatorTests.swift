@@ -34,6 +34,12 @@ final class RecordingExecutor: FileMutating, @unchecked Sendable {
             deleted.append(request.url)
         }
     }
+
+    private(set) var finishedOperations: [UUID] = []
+
+    func finishOperation(_ operationID: UUID) async {
+        lock.withLock { finishedOperations.append(operationID) }
+    }
 }
 
 final class DeletionCoordinatorTests: XCTestCase {
@@ -428,6 +434,79 @@ final class DeletionCoordinatorTests: XCTestCase {
 
         await XCTAssertThrowsErrorAsync(try await coordinator.execute(plan))
         XCTAssertTrue(FileManager.default.fileExists(atPath: victim.path))
+    }
+
+    /// Codex G1 finding #8 ("post-session symlink swap of the fixture root between plan build
+    /// and execute"): the existing suite only ever covered a root that was *already* a symlink
+    /// at construction time. This covers the gap — the root is anchored by descriptor first, and
+    /// only *afterward* is its pathname replaced with a symlink into a different real directory.
+    func testPostSessionSymlinkSwapOfTheFixtureRootIsRefused() async throws {
+        let parent = try TempTree("del-post-swap")
+        let realRoot = try parent.makeDirectory("real-root")
+        let file = try parent.write("real-root/victim.bin", bytes: 32)
+        let outside = try TempTree("del-post-swap-outside")
+        let precious = try outside.write("precious.bin", bytes: 16)
+
+        let journal = try await WALJournal(url: parent.url("journal.jsonl"))
+        // Anchored by descriptor *now*, while `realRoot` is still the real directory.
+        let coordinator = try DeletionCoordinator(mode: .fixtureOnly(root: realRoot), journal: journal)
+        let plan = try Self.plan(for: [file], action: .delete, tier: .safe)
+
+        // Post-session swap: move the real directory aside (its content, and the descriptor
+        // already anchored to it, stay completely intact) and put a symlink to a *different*
+        // real directory at the original pathname.
+        let movedAway = parent.url("real-root-moved-aside")
+        try FileManager.default.moveItem(at: realRoot, to: movedAway)
+        try FileManager.default.createSymbolicLink(at: realRoot, withDestinationURL: outside.root)
+
+        let report = try await coordinator.execute(plan)
+
+        XCTAssertEqual(report.succeededCount, 0, "the anchored descriptor must never be redirected by a pathname swap")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: precious.path), "the symlink's new target must never be touched")
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: movedAway.appending(path: "victim.bin").path),
+            "the real, original object (now reachable only by its moved-aside name) must survive untouched"
+        )
+        await journal.close()
+    }
+
+    // MARK: - Codex G1 finding #5: rollback failure is never suppressed
+
+    /// A mutating-executor test double (`RecordingExecutor`, extended with a configurable
+    /// `errorToThrow`) throws the same `strandedInQuarantine` error the real staging algorithm
+    /// throws when a rollback itself fails. The coordinator must report this distinctly from a
+    /// plain failure, never suppress it, and journal it.
+    func testRollbackFailureIsNeverSuppressedAndReportsMovedRecoveryRequired() async throws {
+        let fixture = try TempTree("del-rollback-failed")
+        let file = try fixture.write("caches/stuck.bin", bytes: 64)
+        let quarantinePath = fixture.url(".sweep-quarantine/op/64-1/stuck.bin").path
+        let executor = RecordingExecutor(errorToThrow: FileDescriptorError.strandedInQuarantine(
+            quarantinePath: quarantinePath,
+            underlyingReason: "trashItem failed: simulated for the test",
+            rollbackReason: "renameat failed: simulated for the test"
+        ))
+
+        let journal = try await WALJournal(url: fixture.url("journal.jsonl"))
+        let coordinator = DeletionCoordinator(
+            mode: .fixtureOnly(root: fixture.root), journal: journal, additionalDenials: .none, executor: executor
+        )
+        let plan = try Self.plan(for: [file], action: .trash, tier: .safe)
+
+        let report = try await coordinator.execute(plan)
+
+        let result = try XCTUnwrap(report.results.first)
+        XCTAssertEqual(result.outcome, .movedRecoveryRequired, "never a plain failure: a real mutation happened")
+        XCTAssertNotEqual(result.outcome, .failed)
+        XCTAssertEqual(result.failureReason, .rollbackFailed)
+        XCTAssertEqual(result.quarantineLocation?.path, quarantinePath)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: file.path), "the fixture file itself was never really moved by this test double")
+
+        let records = try await journal.records()
+        XCTAssertTrue(records.contains { $0.kind == .rollbackFailed }, "the rollback failure is journaled in its own right, never suppressed")
+        let itemResultRecord = try XCTUnwrap(records.first { $0.kind == .itemResult })
+        XCTAssertEqual(itemResultRecord.outcome, .movedRecoveryRequired)
+        XCTAssertEqual(itemResultRecord.quarantineURL?.path, quarantinePath)
+        await journal.close()
     }
 
     func testLiveModeIsGatedShut() async throws {

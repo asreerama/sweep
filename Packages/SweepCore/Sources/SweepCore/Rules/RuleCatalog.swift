@@ -97,9 +97,13 @@ public struct Rule: Sendable, Equatable, Codable, Identifiable {
     public let exclusions: [String]
     public let rationale: String
 
-    /// Unvalidated memberwise init. Callers building rules in code must call ``validate()``;
-    /// every decoding path validates automatically.
-    public init(
+    /// Unvalidated memberwise init. Internal: Codex G1 finding #1 — nothing outside SweepCore
+    /// ever needs to construct a bare `Rule` (the app only reads decoded rules; only tests
+    /// inside this package build fixture rules in code), so there is no public route to stamp
+    /// an arbitrary id/tier/action pair and have it mistaken for a catalog rule. Callers
+    /// building rules in code must call ``validate()``; every decoding path validates
+    /// automatically.
+    init(
         id: String,
         title: String,
         group: RuleGroup,
@@ -244,7 +248,15 @@ public struct RuleCatalog: Sendable, Equatable, Codable {
     public let schemaVersion: Int
     public let rules: [Rule]
 
-    /// Unvalidated memberwise init; ``validate()`` runs on every decoding path.
+    /// Unvalidated memberwise init; ``validate()`` runs on every decoding path. Stays public
+    /// (Codex G1 finding #1 asked this be made internal "if nothing outside SweepCore needs
+    /// it" — `Sources/SweepApp/Scan/ScanService.swift` constructs an empty placeholder catalog
+    /// with this exact initializer before any scan has run, so it cannot be sealed without
+    /// breaking that call site). This is safe regardless: as of this fix `CleanService` never
+    /// accepts a caller-supplied `RuleCatalog` at all (see `CleanRequest`), so a caller
+    /// constructing one here has nothing to authorize against — only ``RuleCatalogLoader``'s
+    /// bundled-and-hash-pinned load, called from inside `CleanService` itself, ever feeds a
+    /// catalog into authorization.
     public init(schemaVersion: Int = RuleCatalog.supportedSchemaVersion, rules: [Rule]) {
         self.schemaVersion = schemaVersion
         self.rules = rules

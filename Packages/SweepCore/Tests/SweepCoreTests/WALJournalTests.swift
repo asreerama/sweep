@@ -324,6 +324,70 @@ final class WALJournalTests: XCTestCase {
         await second.close()
     }
 
+    // MARK: - Review finding #2: symlink redirect and pathname re-reads
+
+    /// A pre-planted symlink at the journal's own pathname must be refused outright, never
+    /// followed and never appended through.
+    func testPrePlantedSymlinkAtTheJournalPathIsRefused() async throws {
+        let tree = try TempTree("wal-symlink-redirect")
+        let victim = tree.url("victim.txt")
+        try Data("do not touch".utf8).write(to: victim)
+        let journalPath = tree.url("clean-journal.jsonl")
+        try FileManager.default.createSymbolicLink(at: journalPath, withDestinationURL: victim)
+
+        do {
+            _ = try await WALJournal(url: journalPath)
+            XCTFail("expected the journal open to refuse a symlinked path")
+        } catch let error as JournalError {
+            guard case .cannotCreate = error else { return XCTFail("expected cannotCreate, got \(error)") }
+        }
+
+        XCTAssertEqual(
+            try String(contentsOf: victim, encoding: .utf8), "do not touch",
+            "the symlink's target must never receive WAL bytes"
+        )
+    }
+
+    /// A pre-existing, non-symlink node at the journal's path that is writable by group or other
+    /// is refused too — `O_NOFOLLOW` alone would not catch this, since it is not a symlink.
+    func testPreExistingGroupWritableJournalFileIsRefused() async throws {
+        let tree = try TempTree("wal-mode-check")
+        let url = tree.url("ops.jsonl")
+        try Data().write(to: url)
+        try FileManager.default.setAttributes([.posixPermissions: 0o666], ofItemAtPath: url.path)
+
+        do {
+            _ = try await WALJournal(url: url)
+            XCTFail("expected the journal open to refuse a group/other-writable pre-existing file")
+        } catch let error as JournalError {
+            guard case .cannotCreate = error else { return XCTFail("expected cannotCreate, got \(error)") }
+        }
+    }
+
+    /// Recovery/replay reads through the same locked descriptor every append uses, never the
+    /// pathname again: swapping the pathname out from under an already-open journal must not
+    /// change what a subsequent read sees.
+    func testReadsUseTheLockedDescriptorNotAPathnameSwappedAfterOpen() async throws {
+        let tree = try TempTree("wal-pread-anchor")
+        let url = tree.url("ops.jsonl")
+        let operationID = UUID()
+        let journal = try await WALJournal(url: url)
+        try await journal.appendPlanned(operationID: operationID, planVersion: 1, items: [Self.item(path: "/fixture/a")])
+
+        // Swap the pathname out from under the open, locked descriptor: unlink the real file and
+        // put an unrelated one with the same name in its place.
+        try FileManager.default.removeItem(at: url)
+        try Data("{\"not\":\"a real record\"}\n".utf8).write(to: url)
+
+        let records = try await journal.records()
+        XCTAssertEqual(
+            records.count, 1,
+            "must read the file the descriptor still holds open, not whatever now sits at the pathname"
+        )
+        XCTAssertEqual(records.first?.kind, .planned)
+        await journal.close()
+    }
+
     static func item(path: String) -> JournalItem {
         JournalItem(
             path: path,

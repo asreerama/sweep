@@ -42,6 +42,11 @@ final class TrashOnlyFileDescriptorExecutor: TrashCapable, @unchecked Sendable {
     /// One quarantine per root: `renameat` cannot cross a device, so each authorized root needs
     /// its own staging directory on its own volume. Only ever touched from `queue`.
     private var quarantines: [TrashAnchorKey: OpenDirectory] = [:]
+    /// One exclusive-created directory per (root, operation id) pair this executor has seen
+    /// (review finding #3): created fresh, and refused outright if it already exists, the first
+    /// time an operation touches a given root; reused for every later item of that same
+    /// operation against that same root. Only ever touched from `queue`.
+    private var operationDirectories: [TrashAnchorKey: [UUID: OpenDirectory]] = [:]
 
     init(anchors: [TrashAnchorKey: OpenDirectory], queue: BlockingIOQueue) {
         self.roots = anchors
@@ -52,6 +57,20 @@ final class TrashOnlyFileDescriptorExecutor: TrashCapable, @unchecked Sendable {
         try await queue.run { try self.performTrash(request) }
     }
 
+    func finishOperation(_ operationID: UUID) async {
+        try? await queue.run { self.performFinishOperation(operationID) }
+    }
+
+    private func performFinishOperation(_ operationID: UUID) {
+        for key in roots.keys {
+            guard let directory = operationDirectories[key]?[operationID], let quarantine = quarantines[key] else { continue }
+            if (try? directory.childNames())?.isEmpty == true {
+                try? quarantine.removeChildDirectory(operationID.uuidString)
+            }
+            operationDirectories[key]?[operationID] = nil
+        }
+    }
+
     private func performTrash(_ request: MutationRequest) throws -> URL? {
         // `request.anchorRoot` is set by `DeletionCoordinator` from the same anchor list this
         // executor was built from, so a miss here means the coordinator and the executor
@@ -60,7 +79,9 @@ final class TrashOnlyFileDescriptorExecutor: TrashCapable, @unchecked Sendable {
         guard let key = request.anchorRoot, let root = roots[key] else {
             throw FileDescriptorError.escapesRoot(path: request.url.path)
         }
-        return try TrashStaging.trash(request: request, anchoredAt: root, quarantine: try quarantineDirectory(for: key, in: root))
+        let quarantine = try quarantineDirectory(for: key, in: root)
+        let operationDirectory = try self.operationDirectory(for: request.operationID, key: key, in: quarantine)
+        return try TrashStaging.trash(request: request, anchoredAt: root, operationQuarantine: operationDirectory)
     }
 
     private func quarantineDirectory(for key: TrashAnchorKey, in root: OpenDirectory) throws -> OpenDirectory {
@@ -70,6 +91,20 @@ final class TrashOnlyFileDescriptorExecutor: TrashCapable, @unchecked Sendable {
         // rather than staging deletions somewhere else.
         let directory = try root.openChildDirectory(FileDescriptorExecutor.quarantineDirectoryName)
         quarantines[key] = directory
+        return directory
+    }
+
+    private func operationDirectory(
+        for operationID: UUID,
+        key: TrashAnchorKey,
+        in quarantine: OpenDirectory
+    ) throws -> OpenDirectory {
+        if let existing = operationDirectories[key]?[operationID] { return existing }
+        let name = operationID.uuidString
+        try quarantine.makeChildDirectoryExclusive(name)
+        let directory = try quarantine.openChildDirectory(name)
+        try TrashStaging.verifyFreshQuarantineSlot(directory, expectedDeviceID: try quarantine.identity().deviceID)
+        operationDirectories[key, default: [:]][operationID] = directory
         return directory
     }
 }

@@ -17,6 +17,10 @@ struct MutationRequest: Sendable {
     /// ever one anchor and no ambiguity to resolve. Only ``TrashOnlyFileDescriptorExecutor``
     /// reads this.
     var anchorRoot: TrashAnchorKey? = nil
+    /// The plan's operation id. Used only to name this item's deterministic, per-operation
+    /// quarantine slot (review finding #3/#5) — never anything a caller of `CleanService`
+    /// supplies directly; it is always `DeletionPlan.operationID`.
+    var operationID: UUID = UUID()
 }
 
 /// The mutation surface every trash-capable executor exposes. Deliberately tiny: one verb, no
@@ -24,6 +28,12 @@ struct MutationRequest: Sendable {
 protocol TrashCapable: Sendable {
     /// Returns the resulting Trash URL when the system reports one.
     func trash(_ request: MutationRequest) async throws -> URL?
+
+    /// Best-effort cleanup once an operation's items have all been processed: removes that
+    /// operation's per-operation quarantine directory (review finding #3/#5) if, and only if, it
+    /// is now empty. Never throws, and never removes anything that still holds content — a
+    /// stranded slot stays exactly where ``QuarantineRecovery`` expects to find it.
+    func finishOperation(_ operationID: UUID) async
 }
 
 /// The full mutation surface: trash, plus unlink. Only ever implemented by an executor anchored
@@ -60,6 +70,11 @@ final class FileDescriptorExecutor: FileMutating, @unchecked Sendable {
     /// Opened lazily on first trash and then held; the descriptor *is* the identity pin.
     /// Only ever touched from `queue`.
     private var quarantine: OpenDirectory?
+    /// One exclusive-created directory per operation id seen by this executor instance (review
+    /// finding #3): created fresh the first time an operation's id is seen (`EEXIST` is a hard
+    /// failure, never silently reused), then cached and reused for every other item in that same
+    /// operation. Only ever touched from `queue`.
+    private var operationDirectories: [UUID: OpenDirectory] = [:]
 
     init(root: OpenDirectory, queue: BlockingIOQueue) {
         self.root = root
@@ -74,6 +89,18 @@ final class FileDescriptorExecutor: FileMutating, @unchecked Sendable {
 
     func trash(_ request: MutationRequest) async throws -> URL? {
         try await queue.run { try self.performTrash(request) }
+    }
+
+    func finishOperation(_ operationID: UUID) async {
+        try? await queue.run { self.performFinishOperation(operationID) }
+    }
+
+    private func performFinishOperation(_ operationID: UUID) {
+        guard let directory = operationDirectories[operationID], let quarantine else { return }
+        if (try? directory.childNames())?.isEmpty == true {
+            try? quarantine.removeChildDirectory(operationID.uuidString)
+        }
+        operationDirectories[operationID] = nil
     }
 
     // MARK: - On the serial queue
@@ -94,7 +121,22 @@ final class FileDescriptorExecutor: FileMutating, @unchecked Sendable {
     }
 
     private func performTrash(_ request: MutationRequest) throws -> URL? {
-        try TrashStaging.trash(request: request, anchoredAt: root, quarantine: try quarantineDirectory())
+        let quarantine = try quarantineDirectory()
+        let operationDirectory = try self.operationDirectory(for: request.operationID, in: quarantine)
+        return try TrashStaging.trash(request: request, anchoredAt: root, operationQuarantine: operationDirectory)
+    }
+
+    /// The first call for a given operation id creates its quarantine directory exclusively
+    /// (`EEXIST` refuses rather than reuses — review finding #3) and verifies it; every later
+    /// item in the same operation reuses the cached descriptor.
+    private func operationDirectory(for operationID: UUID, in quarantine: OpenDirectory) throws -> OpenDirectory {
+        if let existing = operationDirectories[operationID] { return existing }
+        let name = operationID.uuidString
+        try quarantine.makeChildDirectoryExclusive(name)
+        let directory = try quarantine.openChildDirectory(name)
+        try TrashStaging.verifyFreshQuarantineSlot(directory, expectedDeviceID: try quarantine.identity().deviceID)
+        operationDirectories[operationID] = directory
+        return directory
     }
 
     /// Bottom-up removal. `removeItem`'s recursive delete is never used, because it would take
@@ -173,10 +215,20 @@ final class FileDescriptorExecutor: FileMutating, @unchecked Sendable {
 /// executors differ only in how many roots they anchor and which verbs they expose, never in how
 /// a trash actually happens.
 enum TrashStaging {
+
+    /// Deterministic per-item slot name: device+inode only, never the path (which may contain
+    /// characters unsafe as a single path component, and would leak arbitrary length into a
+    /// filename). The same object always names the same slot, so a second attempt at it within
+    /// the same operation collides loudly on the exclusive create below rather than silently
+    /// double-staging.
+    static func slotName(for identity: FileIdentity) -> String {
+        "\(identity.deviceID)-\(identity.inode)"
+    }
+
     static func trash(
         request: MutationRequest,
         anchoredAt root: OpenDirectory,
-        quarantine: OpenDirectory
+        operationQuarantine: OpenDirectory
     ) throws -> URL? {
         let (parent, leaf) = try FileDescriptorPath.descend(
             from: root,
@@ -191,39 +243,71 @@ enum TrashStaging {
         //
         // `FileManager.trashItem` is the only API that can produce a restorable Trash entry, and
         // it only speaks pathnames. So the item is first moved, by descriptor-relative atomic
-        // rename, into the quarantine directory the caller already holds open. The pathname
-        // handed to Foundation is therefore one nothing else has a handle on, and it is
-        // re-validated against the identity that was just moved immediately before the call.
-        let slotName = UUID().uuidString
-        try quarantine.makeChildDirectory(slotName)
-        let slot = try quarantine.openChildDirectory(slotName)
+        // rename, into an exclusive slot inside this operation's own quarantine directory (review
+        // finding #3): the slot's name is derived from this object's own device/inode, created
+        // with `makeChildDirectoryExclusive` — a slot that already exists is refused outright,
+        // never silently reused — and its owner/mode/device are verified immediately after
+        // creation, before anything is renamed into it.
+        let slotName = Self.slotName(for: actual)
+        try operationQuarantine.makeChildDirectoryExclusive(slotName)
+        let slot = try operationQuarantine.openChildDirectory(slotName)
+        try Self.verifyFreshQuarantineSlot(slot, expectedDeviceID: try operationQuarantine.identity().deviceID)
+
         try parent.renameChild(leaf, into: slot, as: leaf)
 
         do {
+            // The identity of what actually landed is re-read from the slot's own descriptor —
+            // authoritative, because it is `fstatat` against a directory this process just
+            // created and holds open. A second, pathname-based re-read here would only add
+            // another TOCTOU-vulnerable step for no additional assurance, so there is none.
             let moved = try slot.identity(ofChild: leaf, volume: actual.volume)
             guard moved.isSameFile(as: actual) else {
                 throw FileDescriptorError.identityChanged(path: request.url.path)
             }
-            let quarantinedURL = URL(fileURLWithPath: slot.path).appending(path: leaf)
-            guard let onDisk = try? FileIdentity.read(at: quarantinedURL),
-                  onDisk.isSameFile(as: moved) else {
-                throw FileDescriptorError.identityChanged(path: quarantinedURL.path)
-            }
 
+            // From this line on, `FileManager.trashItem` is a pathname API — the one hop in this
+            // whole pipeline that cannot be made descriptor-relative, because Foundation's Trash
+            // implementation only ever accepts a path. The window is narrowed as far as it can
+            // be: the pathname names a slot this process just created *exclusively* (a fresh
+            // `mkdir` that fails on `EEXIST`), deterministically named from this operation's id
+            // and this object's own device/inode, holding exactly the object just proven
+            // identical by descriptor a moment ago. This is **not** fully race-free: a same-uid
+            // process could still, in principle, unlink or replace the leaf at that exact
+            // pathname in the instant between this line and the syscall inside `trashItem`. That
+            // residual gap is real, and nothing short of Sweep re-implementing the Trash protocol
+            // itself (`FSMoveObjectToTrashSync` or lower) instead of calling
+            // `FileManager.trashItem` would close it.
+            let quarantinedURL = URL(fileURLWithPath: slot.path).appending(path: leaf)
             var resulting: NSURL?
             do {
                 try FileManager.default.trashItem(at: quarantinedURL, resultingItemURL: &resulting)
             } catch {
                 throw FileDescriptorError.trashFailed((error as NSError).localizedDescription)
             }
-            try? quarantine.removeChildDirectory(slotName)
+            try? operationQuarantine.removeChildDirectory(slotName)
             return resulting as URL?
         } catch {
             // Quarantine is a staging area, never a grave: anything that does not reach the Trash
-            // goes back where it came from, through the same descriptors.
-            try? slot.renameChild(leaf, into: parent, as: leaf)
-            try? quarantine.removeChildDirectory(slotName)
-            throw error
+            // goes back where it came from, through the same descriptors. Unlike before, a
+            // failure of *this* rollback rename is never swallowed (review finding #5): it is the
+            // one failure mode that actually strands the item, so it is re-thrown as a distinct,
+            // never-suppressed error the coordinator must report as "moved, recovery required."
+            let firstError = error
+            do {
+                try slot.renameChild(leaf, into: parent, as: leaf)
+            } catch let rollbackError {
+                let quarantinedPath = URL(fileURLWithPath: slot.path).appending(path: leaf).path
+                throw FileDescriptorError.strandedInQuarantine(
+                    quarantinePath: quarantinedPath,
+                    underlyingReason: String(describing: firstError),
+                    rollbackReason: String(describing: rollbackError)
+                )
+            }
+            // The rollback itself succeeded; only the now-empty slot directory remains, and
+            // failing to remove it is cosmetic (the item is already safely back at its original
+            // location), so this cleanup alone may still be best-effort.
+            try? operationQuarantine.removeChildDirectory(slotName)
+            throw firstError
         }
     }
 
@@ -240,12 +324,40 @@ enum TrashStaging {
         }
         return actual
     }
+
+    /// After an exclusive create, re-derives what actually landed on disk directly from the fd
+    /// rather than trusting the create call's mode argument — review finding #3's "owner/mode/
+    /// device verified after creation."
+    static func verifyFreshQuarantineSlot(_ directory: OpenDirectory, expectedDeviceID: UInt64) throws {
+        var status = stat()
+        guard fstat(directory.fd, &status) == 0 else {
+            throw FileDescriptorError.quarantineSlotIdentityUnexpected(
+                "fstat failed: \(String(cString: strerror(errno)))"
+            )
+        }
+        guard status.st_mode & S_IFMT == S_IFDIR else {
+            throw FileDescriptorError.quarantineSlotIdentityUnexpected("not a directory")
+        }
+        guard status.st_uid == getuid() else {
+            throw FileDescriptorError.quarantineSlotIdentityUnexpected(
+                "owner uid \(status.st_uid) does not match this account"
+            )
+        }
+        guard status.st_mode & (S_IRWXG | S_IRWXO) == 0 else {
+            throw FileDescriptorError.quarantineSlotIdentityUnexpected("accessible to group or other")
+        }
+        let deviceID = UInt64(bitPattern: Int64(status.st_dev))
+        guard deviceID == expectedDeviceID else {
+            throw FileDescriptorError.quarantineSlotIdentityUnexpected("on a different device than its quarantine root")
+        }
+    }
 }
 
 /// Maps a descriptor, Cocoa or POSIX error onto the failure vocabulary the journal and UI
 /// distinguish.
 func failureReason(for error: any Error) -> ItemFailureReason {
     if let descriptorError = error as? FileDescriptorError {
+        if case .strandedInQuarantine = descriptorError { return .rollbackFailed }
         if descriptorError.isNotFound { return .vanished }
         if descriptorError.isPermissionDenied { return .permissionDenied }
         if descriptorError.isIdentityRefusal { return .identityChanged }
@@ -290,5 +402,9 @@ func outcome(for reason: ItemFailureReason) -> ItemOutcome {
          .outsideAuthorizedRoot, .actionNotPermitted, .notAuthorized:
         .skipped
     case .permissionDenied, .filesystemError: .failed
+    // Review finding #5: a real mutation happened (the item left its original location) and
+    // neither half of the usual "trashed" / "rolled back" outcome pair completed. This must
+    // never collapse into `.failed`, which would misleadingly claim nothing was touched.
+    case .rollbackFailed: .movedRecoveryRequired
     }
 }

@@ -154,6 +154,44 @@ final class TrashOnlyExecutionTests: XCTestCase {
         await journal.close()
     }
 
+    // MARK: - Review finding #3: the per-operation quarantine directory must be created fresh
+
+    /// A pre-existing directory at the exact name the coordinator's operation id would use is
+    /// refused outright, never silently reused — the fix to `mkdirat`'s old "`EEXIST` is success"
+    /// behavior for this specific call site.
+    func testPreExistingOperationQuarantineDirectoryIsRefused() async throws {
+        let home = try FixtureHome("trashonly-quarantine-preplanted")
+        let file = try home.write("Library/Logs/App/junk.log")
+        let resolved = try XCTUnwrap(SweepPolicy.resolvedRoots(for: .userLogs, home: home.root).first)
+        let anchor = TrashOnlyAnchor(key: .operationRoot(.userLogs), url: resolved.url, identity: resolved.identity)
+
+        let operationID = UUID()
+        // Pre-plant the per-operation quarantine directory this exact operation id would use —
+        // standing in for an attacker's guess or a stale leftover from a previous, buggy run.
+        try FileManager.default.createDirectory(
+            at: resolved.url
+                .appending(path: FileDescriptorExecutor.quarantineDirectoryName)
+                .appending(path: operationID.uuidString),
+            withIntermediateDirectories: true
+        )
+
+        let identity = try FileIdentity.read(at: file)
+        let parentIdentity = try FileIdentity.read(at: file.deletingLastPathComponent())
+        let item = DeletionItem(
+            url: file, identity: identity, parentIdentity: parentIdentity,
+            action: .trash, tier: .safe, allocatedSize: 0
+        )
+        let plan = DeletionPlan(operationID: operationID, items: [item])
+
+        let journal = try await WALJournal(url: home.url("journal.jsonl"))
+        let coordinator = try DeletionCoordinator(mode: .trashOnly(anchors: [anchor]), journal: journal)
+        let report = try await coordinator.execute(plan)
+
+        XCTAssertEqual(report.succeededCount, 0, "a pre-existing operation quarantine directory must never be silently reused")
+        XCTAssertTrue(home.exists("Library/Logs/App/junk.log"), "nothing is mutated when the slot cannot be created exclusively")
+        await journal.close()
+    }
+
     // MARK: - Multiple anchors, one execution
 
     func testTwoDifferentAuthorizedRootsBothTrashSuccessfully() async throws {

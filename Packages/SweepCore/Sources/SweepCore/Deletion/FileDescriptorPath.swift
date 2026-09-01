@@ -21,6 +21,16 @@ enum FileDescriptorError: Error, Equatable, CustomStringConvertible {
     case syscallFailed(name: String, component: String, code: Int32)
     case quarantineUnavailable(String)
     case trashFailed(String)
+    case alreadyExists(component: String)
+    /// Staging succeeded (the item was renamed into its exclusive per-operation quarantine
+    /// slot) but the mutation could not be completed *and* rolling the item back to its
+    /// original location also failed. The item is not where the plan found it and not in the
+    /// Trash either — real recovery is required, and this is never silently reported as a plain
+    /// failure (review finding #5).
+    case strandedInQuarantine(quarantinePath: String, underlyingReason: String, rollbackReason: String)
+    /// The just-created, supposedly-exclusive quarantine slot did not come back with the
+    /// identity/ownership this process expects immediately after creating it.
+    case quarantineSlotIdentityUnexpected(String)
 
     var code: Int32? {
         switch self {
@@ -76,6 +86,12 @@ enum FileDescriptorError: Error, Equatable, CustomStringConvertible {
             "quarantine directory unavailable: \(reason)"
         case .trashFailed(let reason):
             "trashItem failed: \(reason)"
+        case .alreadyExists(let component):
+            "refused: \(component) already exists; an exclusive create was required here"
+        case .strandedInQuarantine(let path, let underlying, let rollback):
+            "moved to quarantine at \(path) but could not be trashed (\(underlying)) or rolled back (\(rollback)); recovery required"
+        case .quarantineSlotIdentityUnexpected(let reason):
+            "refused: freshly created quarantine slot did not verify: \(reason)"
         }
     }
 }
@@ -178,10 +194,30 @@ final class OpenDirectory: @unchecked Sendable {
         }
     }
 
+    /// Idempotent create: an existing directory at `name` is accepted silently. Correct for the
+    /// top-level, long-lived quarantine container (`.sweep-quarantine`) that every trash
+    /// operation in a session legitimately shares and re-opens — but never appropriate for a
+    /// slot that must be provably fresh; see ``makeChildDirectoryExclusive(_:mode:)`` for that.
     func makeChildDirectory(_ name: String, mode: mode_t = 0o700) throws {
         try Self.validate(component: name)
         guard name.withCString({ mkdirat(self.fd, $0, mode) }) == 0 else {
             if errno == EEXIST { return }
+            throw FileDescriptorError.syscallFailed(name: "mkdirat", component: name, code: errno)
+        }
+    }
+
+    /// Review finding #3: `mkdirat` treating `EEXIST` as success is only safe for a container
+    /// meant to be shared and reused (``makeChildDirectory(_:mode:)`` above). A per-operation or
+    /// per-item quarantine slot must be provably fresh — nothing else, including a same-uid
+    /// process racing this one or a slot planted before this run started, may already occupy
+    /// that name — so this variant fails loudly on `EEXIST` instead of quietly reusing whatever
+    /// is already there.
+    func makeChildDirectoryExclusive(_ name: String, mode: mode_t = 0o700) throws {
+        try Self.validate(component: name)
+        guard name.withCString({ mkdirat(self.fd, $0, mode) }) == 0 else {
+            if errno == EEXIST {
+                throw FileDescriptorError.alreadyExists(component: name)
+            }
             throw FileDescriptorError.syscallFailed(name: "mkdirat", component: name, code: errno)
         }
     }

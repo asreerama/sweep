@@ -77,4 +77,12 @@ final class FixtureHome: Sendable {
             ruleID: ruleID
         )
     }
+
+    /// Wraps ``candidate(at:ruleID:)`` as a ``SelectionReceipt`` — the shape `CleanRequest`
+    /// actually takes since Codex Gate-1 finding #6. Package-internal `SelectionReceipt.init` is
+    /// reachable here because every SweepCoreTests file is `@testable import SweepCore`; this
+    /// stands in for "a real scan already produced this receipt".
+    func receipt(at relative: String, ruleID: String?) throws -> SelectionReceipt {
+        SelectionReceipt(candidate: try candidate(at: relative, ruleID: ruleID), scanSessionID: UUID())
+    }
 }

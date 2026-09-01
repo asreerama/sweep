@@ -410,6 +410,65 @@ final class AuthorizedCleanPlanTests: XCTestCase {
         }
     }
 
+    /// Codex G1 finding #7: `candidate.identity` is never trusted for a decision — authorization
+    /// re-reads live from disk. A forged owner uid and a forged too-recent mtime (either of
+    /// which would otherwise refuse this) are both ignored in favor of the real, live identity.
+    func testCodeSignCloneAuthorizationIgnoresAForgedIdentityAndUsesLiveOwnershipAndAge() throws {
+        let tree = try TempTree("acp-clone-live-reread")
+        let xDirectory = try tree.makeDirectory("X")
+        let clone = try tree.makeDirectory("X/com.example.Live.code_sign_clone")
+        try tree.write("X/com.example.Live.code_sign_clone/payload.bin", bytes: 1_024)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(-3_600)],
+            ofItemAtPath: clone.path
+        )
+
+        let realIdentity = try FileIdentity.read(at: clone)
+        let forgedIdentity = FileIdentity(
+            deviceID: realIdentity.deviceID, inode: realIdentity.inode, volume: realIdentity.volume,
+            kind: realIdentity.kind, linkCount: realIdentity.linkCount,
+            // Too recent to pass the age check on its own — the live mtime is what must count.
+            modification: FileTimestamp(seconds: Int64(Date().timeIntervalSince1970), nanoseconds: 0),
+            statusChange: realIdentity.statusChange, size: realIdentity.size, flags: realIdentity.flags,
+            ownerUserID: realIdentity.ownerUserID + 1
+        )
+        let forgedCandidate = ScanCandidate(url: clone, identity: forgedIdentity, allocatedSize: 0)
+        let cloneCandidate = CodeSignCloneCandidate(candidate: forgedCandidate, bundleIdentifier: "com.example.Live")
+
+        let plan = try AuthorizedCleanPlan.authorize(
+            codeSignClone: cloneCandidate, isRunning: { _ in false }, cloneDirectory: { xDirectory }
+        )
+
+        XCTAssertEqual(
+            plan.candidate.identity.ownerUserID, realIdentity.ownerUserID,
+            "the plan carries the live identity forward, never the forged one"
+        )
+        XCTAssertEqual(plan.candidate.identity.modification, realIdentity.modification)
+    }
+
+    /// Codex G1 finding #7: a clone nested more than one component below `X` is refused, even
+    /// though its own directory name still parses as a plausible clone.
+    func testCodeSignCloneNestedMoreThanOneLevelBelowXIsRefused() throws {
+        let tree = try TempTree("acp-clone-nested")
+        let xDirectory = try tree.makeDirectory("X")
+        let nested = try tree.makeDirectory("X/sub/com.example.Nested.code_sign_clone")
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(-3_600)],
+            ofItemAtPath: nested.path
+        )
+        let identity = try FileIdentity.read(at: nested)
+        let scanCandidate = ScanCandidate(url: nested, identity: identity, allocatedSize: 0)
+        let cloneCandidate = CodeSignCloneCandidate(candidate: scanCandidate, bundleIdentifier: "com.example.Nested")
+
+        XCTAssertThrowsError(
+            try AuthorizedCleanPlan.authorize(codeSignClone: cloneCandidate, isRunning: { _ in false }, cloneDirectory: { xDirectory })
+        ) { error in
+            guard case .notDirectChildOfCloneRoot = error as? AuthorizationError else {
+                return XCTFail("expected notDirectChildOfCloneRoot, got \(error)")
+            }
+        }
+    }
+
     // MARK: - Helpers
 
     static func cautionTrashRule(id: String, tier: Tier = .caution) -> Rule {

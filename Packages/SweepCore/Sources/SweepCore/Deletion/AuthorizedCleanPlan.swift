@@ -42,6 +42,17 @@ enum AuthorizationError: Error, Equatable, CustomStringConvertible {
     case ruleDidNotMatch(path: String, ruleID: String)
     /// `SweepPolicy.authorize` (or the external-root equivalent) refused the resolved path.
     case policyDenied(SweepPolicy.DenialReason)
+    /// Codex G1 finding #6/#7: a live re-read (of a ``SelectionReceipt`` or a code-sign-clone
+    /// candidate) found the path no longer matches the identity captured earlier — including a
+    /// changed owner UID, which counts here even though it does not count for
+    /// ``FileIdentity/isUnchanged(from:)`` — distinct from every other case here because nothing
+    /// about the *rule* was wrong; the object itself changed between review and this clean
+    /// request. `vanished` is `true` when the path no longer exists at all, which the journal
+    /// and UI report as "gone", not "changed".
+    case identityChangedSinceScan(path: String, vanished: Bool)
+    /// Codex G1 finding #7: a code-sign-clone candidate whose path is not exactly one component
+    /// below the clone root (`X/<bundle-id>.code_sign_clone`, never something nested further).
+    case notDirectChildOfCloneRoot(path: String, root: String)
 
     var description: String {
         switch self {
@@ -65,6 +76,12 @@ enum AuthorizationError: Error, Equatable, CustomStringConvertible {
             "refused: \(path) does not resolve to rule \(ruleID) when the catalog is asked fresh"
         case .policyDenied(let reason):
             "refused: \(reason)"
+        case .identityChangedSinceScan(let path, let vanished):
+            vanished
+                ? "refused: \(path) no longer exists"
+                : "refused: \(path) no longer matches the identity captured when it was reviewed"
+        case .notDirectChildOfCloneRoot(let path, let root):
+            "refused: \(path) is not exactly one path component below \(root)"
         }
     }
 }
@@ -238,18 +255,37 @@ struct AuthorizedCleanPlan: Sendable, Equatable, Identifiable {
         cloneDirectory: () throws -> URL = CodeSignCloneDetector.resolveCloneDirectory
     ) throws -> AuthorizedCleanPlan {
         let candidate = codeSignClone.candidate
-        guard candidate.identity.kind == .directory else {
-            throw AuthorizationError.unsupportedItemType(candidate.identity.kind)
+
+        // Codex G1 finding #7: `candidate.identity` is never trusted for a decision here, only
+        // for locating the path (`candidate.url`) and picking a volume identity to pass through.
+        // Before its initializer was sealed, `CodeSignCloneCandidate` was publicly constructible,
+        // so `candidate.identity.ownerUserID`/`.modification`/`.kind` could be forged to survive
+        // every check below; reading fresh from disk removes that regardless of who called this.
+        let liveIdentity: FileIdentity
+        do {
+            liveIdentity = try FileIdentity.read(at: candidate.url, volume: candidate.identity.volume)
+        } catch let error as FileIdentityError {
+            throw AuthorizationError.identityChangedSinceScan(path: candidate.url.path, vanished: error.isNotFound)
+        } catch {
+            throw AuthorizationError.identityChangedSinceScan(path: candidate.url.path, vanished: false)
         }
-        guard candidate.identity.ownerUserID == UInt32(getuid()) else {
-            throw AuthorizationError.ownerMismatch(path: candidate.url.path, owner: candidate.identity.ownerUserID)
+
+        guard liveIdentity.kind == .directory else {
+            throw AuthorizationError.unsupportedItemType(liveIdentity.kind)
+        }
+        // UID is part of the live identity read above, not the candidate's own — this is the
+        // "UID included in identity equality used at authorization" half of finding #7: the
+        // owner check compares the real, current owner against this account, never a value the
+        // candidate merely asserts.
+        guard liveIdentity.ownerUserID == UInt32(getuid()) else {
+            throw AuthorizationError.ownerMismatch(path: candidate.url.path, owner: liveIdentity.ownerUserID)
         }
         guard let bundleIdentifier = CodeSignCloneDetector.bundleIdentifier(forCloneNamed: candidate.url.lastPathComponent),
               bundleIdentifier == codeSignClone.bundleIdentifier
         else {
             throw AuthorizationError.ruleDidNotMatch(path: candidate.url.path, ruleID: CodeSignCloneCandidate.detectorSource)
         }
-        let age = now().timeIntervalSince(candidate.identity.modification.date)
+        let age = now().timeIntervalSince(liveIdentity.modification.date)
         guard age >= CodeSignCloneDetector.defaultMinimumAge else {
             throw AuthorizationError.tooYoung(
                 path: candidate.url.path,
@@ -268,15 +304,38 @@ struct AuthorizedCleanPlan: Sendable, Equatable, Identifiable {
             throw AuthorizationError.policyDenied(.malformedPath(String(describing: error)))
         }
 
+        // Finding #7: the clone must be exactly one path component below `X` — `X/sub/evil.
+        // code_sign_clone` is refused here, before policy is even asked, regardless of whether
+        // its name would otherwise parse as a plausible clone.
+        let parentPath = candidate.url.deletingLastPathComponent().standardizedFileURL
+        let normalizedRoot = root.standardizedFileURL
+        let isDirectChild = parentPath.path == normalizedRoot.path
+            || parentPath.resolvingSymlinksInPath().path == normalizedRoot.resolvingSymlinksInPath().path
+        guard isDirectChild else {
+            throw AuthorizationError.notDirectChildOfCloneRoot(path: candidate.url.path, root: root.path)
+        }
+
         let decision = SweepPolicy.authorize(
             externalRoot: root,
             resolvedPath: candidate.url,
-            identity: candidate.identity.pathIdentity,
+            identity: liveIdentity.pathIdentity,
             home: home
         )
         guard case .allowed(let authorization) = decision else {
             throw AuthorizationError.policyDenied(decision.denialReason ?? .malformedPath(candidate.url.path))
         }
+
+        // The plan carries the *live* identity forward, not the candidate's original — anything
+        // downstream (the descriptor descent, the WAL) must revalidate against the truth this
+        // function just proved, not a stale or previously-forgeable snapshot.
+        let liveCandidate = ScanCandidate(
+            url: candidate.url,
+            identity: liveIdentity,
+            parentIdentity: candidate.parentIdentity,
+            allocatedSize: candidate.allocatedSize,
+            contentAccessDate: candidate.contentAccessDate,
+            ruleID: candidate.ruleID
+        )
 
         return AuthorizedCleanPlan(
             ruleID: nil,
@@ -285,7 +344,7 @@ struct AuthorizedCleanPlan: Sendable, Equatable, Identifiable {
             tier: codeSignClone.tier,
             action: .trash,
             undo: codeSignClone.undo,
-            candidate: candidate,
+            candidate: liveCandidate,
             anchor: TrashOnlyAnchor(
                 key: .codeSignCloneRoot,
                 url: authorization.rootURL,
