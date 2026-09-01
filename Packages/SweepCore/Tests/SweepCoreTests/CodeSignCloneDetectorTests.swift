@@ -107,6 +107,20 @@ final class CodeSignCloneDetectorTests: XCTestCase {
         XCTAssertEqual(try detector.scan(directory: missing), [])
     }
 
+    // MARK: - Codex G1 finding #7 (NOT-CLOSED): no decoding construction route
+
+    /// Before this fix, `CodeSignCloneCandidate` was still `Codable` even though its memberwise
+    /// initializer was already internal. A caller outside this package could
+    /// `JSONDecoder().decode(CodeSignCloneCandidate.self, from:)` an arbitrary payload and hand
+    /// `CleanService` a candidate with a forged `candidate.identity`. This asserts the dynamic
+    /// conformance check itself, not just that no call site in this repo happens to decode one.
+    func testCodeSignCloneCandidateHasNoDecodableConformance() {
+        XCTAssertNil(
+            CodeSignCloneCandidate.self as? Decodable.Type,
+            "CodeSignCloneCandidate must not be Decodable: decoding an arbitrary payload would forge a candidate"
+        )
+    }
+
     func testBundleIdentifierParsing() {
         XCTAssertEqual(
             CodeSignCloneDetector.bundleIdentifier(forCloneNamed: "com.google.Chrome.code_sign_clone"),

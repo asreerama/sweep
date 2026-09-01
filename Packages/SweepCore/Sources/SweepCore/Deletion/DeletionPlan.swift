@@ -183,11 +183,19 @@ public struct DeletionReport: Sendable, Equatable {
     public let operationID: UUID
     public let results: [DeletionItemResult]
     public let committed: Bool
+    /// Codex G1 finding #1: `true` when a quarantine-lifecycle append (`staged`/`trashed`/
+    /// `rollbackFailed`) failed even after a retry. The in-flight item's own result above is
+    /// still whatever the filesystem actually did. A real mutation already happened and cannot
+    /// be un-done by aborting it, but the operation stopped there rather than continuing to
+    /// mutate against a journal that just proved it cannot keep up, so `committed` is `false`
+    /// whenever this is `true`.
+    public let journalingDegraded: Bool
 
-    init(operationID: UUID, results: [DeletionItemResult], committed: Bool) {
+    init(operationID: UUID, results: [DeletionItemResult], committed: Bool, journalingDegraded: Bool = false) {
         self.operationID = operationID
         self.results = results
         self.committed = committed
+        self.journalingDegraded = journalingDegraded
     }
 
     public func results(with outcome: ItemOutcome) -> [DeletionItemResult] {

@@ -11,21 +11,30 @@ import SweepPolicy
 /// and is the only thing inside SweepCore that ever calls `RuleCatalogLoader.loadBundled`.
 ///
 /// Finding #6: `scan`/`selectedCandidateIDs` (a whole `ScanResult` plus a set of ids to pick out
-/// of it) is gone too, replaced by ``receipts``: opaque proof, mintable only from a real scan,
-/// about exactly the paths under consideration. There is no way to hand this type a tier, an
+/// of it) is gone too, replaced by a ``SelectionBatch``: opaque proof, mintable only from a real
+/// scan, about exactly the paths under consideration. There is no way to hand this type a tier, an
 /// action, or a path that was not already the URL inside a `ScanCandidate` a scan produced —
 /// resolving a selection into something executable happens entirely inside `CleanService`,
 /// through a live re-verification of each receipt and then ``AuthorizedCleanPlan``.
+///
+/// Finding #5: a bare `[SelectionReceipt]` used to be accepted directly, with no check that every
+/// receipt came from the same scan, no proof of which catalog the scan ran against, and no
+/// freshness bound. A batch could outlive the UI scan that produced it, mix receipts from two
+/// different sessions, or be replayed long after the bundled catalog changed underneath it. A
+/// ``SelectionBatch`` closes all three: one `scanSessionID` (enforced at mint time), one
+/// `catalogDigest` (checked against the pinned catalog at execute time), one `mintedAt` (checked
+/// against ``SelectionBatch/maxAge`` at execute time).
 public struct CleanRequest: Sendable {
-    /// Exactly what the review screen showed, as unforgeable receipts from a real scan. Never a
-    /// raw `ScanResult`: a caller cannot re-scope what "the reviewed scan" means by handing in a
-    /// differently-selected result, because a receipt is fine-grained to one path already.
-    public let receipts: [SelectionReceipt]
+    /// Exactly what the review screen showed, sealed as one unforgeable, internally-consistent
+    /// batch from a real scan. Never a raw `ScanResult`, and never a bare receipt array: a caller
+    /// cannot re-scope what "the reviewed scan" means, mix receipts across scans, or replay a
+    /// stale batch, because ``SelectionBatch`` itself refuses all three.
+    public let batch: SelectionBatch
     /// Code-sign-clone candidates the caller wants considered, from a separate
     /// ``CodeSignCloneDetector`` pass (deliverable #1c's parallel authorized path). Empty by
     /// default: most requests are catalog-rule-only.
     public let codeSignClones: [CodeSignCloneCandidate]
-    /// IDs the *caller* selected, matched against `receipts` and `codeSignClones` by
+    /// IDs the *caller* selected, matched against the batch's receipts and `codeSignClones` by
     /// ``SelectionReceipt/id``/``CodeSignCloneCandidate/id``. An id that matches neither is
     /// reported as an unresolvable outcome, never silently ignored and never treated as "select
     /// everything offered".
@@ -41,12 +50,12 @@ public struct CleanRequest: Sendable {
     let home: URL
 
     public init(
-        receipts: [SelectionReceipt],
+        batch: SelectionBatch,
         codeSignClones: [CodeSignCloneCandidate] = [],
         selectedCandidateIDs: Set<String>
     ) {
         self.init(
-            receipts: receipts,
+            batch: batch,
             codeSignClones: codeSignClones,
             selectedCandidateIDs: selectedCandidateIDs,
             journalURL: CleanRequest.defaultJournalURL(),
@@ -57,13 +66,13 @@ public struct CleanRequest: Sendable {
     /// Test seam. Not reachable from outside the package: the public initializer above is the
     /// only one an external caller can name.
     init(
-        receipts: [SelectionReceipt],
+        batch: SelectionBatch,
         codeSignClones: [CodeSignCloneCandidate] = [],
         selectedCandidateIDs: Set<String>,
         journalURL: URL,
         home: URL
     ) {
-        self.receipts = receipts
+        self.batch = batch
         self.codeSignClones = codeSignClones
         self.selectedCandidateIDs = selectedCandidateIDs
         self.journalURL = journalURL
@@ -230,11 +239,24 @@ public enum CleanEvent: Sendable {
 public enum CleanServiceError: Error, Equatable, CustomStringConvertible {
     /// Gate 1 (PLAN §6) has not been opened in this build.
     case gateClosed
+    /// Codex G1 finding #5: the request's ``SelectionBatch/catalogDigest`` does not equal the
+    /// digest ``CleanService`` just pinned for this run. The catalog changed between when the
+    /// batch was minted (a scan, via ``CleanService/currentCatalogDigest()``) and now. Refused
+    /// before a single receipt is authorized against anything.
+    case catalogMismatch
+    /// Codex G1 finding #5: the request's ``SelectionBatch/mintedAt`` is older than
+    /// ``SelectionBatch/maxAge``. A batch this stale must be re-minted from a fresh scan, never
+    /// executed against however the filesystem looks now.
+    case staleSelectionBatch
 
     public var description: String {
         switch self {
         case .gateClosed:
             "Gate 1 has not been opened in this build; live cleaning is disabled"
+        case .catalogMismatch:
+            "refused: the selection batch's catalog digest does not match the catalog pinned for this run"
+        case .staleSelectionBatch:
+            "refused: the selection batch is older than \(Int(SelectionBatch.maxAge)) seconds; re-scan and try again"
         }
     }
 }
@@ -315,7 +337,19 @@ public enum CleanService {
         let pinned = try loadPinnedBundledCatalog()
         let catalog = pinned.catalog
 
-        let receiptsByID = Dictionary(request.receipts.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        // Codex G1 finding #5: the batch must have been minted against *this* pinned catalog and
+        // *recently*. Both are checked before a single receipt is authorized against anything,
+        // the same "fail closed before touching anything" discipline the catalog load itself
+        // follows. "Mixed scan sessions" is the batch's own third guard, already enforced at mint
+        // time (`SelectionBatch.init`), so there is nothing left to check for it here.
+        guard request.batch.catalogDigest == pinned.sha256Hex else {
+            throw CleanServiceError.catalogMismatch
+        }
+        guard Date().timeIntervalSince(request.batch.mintedAt) <= SelectionBatch.maxAge else {
+            throw CleanServiceError.staleSelectionBatch
+        }
+
+        let receiptsByID = Dictionary(request.batch.receipts.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let clonesByID = Dictionary(request.codeSignClones.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
 
         var authorized: [AuthorizedCleanPlan] = []

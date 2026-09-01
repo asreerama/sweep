@@ -30,7 +30,7 @@ final class CleanServiceTests: XCTestCase {
 
     func testExecuteThrowsGateClosedWhileGate1IsClosed() async throws {
         XCTAssertFalse(CleanService.isEnabled, "gate1Open must still be false in this build")
-        let request = CleanRequest(receipts: [], selectedCandidateIDs: [])
+        let request = CleanRequest(batch: try Self.batch([]), selectedCandidateIDs: [])
 
         do {
             for try await _ in CleanService.execute(request) {
@@ -63,7 +63,7 @@ final class CleanServiceTests: XCTestCase {
         // home by authorizing against a rule id that exists ONLY in the bundled fixture catalog
         // above, never anywhere the request itself could have carried it.
         let receipt = try home.receipt(at: "Library/Logs/JunkApp", ruleID: realRule.id)
-        let request = Self.request(home: home, receipts: [receipt], selecting: [receipt.id])
+        let request = try Self.request(home: home, receipts: [receipt], selecting: [receipt.id])
 
         let events = try await Self.collect(CleanService.runPipeline(request))
         let report = try XCTUnwrap(Self.finishedReport(in: events))
@@ -76,7 +76,7 @@ final class CleanServiceTests: XCTestCase {
         let home = try FixtureHome("cs-no-catalog")
         // No `BundledCatalogFixture.install` call: no injected directory, and this test process's
         // `Bundle.main` (the xctest runner) carries no `rules/catalog.json` resource either.
-        let request = Self.request(home: home, receipts: [], selecting: [])
+        let request = try Self.request(home: home, receipts: [], selecting: [])
 
         do {
             _ = try await Self.collect(CleanService.runPipeline(request))
@@ -95,7 +95,7 @@ final class CleanServiceTests: XCTestCase {
         let rule = AuthorizedCleanPlanTests.cautionTrashRule(id: "test.userlogs.caution", tier: .caution)
         try BundledCatalogFixture.install(RuleCatalog(rules: [rule]), atRoot: home.root)
         let receipt = try home.receipt(at: "Library/Logs/CautionApp", ruleID: rule.id)
-        let request = Self.request(home: home, receipts: [receipt], selecting: [receipt.id])
+        let request = try Self.request(home: home, receipts: [receipt], selecting: [receipt.id])
 
         let events = try await Self.collect(CleanService.runPipeline(request))
         let report = try XCTUnwrap(Self.finishedReport(in: events))
@@ -116,7 +116,7 @@ final class CleanServiceTests: XCTestCase {
         )
         try BundledCatalogFixture.install(RuleCatalog(rules: [rule]), atRoot: home.root)
         let receipt = try home.receipt(at: "Library/Logs/DeleteApp", ruleID: rule.id)
-        let request = Self.request(home: home, receipts: [receipt], selecting: [receipt.id])
+        let request = try Self.request(home: home, receipts: [receipt], selecting: [receipt.id])
 
         let events = try await Self.collect(CleanService.runPipeline(request))
         let report = try XCTUnwrap(Self.finishedReport(in: events))
@@ -130,7 +130,7 @@ final class CleanServiceTests: XCTestCase {
     func testUnresolvableSelectedIDProducesAReportedOutcome() async throws {
         let home = try FixtureHome("cs-unknown-id")
         try BundledCatalogFixture.install(RuleCatalog(rules: []), atRoot: home.root)
-        let request = Self.request(home: home, receipts: [], selecting: ["nonexistent-id"])
+        let request = try Self.request(home: home, receipts: [], selecting: ["nonexistent-id"])
 
         let events = try await Self.collect(CleanService.runPipeline(request))
         let report = try XCTUnwrap(Self.finishedReport(in: events))
@@ -146,7 +146,7 @@ final class CleanServiceTests: XCTestCase {
         let rule = AuthorizedCleanPlanTests.cautionTrashRule(id: "test.userlogs.ordering", tier: .caution)
         try BundledCatalogFixture.install(RuleCatalog(rules: [rule]), atRoot: home.root)
         let receipt = try home.receipt(at: "Library/Logs/App", ruleID: rule.id)
-        let request = Self.request(home: home, receipts: [receipt], selecting: [receipt.id])
+        let request = try Self.request(home: home, receipts: [receipt], selecting: [receipt.id])
 
         let events = try await Self.collect(CleanService.runPipeline(request))
         guard case .started = events.first else {
@@ -167,7 +167,7 @@ final class CleanServiceTests: XCTestCase {
         let receipt = try home.receipt(at: "Library/Logs/JunkApp", ruleID: rule.id)
         let journalURL = home.url("clean-journal.jsonl")
         let request = CleanRequest(
-            receipts: [receipt], selectedCandidateIDs: [receipt.id], journalURL: journalURL, home: home.root
+            batch: try Self.batch([receipt]), selectedCandidateIDs: [receipt.id], journalURL: journalURL, home: home.root
         )
 
         let events = try await Self.collect(CleanService.runPipeline(request))
@@ -209,7 +209,7 @@ final class CleanServiceTests: XCTestCase {
         let clone = CodeSignCloneCandidate(candidate: scanCandidate, bundleIdentifier: bundleID)
 
         let request = CleanRequest(
-            receipts: [], codeSignClones: [clone],
+            batch: try Self.batch([]), codeSignClones: [clone],
             selectedCandidateIDs: [clone.id], journalURL: home.url("journal.jsonl"), home: home.root
         )
 
@@ -250,7 +250,7 @@ final class CleanServiceTests: XCTestCase {
 
         let journalURL = home.url("clean-journal.jsonl")
         let request = CleanRequest(
-            receipts: [receipt], selectedCandidateIDs: [receipt.id],
+            batch: try Self.batch([receipt]), selectedCandidateIDs: [receipt.id],
             journalURL: journalURL, home: home.root
         )
 
@@ -303,7 +303,7 @@ final class CleanServiceTests: XCTestCase {
         let forgedCandidate = ScanCandidate(url: canaryDirectory, identity: identity, allocatedSize: 0, ruleID: rule.id)
         let forgedReceipt = SelectionReceipt(candidate: forgedCandidate, scanSessionID: UUID())
 
-        let request = Self.request(home: home, receipts: [forgedReceipt], selecting: [forgedReceipt.id])
+        let request = try Self.request(home: home, receipts: [forgedReceipt], selecting: [forgedReceipt.id])
         let events = try await Self.collect(CleanService.runPipeline(request))
         let report = try XCTUnwrap(Self.finishedReport(in: events))
 
@@ -335,7 +335,7 @@ final class CleanServiceTests: XCTestCase {
         try FileManager.default.removeItem(at: targetDirectory)
         try home.write("Library/Logs/RealApp/junk.log")
 
-        let request = Self.request(home: home, receipts: [receipt], selecting: [receipt.id])
+        let request = try Self.request(home: home, receipts: [receipt], selecting: [receipt.id])
         let events = try await Self.collect(CleanService.runPipeline(request))
         let report = try XCTUnwrap(Self.finishedReport(in: events))
 
@@ -364,13 +364,29 @@ final class CleanServiceTests: XCTestCase {
 
     // MARK: - Helpers
 
+    /// Seals `receipts` into a `SelectionBatch` the way a real scan would, minted just now against
+    /// whatever catalog is currently pinned (installed via `BundledCatalogFixture.install` earlier
+    /// in the calling test), so `runPipeline`'s own digest/freshness checks (Codex G1 finding #5)
+    /// pass transparently for every test that is not specifically exercising them. Falls back to a
+    /// placeholder digest when no catalog is configured at all (`testCleanServiceRefusesToRun...`):
+    /// that test wants `runPipeline`'s own catalog-load failure, not this helper's.
+    static func batch(_ receipts: [SelectionReceipt], mintedAt: Date = Date()) throws -> SelectionBatch {
+        let digest = (try? CleanService.currentCatalogDigest()) ?? "test-catalog-unavailable"
+        return try SelectionBatch(
+            receipts: receipts,
+            scanSessionID: receipts.first?.scanSessionID ?? UUID(),
+            catalogDigest: digest,
+            mintedAt: mintedAt
+        )
+    }
+
     static func request(
         home: FixtureHome,
         receipts: [SelectionReceipt],
         selecting ids: Set<String>
-    ) -> CleanRequest {
+    ) throws -> CleanRequest {
         CleanRequest(
-            receipts: receipts, selectedCandidateIDs: ids,
+            batch: try Self.batch(receipts), selectedCandidateIDs: ids,
             journalURL: home.url("journal.jsonl"), home: home.root
         )
     }

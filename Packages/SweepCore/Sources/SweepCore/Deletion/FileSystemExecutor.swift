@@ -225,10 +225,19 @@ enum TrashStaging {
         "\(identity.deviceID)-\(identity.inode)"
     }
 
+    /// - Parameter performTrashItem: `FileManager.trashItem(at:resultingItemURL:)` by default.
+    ///   Test-only seam (Codex G1 finding #3): lets a test substitute a stand-in that reports
+    ///   success without actually removing the leaf, proving the post-success decoy verification
+    ///   below catches it, without depending on coaxing the real Trash API into that behavior.
     static func trash(
         request: MutationRequest,
         anchoredAt root: OpenDirectory,
-        operationQuarantine: OpenDirectory
+        operationQuarantine: OpenDirectory,
+        performTrashItem: (URL) throws -> URL? = { url in
+            var resulting: NSURL?
+            try FileManager.default.trashItem(at: url, resultingItemURL: &resulting)
+            return resulting as URL?
+        }
     ) throws -> URL? {
         let (parent, leaf) = try FileDescriptorPath.descend(
             from: root,
@@ -255,6 +264,7 @@ enum TrashStaging {
 
         try parent.renameChild(leaf, into: slot, as: leaf)
 
+        let trashResult: URL?
         do {
             // The identity of what actually landed is re-read from the slot's own descriptor —
             // authoritative, because it is `fstatat` against a directory this process just
@@ -278,14 +288,11 @@ enum TrashStaging {
             // itself (`FSMoveObjectToTrashSync` or lower) instead of calling
             // `FileManager.trashItem` would close it.
             let quarantinedURL = URL(fileURLWithPath: slot.path).appending(path: leaf)
-            var resulting: NSURL?
             do {
-                try FileManager.default.trashItem(at: quarantinedURL, resultingItemURL: &resulting)
+                trashResult = try performTrashItem(quarantinedURL)
             } catch {
                 throw FileDescriptorError.trashFailed((error as NSError).localizedDescription)
             }
-            try? operationQuarantine.removeChildDirectory(slotName)
-            return resulting as URL?
         } catch {
             // Quarantine is a staging area, never a grave: anything that does not reach the Trash
             // goes back where it came from, through the same descriptors. Unlike before, a
@@ -309,6 +316,32 @@ enum TrashStaging {
             try? operationQuarantine.removeChildDirectory(slotName)
             throw firstError
         }
+
+        // Codex G1 finding #3 (CRITICAL): `trashItem` returning without throwing is not itself
+        // proof the leaf actually left the slot. `OpenDirectory.path` (what `quarantinedURL`
+        // above was built from) is only a cached spelling, recorded for diagnostics and for
+        // `trashItem` itself, and must never be treated as authoritative for success. Verified
+        // the same way every other step in this pipeline verifies anything: `fstatat` against the
+        // slot descriptor this process still holds open. If the expected leaf is still physically
+        // present, this is a decoy success. It is deliberately *not* auto-rolled-back the way a
+        // thrown error above would be: `trashItem`'s own success report may already have
+        // registered this object with the system Trash even though the bytes never left the slot,
+        // so silently renaming it back could leave that bookkeeping pointing at a phantom entry.
+        // Reported exactly like a failed-rollback stranding instead: recovery required, at the
+        // slot location, never silently suppressed into a claimed success.
+        if let stillPresent = try? slot.identity(ofChild: leaf, volume: actual.volume), stillPresent.isSameFile(as: actual) {
+            let quarantinedPath = URL(fileURLWithPath: slot.path).appending(path: leaf).path
+            throw FileDescriptorError.strandedInQuarantine(
+                quarantinePath: quarantinedPath,
+                underlyingReason: "trashItem(at:) reported success but the expected leaf is still "
+                    + "present in the slot held by descriptor; a cached pathname is never authoritative",
+                rollbackReason: "rollback deliberately not attempted: trashItem's own success report "
+                    + "makes the object's Trash bookkeeping state indeterminate"
+            )
+        }
+
+        try? operationQuarantine.removeChildDirectory(slotName)
+        return trashResult
     }
 
     /// `fstatat` against the open parent, compared with the plan. Both halves matter: same inode
@@ -401,7 +434,7 @@ func outcome(for reason: ItemFailureReason) -> ItemOutcome {
     case .vanished, .policyDenied, .outsideFixtureRoot, .tierViolation, .notAttempted,
          .outsideAuthorizedRoot, .actionNotPermitted, .notAuthorized:
         .skipped
-    case .permissionDenied, .filesystemError: .failed
+    case .permissionDenied, .filesystemError, .journalUnavailable: .failed
     // Review finding #5: a real mutation happened (the item left its original location) and
     // neither half of the usual "trashed" / "rolled back" outcome pair completed. This must
     // never collapse into `.failed`, which would misleadingly claim nothing was touched.

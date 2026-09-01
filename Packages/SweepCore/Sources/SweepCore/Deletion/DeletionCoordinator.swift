@@ -137,7 +137,7 @@ public enum DeletionError: Error, Equatable, CustomStringConvertible {
 /// can be renamed and replaced.
 public actor DeletionCoordinator {
     private let mode: DeletionMode
-    private let journal: WALJournal
+    private let journal: any JournalWriting
     private let extraDenials: DenyCheck
     private let executor: any TrashCapable
     /// Descriptor opened once, at init, on the fixture root. Held for the coordinator's life:
@@ -146,6 +146,13 @@ public actor DeletionCoordinator {
     /// anchor) and for `live` (nothing is ever opened before gate 2).
     private let anchor: OpenDirectory?
     private let queue: BlockingIOQueue
+    /// Codex G1 finding #1 (CONTROLLING): set by `perform(_:operationID:)` when a
+    /// quarantine-lifecycle append (`staged`/`trashed`/`rollbackFailed`) fails even after a
+    /// retry. Read and reset by `execute(_:)` once per item; never persists across `execute`
+    /// calls. Actor-isolated state rather than a `perform` return-type change, so every one of
+    /// `perform`'s many existing return points stays exactly as it was. Only the one path that
+    /// can actually degrade journaling durability sets this.
+    private var journalingDegraded = false
 
     init(mode: DeletionMode, journal: WALJournal, additionalDenials: DenyCheck = .none) throws {
         let queue = BlockingIOQueue(label: "com.sweep.deletion.io")
@@ -205,9 +212,13 @@ public actor DeletionCoordinator {
         }
     }
 
+    /// Test seam (in addition to `executor:`): `journal:` here is `any JournalWriting`, not a
+    /// concrete `WALJournal`, precisely so a test can substitute a double that fails specific
+    /// append kinds on demand (Codex G1 finding #1). Every real caller still only ever passes a
+    /// genuine `WALJournal` (which conforms), through the public initializer above.
     init(
         mode: DeletionMode,
-        journal: WALJournal,
+        journal: any JournalWriting,
         additionalDenials: DenyCheck = .none,
         executor: any TrashCapable,
         anchor: OpenDirectory? = nil,
@@ -226,6 +237,7 @@ public actor DeletionCoordinator {
     @discardableResult
     public func execute(_ plan: DeletionPlan) async throws -> DeletionReport {
         try validate(plan)
+        journalingDegraded = false
 
         do {
             try await journal.appendPlanned(
@@ -260,10 +272,24 @@ public actor DeletionCoordinator {
                 throw DeletionError.journalUnavailable(String(describing: error))
             }
             results.append(result)
+
+            if journalingDegraded {
+                // Codex G1 finding #1: a quarantine-lifecycle append survived neither its first
+                // attempt nor its retry. `result` above is already durable in the `itemResult`
+                // record just appended. The in-flight item finished normally, but the
+                // supplementary quarantine-lifecycle trail a stranded-slot recovery pass depends
+                // on is not, so the operation stops here rather than mutating anything else
+                // against a journal that just proved it cannot keep up. Never reported as a
+                // clean commit.
+                await executor.finishOperation(plan.operationID)
+                return DeletionReport(
+                    operationID: plan.operationID, results: results, committed: false, journalingDegraded: true
+                )
+            }
         }
 
         do {
-            try await journal.appendCommitted(operationID: plan.operationID)
+            try await journal.appendCommitted(operationID: plan.operationID, detail: nil)
         } catch {
             throw DeletionError.journalUnavailable(String(describing: error))
         }
@@ -486,18 +512,48 @@ public actor DeletionCoordinator {
                     .appending(path: operationID.uuidString)
                     .appending(path: TrashStaging.slotName(for: item.identity))
                     .appending(path: item.url.lastPathComponent)
-                try? await journal.appendStagePlanned(
-                    operationID: operationID, item: item.journalItem, quarantineURL: approximateQuarantineURL
-                )
+
+                do {
+                    try await journal.appendStagePlanned(
+                        operationID: operationID, item: item.journalItem, quarantineURL: approximateQuarantineURL
+                    )
+                } catch {
+                    // Codex G1 finding #1 (CONTROLLING): this is the only quarantine-lifecycle
+                    // record written *before* any mutation. Suppressing its failure (the old
+                    // `try?`) let staging proceed with no durable slot record at all. Fail closed
+                    // instead: refuse the item outright, before `executor.trash` is ever called.
+                    // Nothing here has touched the filesystem yet, so there is nothing to roll
+                    // back, only a mutation that must never begin unlogged.
+                    return DeletionItemResult(
+                        item: item,
+                        outcome: .failed,
+                        failureReason: .journalUnavailable,
+                        detail: "stagePlanned could not be journaled; refused before staging: \(String(describing: error))"
+                    )
+                }
 
                 do {
                     let trashURL = try await executor.trash(request)
                     // The rename into the slot above is now known to have succeeded (the executor
                     // would have thrown otherwise), and so is the subsequent `trashItem` call.
-                    try? await journal.appendStaged(
-                        operationID: operationID, item: item.journalItem, quarantineURL: approximateQuarantineURL
-                    )
-                    try? await journal.appendTrashed(operationID: operationID, item: item.journalItem, trashURL: trashURL)
+                    // These two records describe a mutation that already happened. The item
+                    // itself is not undone by a journal failure here, so a failure that survives
+                    // one retry degrades the whole *operation* instead (`journalingDegraded`,
+                    // checked by `execute(_:)`), rather than being suppressed.
+                    if await !appendQuarantineRecordDegradingOnFailure({
+                        try await self.journal.appendStaged(
+                            operationID: operationID, item: item.journalItem, quarantineURL: approximateQuarantineURL
+                        )
+                    }) {
+                        journalingDegraded = true
+                    }
+                    if await !appendQuarantineRecordDegradingOnFailure({
+                        try await self.journal.appendTrashed(
+                            operationID: operationID, item: item.journalItem, trashURL: trashURL
+                        )
+                    }) {
+                        journalingDegraded = true
+                    }
                     return DeletionItemResult(item: item, outcome: .succeeded, trashURL: trashURL)
                 } catch let descriptorError as FileDescriptorError {
                     if case .strandedInQuarantine(let quarantinePath, _, let rollbackReason) = descriptorError {
@@ -505,13 +561,21 @@ public actor DeletionCoordinator {
                         // trashed nor rolled back. This is never suppressed: it is journaled in
                         // its own right, distinct from (and in addition to) the `itemResult`
                         // record `execute(_:)` appends right after this returns.
-                        try? await journal.appendStaged(
-                            operationID: operationID, item: item.journalItem, quarantineURL: approximateQuarantineURL
-                        )
-                        try? await journal.appendRollbackFailed(
-                            operationID: operationID, item: item.journalItem,
-                            quarantineURL: URL(fileURLWithPath: quarantinePath), reason: rollbackReason
-                        )
+                        if await !appendQuarantineRecordDegradingOnFailure({
+                            try await self.journal.appendStaged(
+                                operationID: operationID, item: item.journalItem, quarantineURL: approximateQuarantineURL
+                            )
+                        }) {
+                            journalingDegraded = true
+                        }
+                        if await !appendQuarantineRecordDegradingOnFailure({
+                            try await self.journal.appendRollbackFailed(
+                                operationID: operationID, item: item.journalItem,
+                                quarantineURL: URL(fileURLWithPath: quarantinePath), reason: rollbackReason
+                            )
+                        }) {
+                            journalingDegraded = true
+                        }
                         return DeletionItemResult(
                             item: item,
                             outcome: .movedRecoveryRequired,
@@ -549,6 +613,22 @@ public actor DeletionCoordinator {
                 detail: (error as? FileDescriptorError)?.description ?? (error as NSError).localizedDescription
             )
         }
+    }
+
+    /// Appends one post-mutation quarantine-lifecycle record (`staged`/`trashed`/
+    /// `rollbackFailed`), retrying exactly once on failure, two attempts total, never more.
+    /// Returns `true` once either attempt lands durably, `false` only when both fail, which the
+    /// caller treats as "journaling degraded" (finding #1) rather than suppressing.
+    private func appendQuarantineRecordDegradingOnFailure(_ operation: () async throws -> Void) async -> Bool {
+        for attempt in 0..<2 {
+            do {
+                try await operation()
+                return true
+            } catch {
+                if attempt == 1 { return false }
+            }
+        }
+        return false
     }
 
     /// Runs the identity-resolving ``SweepPolicy`` decision for whichever operation root claims

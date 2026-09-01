@@ -47,6 +47,11 @@ public enum ItemFailureReason: String, Sendable, Codable, CaseIterable {
     /// The item reached its quarantine slot but could neither be trashed nor rolled back to its
     /// original location; goes with ``ItemOutcome/movedRecoveryRequired`` (review finding #5).
     case rollbackFailed
+    /// Codex G1 finding #1 (CONTROLLING): the pre-mutation `stagePlanned` quarantine-lifecycle
+    /// record could not be journaled. The item is refused fail-closed, before the executor is
+    /// ever called: no staging, no rename, nothing touched. A mutation must never proceed
+    /// without a durable slot record already on disk to recover it by.
+    case journalUnavailable
 }
 
 /// One item as recorded in the log: the identity is the record, the path is a label.

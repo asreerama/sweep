@@ -76,7 +76,13 @@ final class CleanAdapterPipelineTests: XCTestCase {
         try JSONEncoder().encode(catalog).write(to: schemaDirectory.appending(path: "catalog.json"))
         SweepCore.CleanService.configureBundledCatalogDirectory(schemaDirectory)
 
-        let context = CleanExecutionContext(catalog: catalog, ruleIDByItemID: [nodeURL.path: ruleID])
+        // Codex G1 finding #6: the context must carry the identity reviewed at "scan" time so
+        // `CleanAdapter` can bind its depth-1 rescan candidate to it by device+inode.
+        let reviewedIdentity = try SweepCore.FileIdentity.read(at: nodeURL)
+        let context = CleanExecutionContext(
+            catalog: catalog, ruleIDByItemID: [nodeURL.path: ruleID],
+            reviewedIdentityByItemID: [nodeURL.path: reviewedIdentity]
+        )
         let item = InventoryItem(id: nodeURL.path, title: nodeName, byteCount: 4, tier: .safe)
         // The internal test seam, not `gate1Open`: `runPipeline` is what SweepCore itself uses to
         // prove the pipeline correct while the gate stays closed (`CleanServiceTests` does the
@@ -94,6 +100,83 @@ final class CleanAdapterPipelineTests: XCTestCase {
         XCTAssertFalse(
             FileManager.default.fileExists(atPath: nodeURL.path),
             "the real CleanService pipeline, reached through CleanAdapter, actually trashed the fixture node"
+        )
+    }
+
+    /// Codex G1 finding #6 (NOT-CLOSED): a decoy object occupying the reviewed path (same path,
+    /// different inode) must be refused with a distinct "changed since review" outcome, never
+    /// matched and trashed just because its pathname happens to line up with what was reviewed.
+    func testCleanAdapterRefusesADecoyOccupyingTheReviewedPath() async throws {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let logsRoot = home.appending(path: "Library/Logs")
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: logsRoot.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            throw XCTSkip("~/Library/Logs is not available in this environment")
+        }
+
+        let nodeName = "SweepCleanAdapterDecoyTest-\(UUID().uuidString)"
+        let nodeURL = logsRoot.appending(path: nodeName, directoryHint: .isDirectory)
+        do {
+            try FileManager.default.createDirectory(at: nodeURL, withIntermediateDirectories: true)
+            try Data("reviewed".utf8).write(to: nodeURL.appending(path: "junk.log"))
+        } catch {
+            throw XCTSkip("cannot write a disposable fixture under ~/Library/Logs here: \(error)")
+        }
+        addTeardownBlock { try? FileManager.default.removeItem(at: nodeURL) }
+
+        // The identity a "scan" would have captured for the object the user actually reviewed.
+        let reviewedIdentity = try SweepCore.FileIdentity.read(at: nodeURL)
+
+        // Swap it out from under its own path: remove it and put a fresh directory with the same
+        // name (and even the same file inside) in its place. Same path, different inode.
+        try FileManager.default.removeItem(at: nodeURL)
+        try FileManager.default.createDirectory(at: nodeURL, withIntermediateDirectories: true)
+        try Data("decoy".utf8).write(to: nodeURL.appending(path: "junk.log"))
+        let decoyIdentity = try SweepCore.FileIdentity.read(at: nodeURL)
+        XCTAssertNotEqual(reviewedIdentity.inode, decoyIdentity.inode, "precondition: the decoy has a new inode")
+
+        let ruleID = "test.cleanadapter.decoy"
+        let rule = Rule(
+            id: ruleID, title: "Adapter decoy test", group: .systemJunk, root: .userLogs,
+            pattern: "*", itemTypes: [.directory], tier: .safe, action: .trash, undo: .trashRestore,
+            rationale: "CleanAdapter-level identity-binding regression test (Codex G1 finding #6)"
+        )
+        let catalog = RuleCatalog(rules: [rule])
+
+        let schemaDirectory = FileManager.default.temporaryDirectory
+            .appending(path: "CleanAdapterDecoyTests-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: schemaDirectory, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: schemaDirectory) }
+        try Data("{}".utf8).write(to: schemaDirectory.appending(path: "schema.json"))
+        try JSONEncoder().encode(catalog).write(to: schemaDirectory.appending(path: "catalog.json"))
+        SweepCore.CleanService.configureBundledCatalogDirectory(schemaDirectory)
+
+        // The context still carries the *stale* (pre-swap) reviewed identity: exactly what a
+        // real `ScanModel` would hold if the swap happened between review and Clean.
+        let context = CleanExecutionContext(
+            catalog: catalog, ruleIDByItemID: [nodeURL.path: ruleID],
+            reviewedIdentityByItemID: [nodeURL.path: reviewedIdentity]
+        )
+        let item = InventoryItem(id: nodeURL.path, title: nodeName, byteCount: 4, tier: .safe)
+        let adapter = CleanAdapter(context: context, items: [item], executePipeline: SweepCore.CleanService.runPipeline)
+
+        var finalReport: SweepUI.CleanReport?
+        for try await event in adapter.execute(itemIDs: [item.id]) {
+            if case .finished(let report) = event { finalReport = report }
+        }
+
+        let report = try XCTUnwrap(finalReport)
+        XCTAssertEqual(report.succeededCount, 0, "\(report.outcomes)")
+        let outcome = try XCTUnwrap(report.outcomes.first)
+        let reason = try XCTUnwrap(outcome.failureReason)
+        XCTAssertTrue(reason.contains("Changed since review"), "expected a distinct 'changed since review' reason, got: \(reason)")
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: nodeURL.path),
+            "the decoy must never be trashed just because its pathname matches the reviewed one"
+        )
+        XCTAssertEqual(
+            try String(contentsOf: nodeURL.appending(path: "junk.log"), encoding: .utf8), "decoy",
+            "the decoy's own content is untouched"
         )
     }
 }

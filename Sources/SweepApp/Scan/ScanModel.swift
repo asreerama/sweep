@@ -42,6 +42,11 @@ final class ScanModel {
     // the selection, never a catalog re-read from disk. `CleanAdapter.swift` is the only other
     // file that reads this — see `cleanExecutionContext()`.
     private var catalog: RuleCatalog?
+    /// Codex G1 finding #6 (NOT-CLOSED): the identity `ScanService` captured for each reviewed
+    /// node's own path (never a descendant's), keyed by `InventoryItem.id`. Threaded into
+    /// `CleanExecutionContext` so `CleanAdapter` can bind its depth-1 rescan candidate to the
+    /// reviewed object by device+inode, not by pathname alone.
+    private var reviewedIdentityByItemID: [String: FileIdentity] = [:]
 
     /// System Junk selection. Tier-`safe` rows come pre-selected; `caution` and `expert` never
     /// do — the user opts into those, and in this build every path terminates at the Gate 1
@@ -112,6 +117,7 @@ final class ScanModel {
         lastSequence = 0
         selection = InventorySelection()
         catalog = nil
+        reviewedIdentityByItemID = [:]
 
         let environment = self.environment
         task = Task { [weak self] in
@@ -175,6 +181,7 @@ final class ScanModel {
         currentPath = nil
         selection = .safeDefaults(in: outcome.ruleGroups)
         catalog = outcome.catalog
+        reviewedIdentityByItemID = outcome.reviewedIdentityByItemID
         phase = .results
     }
 
@@ -246,7 +253,9 @@ final class ScanModel {
         for group in ruleGroups {
             for item in group.items { ruleIDByItemID[item.id] = group.id }
         }
-        return CleanExecutionContext(catalog: catalog, ruleIDByItemID: ruleIDByItemID)
+        return CleanExecutionContext(
+            catalog: catalog, ruleIDByItemID: ruleIDByItemID, reviewedIdentityByItemID: reviewedIdentityByItemID
+        )
     }
 }
 
@@ -256,4 +265,9 @@ struct CleanExecutionContext {
     let catalog: RuleCatalog
     /// `InventoryItem.id` (a claimed node's absolute path) → the id of the rule that claimed it.
     let ruleIDByItemID: [String: String]
+    /// `InventoryItem.id` → the identity `ScanService` captured for that exact node at scan time
+    /// (Codex G1 finding #6, NOT-CLOSED). `CleanAdapter` binds its depth-1 rescan candidate to
+    /// this by device+inode, never by pathname alone, so a decoy occupying the reviewed path can
+    /// never be laundered through as if it were the reviewed item.
+    let reviewedIdentityByItemID: [String: FileIdentity]
 }

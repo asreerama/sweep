@@ -8,7 +8,14 @@ import Foundation
 /// "app not running" and "old enough" are per-item dynamic predicates a declarative
 /// ``RuleCatalog`` pattern cannot express. ``CodeSignCloneDetector`` produces these directly,
 /// wrapping the plain ``ScanCandidate`` with the extra provenance a rule normally supplies.
-public struct CodeSignCloneCandidate: Sendable, Hashable, Codable, Identifiable {
+/// Codex G1 finding #7 (NOT-CLOSED): `Codable` used to be a second, public decoding construction
+/// route into this type even after the memberwise initializer went `internal`: a caller could
+/// still `JSONDecoder().decode(CodeSignCloneCandidate.self, from:)` an arbitrary payload and hand
+/// `CleanService` a forged owner/age/kind via `candidate.identity`. Nothing in this codebase ever
+/// legitimately decodes one (verified by grep: the only constructions are the detector's own and
+/// test fixtures using the internal initializer), so the conformance is dropped outright rather
+/// than gated, removing the forgery surface instead of merely narrowing it.
+public struct CodeSignCloneCandidate: Sendable, Hashable, Identifiable {
 
     /// Tag every candidate from this detector carries, distinct from a rule id, so UI can
     /// recognize "this one was never resolved against the catalog" and caption it

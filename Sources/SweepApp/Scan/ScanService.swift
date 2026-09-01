@@ -53,11 +53,17 @@ struct ScanOutcome: Sendable {
     /// re-authorized by `CleanAdapter.swift` against the exact rules that produced these items,
     /// never a catalog re-read from disk that might have changed underneath the scan.
     let catalog: RuleCatalog
+    /// `InventoryItem.id` → the identity captured for that exact node, never a descendant's
+    /// (Codex G1 finding #6, NOT-CLOSED). Threaded through `ScanModel.cleanExecutionContext()` so
+    /// `CleanAdapter` can bind its depth-1 rescan candidate to the reviewed object by device+inode
+    /// instead of trusting whatever now occupies the same pathname.
+    let reviewedIdentityByItemID: [String: FileIdentity]
 
     static let empty = ScanOutcome(
         summaryGroups: [], ruleGroups: [], claimedBytes: 0, claimedFiles: 0,
         filesExamined: 0, skipped: [], duration: 0, cancelled: false,
-        catalog: RuleCatalog(schemaVersion: RuleCatalog.supportedSchemaVersion, rules: [])
+        catalog: RuleCatalog(schemaVersion: RuleCatalog.supportedSchemaVersion, rules: []),
+        reviewedIdentityByItemID: [:]
     )
 }
 
@@ -190,6 +196,13 @@ enum ScanService {
                                 root: unit.root
                             )
                         }
+                        // Codex G1 finding #6: capture the node's *own* identity: the candidate
+                        // event whose relative path exactly equals the claimed node, whether that
+                        // is a leaf-level file match or an ancestor directory the walk visits
+                        // separately from its descendants, never a descendant's or a sibling's.
+                        if relative == claim.node {
+                            nodes[key]?.identity = candidate.identity
+                        }
 
                         // Bytes are per inode, once. A hard link seen twice is one file's worth
                         // of disk, and an APFS clone family is charged to whoever is walked first.
@@ -232,7 +245,8 @@ enum ScanService {
             skipped: dedupeSkipped(skipped),
             duration: Date().timeIntervalSince(started),
             cancelled: cancelled,
-            catalog: catalog
+            catalog: catalog,
+            reviewedIdentityByItemID: built.identityByItemID
         )
     }
 
@@ -360,12 +374,17 @@ enum ScanService {
         let root: SweepPolicy.OperationRoot
         var bytes: Int64 = 0
         var fileCount: Int = 0
+        /// The node's own identity (Codex G1 finding #6), captured when the walk visits the
+        /// node's own path directly. `nil` only if that never happened (e.g. a permission error
+        /// on the node itself); such a node is excluded from `identityByItemID` and a later Clean
+        /// request for it fails closed for lack of a reviewed identity to bind to.
+        var identity: FileIdentity?
     }
 
     private static func buildGroups(
         nodes: [Node],
         homes: [String]
-    ) -> (summary: [InventoryGroup], byRule: [InventoryGroup]) {
+    ) -> (summary: [InventoryGroup], byRule: [InventoryGroup], identityByItemID: [String: FileIdentity]) {
         // Empty nodes are directories a rule claimed that turned out to hold nothing. They are
         // true, and they are noise; a scan result listing 400 zero-byte caches buries the four
         // that matter.
@@ -374,6 +393,7 @@ enum ScanService {
         var itemsByRule: [String: [InventoryItem]] = [:]
         var ruleByID: [String: Rule] = [:]
         var itemsByGroup: [RuleGroup: [InventoryItem]] = [:]
+        var identityByItemID: [String: FileIdentity] = [:]
 
         for node in populated.sorted(by: { $0.bytes > $1.bytes }) {
             let item = InventoryItem(
@@ -387,6 +407,9 @@ enum ScanService {
             itemsByRule[node.rule.id, default: []].append(item)
             ruleByID[node.rule.id] = node.rule
             itemsByGroup[node.rule.group, default: []].append(item)
+            if let identity = node.identity {
+                identityByItemID[node.path] = identity
+            }
         }
 
         let byRule = itemsByRule
@@ -402,7 +425,7 @@ enum ScanService {
             }
             .sorted { $0.byteCount > $1.byteCount }
 
-        return (summary, byRule)
+        return (summary, byRule, identityByItemID)
     }
 
     private static func dedupeSkipped(_ skipped: [SkippedLocation]) -> [SkippedLocation] {

@@ -26,6 +26,34 @@ public enum JournalError: Error, Equatable, CustomStringConvertible {
     }
 }
 
+/// The subset of ``WALJournal``'s append surface ``DeletionCoordinator`` calls, pulled out as a
+/// protocol so a test can substitute a double that fails specific append kinds on demand. This is
+/// the same seam ``TrashCapable``/``FileMutating`` already give the executor side. Codex G1
+/// finding #1's "retry once, then degrade the operation, never suppress" behavior needs exactly
+/// this: a way to make one specific quarantine-lifecycle append fail without depending on a real
+/// filesystem failure actually happening during a test run. Every real caller still only ever
+/// constructs a genuine ``WALJournal``; nothing about production wiring changes.
+protocol JournalWriting: Sendable {
+    func appendPlanned(operationID: UUID, planVersion: Int, items: [JournalItem]) async throws
+    func appendStarted(operationID: UUID) async throws
+    func appendItemResult(
+        operationID: UUID,
+        item: JournalItem,
+        outcome: ItemOutcome,
+        failureReason: ItemFailureReason?,
+        trashURL: URL?,
+        quarantineURL: URL?,
+        detail: String?
+    ) async throws
+    func appendCommitted(operationID: UUID, detail: String?) async throws
+    func appendStagePlanned(operationID: UUID, item: JournalItem, quarantineURL: URL) async throws
+    func appendStaged(operationID: UUID, item: JournalItem, quarantineURL: URL) async throws
+    func appendTrashed(operationID: UUID, item: JournalItem, trashURL: URL?) async throws
+    func appendRollbackFailed(operationID: UUID, item: JournalItem, quarantineURL: URL, reason: String) async throws
+}
+
+extension WALJournal: JournalWriting {}
+
 /// Versioned write-ahead log, one JSON object per line.
 ///
 /// Order is the contract: `planned` is durable before the first byte of the filesystem is

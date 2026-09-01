@@ -42,6 +42,94 @@ final class RecordingExecutor: FileMutating, @unchecked Sendable {
     }
 }
 
+/// Delegates every append to a real ``WALJournal``, except for one targeted kind, which fails a
+/// configured number of times before delegating too. Used to prove Codex G1 finding #1's
+/// "retry once, then degrade, never suppress" behavior without depending on a real filesystem
+/// failure actually happening during a test run.
+actor SelectiveFailureJournal: JournalWriting {
+    struct InjectedFailure: Error {}
+
+    private let real: WALJournal
+    private var stagedFailuresRemaining: Int
+    private var trashedFailuresRemaining: Int
+    private var rollbackFailedFailuresRemaining: Int
+    private let stagePlannedAlwaysFails: Bool
+
+    private(set) var stagePlannedAttempts = 0
+    private(set) var stagedAttempts = 0
+    private(set) var trashedAttempts = 0
+    private(set) var rollbackFailedAttempts = 0
+
+    init(
+        real: WALJournal,
+        stagePlannedAlwaysFails: Bool = false,
+        stagedFailureCount: Int = 0,
+        trashedFailureCount: Int = 0,
+        rollbackFailedFailureCount: Int = 0
+    ) {
+        self.real = real
+        self.stagePlannedAlwaysFails = stagePlannedAlwaysFails
+        self.stagedFailuresRemaining = stagedFailureCount
+        self.trashedFailuresRemaining = trashedFailureCount
+        self.rollbackFailedFailuresRemaining = rollbackFailedFailureCount
+    }
+
+    func appendPlanned(operationID: UUID, planVersion: Int, items: [JournalItem]) async throws {
+        try await real.appendPlanned(operationID: operationID, planVersion: planVersion, items: items)
+    }
+
+    func appendStarted(operationID: UUID) async throws {
+        try await real.appendStarted(operationID: operationID)
+    }
+
+    func appendItemResult(
+        operationID: UUID, item: JournalItem, outcome: ItemOutcome, failureReason: ItemFailureReason?,
+        trashURL: URL?, quarantineURL: URL?, detail: String?
+    ) async throws {
+        try await real.appendItemResult(
+            operationID: operationID, item: item, outcome: outcome, failureReason: failureReason,
+            trashURL: trashURL, quarantineURL: quarantineURL, detail: detail
+        )
+    }
+
+    func appendCommitted(operationID: UUID, detail: String?) async throws {
+        try await real.appendCommitted(operationID: operationID, detail: detail)
+    }
+
+    func appendStagePlanned(operationID: UUID, item: JournalItem, quarantineURL: URL) async throws {
+        stagePlannedAttempts += 1
+        if stagePlannedAlwaysFails { throw InjectedFailure() }
+        try await real.appendStagePlanned(operationID: operationID, item: item, quarantineURL: quarantineURL)
+    }
+
+    func appendStaged(operationID: UUID, item: JournalItem, quarantineURL: URL) async throws {
+        stagedAttempts += 1
+        if stagedFailuresRemaining > 0 {
+            stagedFailuresRemaining -= 1
+            throw InjectedFailure()
+        }
+        try await real.appendStaged(operationID: operationID, item: item, quarantineURL: quarantineURL)
+    }
+
+    func appendTrashed(operationID: UUID, item: JournalItem, trashURL: URL?) async throws {
+        trashedAttempts += 1
+        if trashedFailuresRemaining > 0 {
+            trashedFailuresRemaining -= 1
+            throw InjectedFailure()
+        }
+        try await real.appendTrashed(operationID: operationID, item: item, trashURL: trashURL)
+    }
+
+    func appendRollbackFailed(operationID: UUID, item: JournalItem, quarantineURL: URL, reason: String) async throws {
+        rollbackFailedAttempts += 1
+        if rollbackFailedFailuresRemaining > 0 {
+            rollbackFailedFailuresRemaining -= 1
+            throw InjectedFailure()
+        }
+        try await real.appendRollbackFailed(operationID: operationID, item: item, quarantineURL: quarantineURL, reason: reason)
+    }
+}
+
 final class DeletionCoordinatorTests: XCTestCase {
 
     // MARK: - Happy path
@@ -509,6 +597,118 @@ final class DeletionCoordinatorTests: XCTestCase {
         await journal.close()
     }
 
+    // MARK: - Codex G1 finding #1 (CONTROLLING): quarantine-lifecycle appends are never `try?`
+
+    /// `stagePlanned` is the only quarantine-lifecycle record written *before* any mutation. A
+    /// failure here must fail the item closed: refused before `executor.trash` is ever called,
+    /// never let staging proceed with no durable slot record. Distinct from the operation-level
+    /// degrade below: a `stagePlanned` failure is scoped to this one item, so a second,
+    /// independent item in the same plan must still be processed normally and the operation must
+    /// still report `committed: true`.
+    func testStagePlannedFailureAbortsOnlyTheItemBeforeAnyStagingAndTheOperationContinues() async throws {
+        let fixture = try TempTree("del-stageplanned-fail")
+        let trashVictim = try fixture.write("caches/never-staged.bin", bytes: 64)
+        let deleteVictim = try fixture.write("caches/other-item.bin", bytes: 32)
+
+        let realJournal = try await WALJournal(url: fixture.url("journal.jsonl"))
+        let failingJournal = SelectiveFailureJournal(real: realJournal, stagePlannedAlwaysFails: true)
+        let coordinator = DeletionCoordinator(
+            mode: .fixtureOnly(root: fixture.root),
+            journal: failingJournal,
+            additionalDenials: .none,
+            executor: FileDescriptorExecutor(root: try OpenDirectory.openRoot(fixture.root), queue: BlockingIOQueue(label: "test"))
+        )
+        let plan = DeletionPlan(items: [
+            try Self.item(for: trashVictim, action: .trash, tier: .safe),
+            try Self.item(for: deleteVictim, action: .delete, tier: .safe),
+        ])
+
+        let report = try await coordinator.execute(plan)
+
+        let trashResult = try XCTUnwrap(report.results.first { $0.item.url == trashVictim })
+        XCTAssertEqual(trashResult.outcome, .failed, "fail closed: never suppressed into a silent success")
+        XCTAssertEqual(trashResult.failureReason, .journalUnavailable)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: trashVictim.path), "never staged: no mutation occurred")
+
+        let deleteResult = try XCTUnwrap(report.results.first { $0.item.url == deleteVictim })
+        XCTAssertEqual(deleteResult.outcome, .succeeded, "an unrelated item in the same plan must still be processed")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: deleteVictim.path))
+
+        XCTAssertTrue(report.committed, "a stagePlanned failure degrades only the item, never the whole operation")
+        XCTAssertFalse(report.journalingDegraded)
+        await realJournal.close()
+    }
+
+    /// `staged`/`trashed` happen *after* the rename into quarantine and the real `trashItem` call
+    /// already succeeded, the mutation cannot be undone by refusing the item. A failure here
+    /// (surviving one retry) must degrade the whole *operation* instead: the in-flight item still
+    /// reports its real outcome, but no further items are processed and the report never claims a
+    /// clean commit.
+    func testStagedAppendFailureSurvivingOneRetryDegradesTheOperationAfterTheInFlightItemCompletes() async throws {
+        let fixture = try TempTree("del-staged-degrade")
+        let first = try fixture.write("caches/first.bin", bytes: 16)
+        let second = try fixture.write("caches/second.bin", bytes: 16)
+        let trashURL = URL(fileURLWithPath: "/Users/tester/.Trash/first.bin")
+        let executor = RecordingExecutor(trashResult: trashURL)
+
+        let realJournal = try await WALJournal(url: fixture.url("journal.jsonl"))
+        let failingJournal = SelectiveFailureJournal(real: realJournal, stagedFailureCount: 2)
+        let coordinator = DeletionCoordinator(
+            mode: .fixtureOnly(root: fixture.root),
+            journal: failingJournal,
+            additionalDenials: .none,
+            executor: executor
+        )
+        let plan = try Self.plan(for: [first, second], action: .trash, tier: .safe)
+
+        let report = try await coordinator.execute(plan)
+
+        let stagedAttempts = await failingJournal.stagedAttempts
+        XCTAssertEqual(
+            stagedAttempts, 2,
+            "exactly one retry: two attempts total, never suppressed and never retried more than once"
+        )
+        XCTAssertEqual(report.results.count, 1, "the operation stops after the in-flight item; the second item is never reached")
+        let result = try XCTUnwrap(report.results.first)
+        XCTAssertEqual(result.item.url, first)
+        XCTAssertEqual(result.outcome, .succeeded, "the mutation already happened and is reported honestly")
+        XCTAssertEqual(executor.trashed, [first], "the second item's mutation must never run once journaling is degraded")
+
+        XCTAssertFalse(report.committed, "never a clean commit once journaling degraded")
+        XCTAssertTrue(report.journalingDegraded)
+        await realJournal.close()
+    }
+
+    /// The same retry-then-degrade discipline applies to the `strandedInQuarantine` path
+    /// (`staged` + `rollbackFailed`), not only the success path (`staged` + `trashed`).
+    func testRollbackFailedAppendFailureSurvivingOneRetryDegradesTheOperation() async throws {
+        let fixture = try TempTree("del-rollback-degrade")
+        let file = try fixture.write("caches/stuck.bin", bytes: 32)
+        let quarantinePath = fixture.url(".sweep-quarantine/op/64-1/stuck.bin").path
+        let executor = RecordingExecutor(errorToThrow: FileDescriptorError.strandedInQuarantine(
+            quarantinePath: quarantinePath,
+            underlyingReason: "trashItem failed: simulated for the test",
+            rollbackReason: "renameat failed: simulated for the test"
+        ))
+
+        let realJournal = try await WALJournal(url: fixture.url("journal.jsonl"))
+        let failingJournal = SelectiveFailureJournal(real: realJournal, rollbackFailedFailureCount: 2)
+        let coordinator = DeletionCoordinator(
+            mode: .fixtureOnly(root: fixture.root), journal: failingJournal, additionalDenials: .none, executor: executor
+        )
+        let plan = try Self.plan(for: [file], action: .trash, tier: .safe)
+
+        let report = try await coordinator.execute(plan)
+
+        let rollbackFailedAttempts = await failingJournal.rollbackFailedAttempts
+        XCTAssertEqual(rollbackFailedAttempts, 2, "exactly one retry")
+        let result = try XCTUnwrap(report.results.first)
+        XCTAssertEqual(result.outcome, .movedRecoveryRequired, "the real outcome is still reported honestly")
+        XCTAssertFalse(report.committed)
+        XCTAssertTrue(report.journalingDegraded)
+        await realJournal.close()
+    }
+
     func testLiveModeIsGatedShut() async throws {
         let fixture = try TempTree("del-live")
         let file = try fixture.write("caches/x.bin", bytes: 16)
@@ -685,18 +885,20 @@ final class DeletionCoordinatorTests: XCTestCase {
         tier: Tier,
         operationID: UUID = UUID()
     ) throws -> DeletionPlan {
-        let items = try urls.map { url in
-            DeletionItem(
-                url: url,
-                identity: try FileIdentity.read(at: url),
-                parentIdentity: try FileIdentity.read(at: url.deletingLastPathComponent()),
-                action: action,
-                tier: tier,
-                allocatedSize: Int64((try? url.resourceValues(forKeys: [.totalFileAllocatedSizeKey]).totalFileAllocatedSize) ?? 0),
-                ruleID: "test.rule"
-            )
-        }
+        let items = try urls.map { try item(for: $0, action: action, tier: tier) }
         return DeletionPlan(operationID: operationID, items: items)
+    }
+
+    static func item(for url: URL, action: DeletionAction, tier: Tier) throws -> DeletionItem {
+        DeletionItem(
+            url: url,
+            identity: try FileIdentity.read(at: url),
+            parentIdentity: try FileIdentity.read(at: url.deletingLastPathComponent()),
+            action: action,
+            tier: tier,
+            allocatedSize: Int64((try? url.resourceValues(forKeys: [.totalFileAllocatedSizeKey]).totalFileAllocatedSize) ?? 0),
+            ruleID: "test.rule"
+        )
     }
 
     /// `utimes(2)`: sets mtime to anything a caller likes, which is exactly why mtime alone was

@@ -134,6 +134,24 @@ final class OpenDirectory: @unchecked Sendable {
         return OpenDirectory(fd: fd, path: resolved)
     }
 
+    /// Opens an already-existing directory directly by pathname, `O_NOFOLLOW`, with **no**
+    /// `realpath` collapsing first (Codex G1 finding #4: "no realpath of a caller path"). Safe
+    /// without `realpath` because `O_NOFOLLOW` only ever refuses the *final* path component: a
+    /// symlink anywhere *above* this directory (`/var` -> `/private/var`) is still resolved
+    /// transparently by the kernel as ordinary path lookup; only this directory's own final
+    /// component is refused if it turns out to be a symlink. Use ``openRoot(_:)`` instead when the
+    /// caller's spelling and its `realpath`-collapsed form need to be treated as the same root
+    /// (the authorization/anchor use case); use this when the caller already knows the exact
+    /// directory that exists and wants no pathname resolution applied to it at all.
+    static func openExisting(_ url: URL) throws -> OpenDirectory {
+        let path = url.standardizedFileURL.path
+        let fd = path.withCString { open($0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) }
+        guard fd >= 0 else {
+            throw FileDescriptorError.openFailed(component: path, code: errno)
+        }
+        return OpenDirectory(fd: fd, path: path)
+    }
+
     /// Opens a child directory without following a symlink. `ELOOP` here is the attack being
     /// refused: the component was a symlink at the moment of the call.
     func openChildDirectory(_ name: String) throws -> OpenDirectory {

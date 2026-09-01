@@ -364,6 +364,50 @@ final class WALJournalTests: XCTestCase {
         }
     }
 
+    // MARK: - Codex G1 finding #4: descriptor-descended directory chain, and hard-link rejection
+
+    /// A pre-planted *hard link* into another private, same-owner regular file is not a symlink:
+    /// `O_NOFOLLOW` cannot catch it, because it is literally the same inode under a second name.
+    /// `st_nlink` must be checked explicitly, and a link count above 1 must be refused.
+    func testPreExistingHardLinkedJournalFileIsRefused() async throws {
+        let tree = try TempTree("wal-hardlink")
+        let realFile = tree.url("other-private-file.jsonl")
+        try Data().write(to: realFile)
+        let journalPath = tree.url("ops.jsonl")
+        try FileManager.default.linkItem(at: realFile, to: journalPath)
+        let linkCount = try FileIdentity.read(at: journalPath).linkCount
+        XCTAssertGreaterThan(linkCount, 1, "precondition: journalPath and realFile share one inode")
+
+        do {
+            _ = try await WALJournal(url: journalPath)
+            XCTFail("expected the journal open to refuse a pre-existing hard-linked file")
+        } catch let error as JournalError {
+            guard case .cannotCreate = error else { return XCTFail("expected cannotCreate, got \(error)") }
+        }
+    }
+
+    /// A middle path component (not the leaf directory itself) that is actually a symlink must be
+    /// refused too: the descent from the nearest existing ancestor opens every component with
+    /// `O_NOFOLLOW`, not only the final one.
+    func testSymlinkedMiddleComponentInTheJournalsDirectoryChainIsRefused() async throws {
+        let tree = try TempTree("wal-mid-symlink")
+        let realTarget = try tree.makeDirectory("real-sweep-dir")
+        let symlinkedComponent = tree.url("Sweep")
+        try FileManager.default.createSymbolicLink(at: symlinkedComponent, withDestinationURL: realTarget)
+        let journalPath = tree.url("Sweep/Journal/ops.jsonl")
+
+        do {
+            _ = try await WALJournal(url: journalPath)
+            XCTFail("expected the journal open to refuse a symlinked middle directory component")
+        } catch let error as JournalError {
+            guard case .cannotCreate = error else { return XCTFail("expected cannotCreate, got \(error)") }
+        }
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: realTarget.appending(path: "Journal").path),
+            "nothing must be created through the symlink"
+        )
+    }
+
     /// Recovery/replay reads through the same locked descriptor every append uses, never the
     /// pathname again: swapping the pathname out from under an already-open journal must not
     /// change what a subsequent read sees.

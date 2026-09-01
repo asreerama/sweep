@@ -28,19 +28,31 @@ final class JournalFile: @unchecked Sendable {
 
     /// Opens the journal for appending, exclusively, and makes its existence durable.
     ///
-    /// Four things happen here that did not before:
+    /// Five things happen here that did not before:
     ///
-    /// - The containing directory is opened by descriptor first, and the journal file itself is
-    ///   opened `openat(dirFD, name, O_NOFOLLOW)` relative to it — never `open(fullPath)` — so a
-    ///   pre-planted symlink named `clean-journal.jsonl` is refused outright (`ELOOP`) instead of
-    ///   silently followed into appending WAL JSON onto an arbitrary writable target (review
-    ///   finding #2).
+    /// - The containing directory is reached by descending from the nearest already-existing
+    ///   ancestor one path component at a time: `openat`/`mkdirat`, `O_NOFOLLOW` at every step,
+    ///   **no `realpath` anywhere in the descent**. The journal file itself is opened
+    ///   `openat(dirFD, name, O_NOFOLLOW)` relative to the result, never `open(fullPath)`. A
+    ///   pre-planted symlink anywhere along the way (the containing directory itself, or any
+    ///   component Sweep creates leading to it) is refused outright (`ELOOP`), never silently
+    ///   followed (Codex G1 finding #4, and review finding #2's discipline extended to the
+    ///   directory chain, not just the leaf file).
+    /// - Every directory Sweep itself creates along that descent is `fstat`'d immediately after
+    ///   creation and refused unless it is owned by this account with no group/other write access
+    ///   (finding #4: "verify ownership/mode per component"). The pre-existing ancestor found at
+    ///   the top of the descent is the one trust boundary, exactly the way `OpenDirectory.openRoot`
+    ///   already treats its own anchor.
     /// - `O_APPEND`, so every write lands at the real end of file. A one-time `seekToEnd` was
     ///   only correct while exactly one instance existed (review finding #7).
-    /// - The opened file is `fstat`'d and refused unless it is a regular file, owned by this
-    ///   account, and not writable by group or other — closing the other half of finding #2:
-    ///   even a non-symlink node planted at that path (a FIFO, a device node, a file some other
-    ///   uid or a looser mode controls) is refused before a single byte is ever written to it.
+    /// - The opened file is `fstat`'d and refused unless it is a regular file with exactly one
+    ///   hard link, owned by this account, and not writable by group or other: closing the other
+    ///   half of finding #2 and finding #4's hard-link gap. Even a non-symlink node planted at
+    ///   that path (a FIFO, a device node, a file some other uid or a looser mode controls, or a
+    ///   *hard link* into another private regular file this account owns) is refused before a
+    ///   single byte is ever written to it. `O_NOFOLLOW` alone does not catch a hard link: it is
+    ///   never a symlink, it is literally the same inode reachable under a second name, which is
+    ///   exactly why `st_nlink` has to be checked explicitly.
     /// - `flock(LOCK_EX | LOCK_NB)`, held for the descriptor's life, so a second owner is told
     ///   so instead of silently interleaving records with the first.
     /// - `fsync` of the containing directory and of every ancestor this call created, so the
@@ -48,24 +60,16 @@ final class JournalFile: @unchecked Sendable {
     ///   (review finding #8).
     static func open(url: URL) throws -> JournalFile {
         let directory = url.deletingLastPathComponent()
-        let created = try createDirectories(at: directory, journalURL: url)
-
-        // Ancestors above the directory legitimately contain symlinks (`/var` -> `/private/var`);
-        // only the *leaf* journal file itself must never be one, which is what `O_NOFOLLOW` below
-        // enforces. `realpath` here only collapses the (already-created) containing directory's
-        // own spelling, mirroring `OpenDirectory.openRoot`.
-        let resolvedDirectoryPath = realpathOf(directory.standardizedFileURL.path) ?? directory.standardizedFileURL.path
-        let dirFD = resolvedDirectoryPath.withCString { Darwin.open($0, O_RDONLY | O_DIRECTORY | O_CLOEXEC) }
-        guard dirFD >= 0 else {
-            throw JournalError.cannotCreate(
-                url: url, reason: "open(\(resolvedDirectoryPath)): \(String(cString: strerror(errno)))"
-            )
-        }
-        defer { Darwin.close(dirFD) }
+        let (anchor, created) = try descendCreatingDirectories(to: directory, journalURL: url)
 
         let filename = url.lastPathComponent
-        let fd = filename.withCString {
-            Darwin.openat(dirFD, $0, O_RDWR | O_CREAT | O_APPEND | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        // `anchor` (an `OpenDirectory`) closes its own descriptor in `deinit`. `withExtendedLifetime`
+        // guarantees ARC cannot deallocate it (and so cannot close `anchor.fd` out from under this
+        // syscall) before `openat` has actually run.
+        let fd = withExtendedLifetime(anchor) {
+            filename.withCString {
+                Darwin.openat(anchor.fd, $0, O_RDWR | O_CREAT | O_APPEND | O_NOFOLLOW | O_CLOEXEC, 0o600)
+            }
         }
         guard fd >= 0 else {
             let code = errno
@@ -102,7 +106,10 @@ final class JournalFile: @unchecked Sendable {
 
     /// Refuses anything opened above that is not exactly what this process created or already
     /// owns exclusively: a regular file (never a FIFO or device node slipped in under a name
-    /// `O_NOFOLLOW` would not catch), owned by this account, with no group/other write access.
+    /// `O_NOFOLLOW` would not catch) with exactly one hard link (never a pre-planted hard link
+    /// into some other private, same-owner regular file: `O_NOFOLLOW` cannot catch this, because
+    /// a hard link is not a symlink, it is the same inode under a second name), owned by this
+    /// account, with no group/other write access (Codex G1 finding #4).
     private static func verifyOwnedPrivateRegularFile(fd: Int32, filename: String) throws {
         var status = stat()
         guard fstat(fd, &status) == 0 else {
@@ -113,6 +120,12 @@ final class JournalFile: @unchecked Sendable {
         guard status.st_mode & S_IFMT == S_IFREG else {
             throw JournalError.cannotCreate(
                 url: URL(fileURLWithPath: filename), reason: "refused: \(filename) is not a regular file"
+            )
+        }
+        guard status.st_nlink == 1 else {
+            throw JournalError.cannotCreate(
+                url: URL(fileURLWithPath: filename),
+                reason: "refused: \(filename) has \(status.st_nlink) hard links; the journal must be the only name for its inode"
             )
         }
         guard status.st_uid == getuid() else {
@@ -127,24 +140,75 @@ final class JournalFile: @unchecked Sendable {
         }
     }
 
-    /// Creates missing ancestors of `directory`, returning the ones this call actually created,
-    /// shallowest first.
-    private static func createDirectories(at directory: URL, journalURL: URL) throws -> [String] {
-        var missing: [URL] = []
-        var current = directory.standardizedFileURL
-        while !FileManager.default.fileExists(atPath: current.path) {
-            missing.append(current)
-            let parent = current.deletingLastPathComponent().standardizedFileURL
-            if parent.path == current.path { break }
-            current = parent
+    /// Reaches `directory` by descending from the nearest already-existing ancestor one path
+    /// component at a time, creating whatever is missing along the way. Returns the open
+    /// descriptor on `directory` itself, plus every path this call created, shallowest first.
+    ///
+    /// No `realpath` anywhere in this descent (Codex G1 finding #4: "no realpath of a caller
+    /// path"). None is needed: `O_NOFOLLOW` only ever refuses the *final* component of
+    /// whatever path a syscall is given, so opening the nearest existing ancestor's raw pathname
+    /// directly is exactly as safe as opening a pre-resolved one. A symlink anywhere *above* that
+    /// ancestor (`/var` -> `/private/var`) is still traversed transparently by the kernel as
+    /// ordinary path resolution; only the ancestor's own final component, and everything Sweep
+    /// creates below it, is ever refused if it turns out to be a symlink.
+    private static func descendCreatingDirectories(
+        to directory: URL, journalURL: URL
+    ) throws -> (anchor: OpenDirectory, created: [String]) {
+        var missingComponents: [String] = []
+        var ancestor = directory.standardizedFileURL
+        while !FileManager.default.fileExists(atPath: ancestor.path) {
+            missingComponents.append(ancestor.lastPathComponent)
+            let parent = ancestor.deletingLastPathComponent().standardizedFileURL
+            guard parent.path != ancestor.path else {
+                throw JournalError.cannotCreate(
+                    url: journalURL, reason: "no existing ancestor found above \(directory.path)"
+                )
+            }
+            ancestor = parent
         }
-        guard !missing.isEmpty else { return [] }
+        missingComponents.reverse()   // shallowest first
+
+        var current: OpenDirectory
         do {
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            current = try OpenDirectory.openExisting(ancestor)
         } catch {
-            throw JournalError.cannotCreate(url: journalURL, reason: error.localizedDescription)
+            throw JournalError.cannotCreate(url: journalURL, reason: String(describing: error))
         }
-        return missing.reversed().map(\.path)
+
+        var created: [String] = []
+        for component in missingComponents {
+            do {
+                try current.makeChildDirectory(component)
+                let child = try current.openChildDirectory(component)
+                try verifyOwnedPrivateDirectory(child, journalURL: journalURL)
+                current = child
+            } catch {
+                throw JournalError.cannotCreate(url: journalURL, reason: String(describing: error))
+            }
+            created.append(current.path)
+        }
+
+        return (current, created)
+    }
+
+    /// A directory Sweep itself just created along the journal's path must verify as exclusively
+    /// this account's before anything descends into it further. Mirrors
+    /// `verifyOwnedPrivateRegularFile`'s discipline, applied to a directory (Codex G1 finding #4).
+    private static func verifyOwnedPrivateDirectory(_ directory: OpenDirectory, journalURL: URL) throws {
+        var status = stat()
+        guard fstat(directory.fd, &status) == 0 else {
+            throw JournalError.cannotCreate(url: journalURL, reason: "fstat: \(String(cString: strerror(errno)))")
+        }
+        guard status.st_uid == getuid() else {
+            throw JournalError.cannotCreate(
+                url: journalURL, reason: "refused: \(directory.path) is not owned by this account"
+            )
+        }
+        guard status.st_mode & (S_IWGRP | S_IWOTH) == 0 else {
+            throw JournalError.cannotCreate(
+                url: journalURL, reason: "refused: \(directory.path) is writable by group or other"
+            )
+        }
     }
 
     private static func syncDirectory(atPath path: String, url: URL) throws {
