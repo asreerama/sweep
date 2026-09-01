@@ -15,7 +15,14 @@ Sonnet agents + Fable review + Codex (raw `codex exec`, plugin wrapper broken) f
       nlink==1, sealed SelectionBatch, identity-bound adapter, clone Codable removal,
       quarantine scan gaps) -> verdicts 3,4 fixed surgically by Fable -> verdict 5
       GATE: OPEN -> gate flipped, M3 SHIPPED (trash-only cleaning live in ~/Applications).
-- [ ] WAVE-P4: SweepHelper (SMAppService + XPC codesign validation, maintenance ops),
+- [x] WAVE-P4: SweepHelper (HELPER: OPEN, cleared by Codex re-check; live SMAppService
+      registration = human step), Uninstaller + AppCleaner parity (drop targets, SmartDelete
+      watcher), Developer + Homebrew screens, clone-detector UI. Gate U held twice by Codex
+      (signed-evidence, durable consent, transactional rollback), fix loop 2 in flight.
+- [x] WAVE-P5: menubar split (Sweep Menu.app, 45.4 MB idle < 50 budget), onboarding + FDA
+      capability model. Integration commit e520de1, all suites green.
+- [ ] Gate 2 build (direct-delete safe-tier + fault-injection suite) in flight.
+- [~] SUPERSEDED: SweepHelper (SMAppService + XPC codesign validation, maintenance ops),
       Uninstaller screen + AppCleaner parity (Dock/window drop targets, SmartDelete watcher,
       quit-first), Developer + Homebrew screens, clone-detector UI wiring, menubar
       accessory-mode switch + 50MB budget measurement.
