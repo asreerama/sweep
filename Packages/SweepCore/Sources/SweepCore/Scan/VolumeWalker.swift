@@ -157,14 +157,7 @@ public struct FileManagerVolumeWalker: VolumeWalker {
             }
 
             let kind = FileIdentity.kind(of: status)
-            let identity = FileIdentity(
-                deviceID: deviceID,
-                inode: UInt64(status.st_ino),
-                volume: options.boundary,
-                kind: kind,
-                linkCount: Int(status.st_nlink),
-                modification: FileTimestamp(status.st_mtimespec)
-            )
+            let identity = FileIdentity(status, volume: options.boundary)
 
             let standardized = url.standardizedFileURL.path
             if kind == .directory { identityByPath[standardized] = identity }

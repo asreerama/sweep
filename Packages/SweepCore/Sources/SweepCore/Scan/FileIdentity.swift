@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import SweepPolicy
 
 /// Filesystem timestamp kept at `stat` precision. `Date` round-trips lose nanoseconds, and
 /// identity revalidation compares timestamps for equality, so the raw pair is stored.
@@ -16,6 +17,8 @@ public struct FileTimestamp: Sendable, Hashable, Codable, Comparable {
         self.seconds = Int64(spec.tv_sec)
         self.nanoseconds = Int64(spec.tv_nsec)
     }
+
+    public static let zero = FileTimestamp(seconds: 0, nanoseconds: 0)
 
     public var date: Date {
         Date(timeIntervalSince1970: Double(seconds) + Double(nanoseconds) / 1_000_000_000)
@@ -70,6 +73,15 @@ public struct FileIdentity: Sendable, Hashable, Codable {
     public let kind: FileKind
     public let linkCount: Int
     public let modification: FileTimestamp
+    /// `st_ctimespec`. Unlike mtime, no API lets a process set it backwards: an in-place rewrite
+    /// followed by `utimes` to restore mtime still moves ctime forward (review finding #5).
+    public let statusChange: FileTimestamp
+    /// `st_size`. Catches a same-length-preserving edit only in combination with the timestamps,
+    /// but catches truncation and growth on its own.
+    public let size: Int64
+    /// `st_flags` — `uchg`, `schg`, `hidden`, `compressed`. A file that gained or lost an
+    /// immutability flag since the scan is not the file the plan described.
+    public let flags: UInt32
 
     public init(
         deviceID: UInt64,
@@ -77,7 +89,10 @@ public struct FileIdentity: Sendable, Hashable, Codable {
         volume: VolumeIdentity,
         kind: FileKind,
         linkCount: Int,
-        modification: FileTimestamp
+        modification: FileTimestamp,
+        statusChange: FileTimestamp = .zero,
+        size: Int64 = 0,
+        flags: UInt32 = 0
     ) {
         self.deviceID = deviceID
         self.inode = inode
@@ -85,6 +100,26 @@ public struct FileIdentity: Sendable, Hashable, Codable {
         self.kind = kind
         self.linkCount = linkCount
         self.modification = modification
+        self.statusChange = statusChange
+        self.size = size
+        self.flags = flags
+    }
+
+    /// Built straight from a `stat` taken with a symlink-free call (`lstat`, or `fstatat` with
+    /// `AT_SYMLINK_NOFOLLOW`). The single place the struct is filled in from the kernel.
+    init(_ status: stat, volume: VolumeIdentity? = nil) {
+        let deviceID = UInt64(bitPattern: Int64(status.st_dev))
+        self.init(
+            deviceID: deviceID,
+            inode: UInt64(status.st_ino),
+            volume: volume ?? VolumeIdentity(deviceID: deviceID, uuid: nil),
+            kind: FileIdentity.kind(of: status),
+            linkCount: Int(status.st_nlink),
+            modification: FileTimestamp(status.st_mtimespec),
+            statusChange: FileTimestamp(status.st_ctimespec),
+            size: Int64(status.st_size),
+            flags: status.st_flags
+        )
     }
 
     /// Same inode on the same device, same type. True across renames.
@@ -92,10 +127,22 @@ public struct FileIdentity: Sendable, Hashable, Codable {
         deviceID == other.deviceID && inode == other.inode && kind == other.kind
     }
 
-    /// Same file *and* untouched: mtime and link count both unchanged. Anything else is a
-    /// refusal at delete time.
+    /// Same file *and* untouched. mtime alone is forgeable (`utimes` sets it to anything), so
+    /// ctime, size, link count and flags are all part of the comparison. For a directory this
+    /// still only proves the directory's own entry list is unchanged, which is why a directory
+    /// deletion validates every descendant separately instead of trusting this.
     public func isUnchanged(from other: FileIdentity) -> Bool {
-        isSameFile(as: other) && modification == other.modification && linkCount == other.linkCount
+        isSameFile(as: other)
+            && modification == other.modification
+            && statusChange == other.statusChange
+            && size == other.size
+            && linkCount == other.linkCount
+            && flags == other.flags
+    }
+
+    /// The device/inode pair, in the vocabulary ``SweepPolicy`` speaks.
+    public var pathIdentity: PathIdentity {
+        PathIdentity(deviceID: deviceID, inode: inode)
     }
 
     /// True when a regular file has more than one directory entry pointing at it, so its bytes
@@ -104,17 +151,31 @@ public struct FileIdentity: Sendable, Hashable, Codable {
     public var isHardLinked: Bool { kind == .file && linkCount > 1 }
 
     /// Capture identity of `url` without following a final symlink.
+    ///
+    /// Pathname-based, so it is only ever a *capture* or a fail-fast pre-check. The authority
+    /// for a mutation is ``OpenDirectory``'s `fstatat` against a descriptor that was opened with
+    /// `O_NOFOLLOW`, because a pathname can be re-pointed between this call and the next one.
     public static func read(at url: URL, volume: VolumeIdentity? = nil) throws -> FileIdentity {
-        let status = try lstatPath(url)
-        let deviceID = UInt64(bitPattern: Int64(status.st_dev))
-        return FileIdentity(
-            deviceID: deviceID,
-            inode: UInt64(status.st_ino),
-            volume: volume ?? VolumeIdentity(deviceID: deviceID, uuid: nil),
-            kind: kind(of: status),
-            linkCount: Int(status.st_nlink),
-            modification: FileTimestamp(status.st_mtimespec)
-        )
+        FileIdentity(try lstatPath(url), volume: volume)
+    }
+
+    // Explicit coding so a journal written before ctime/size/flags existed still replays: the
+    // three new fields decode to their zero value rather than failing the whole record.
+    private enum CodingKeys: String, CodingKey {
+        case deviceID, inode, volume, kind, linkCount, modification, statusChange, size, flags
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.deviceID = try container.decode(UInt64.self, forKey: .deviceID)
+        self.inode = try container.decode(UInt64.self, forKey: .inode)
+        self.volume = try container.decode(VolumeIdentity.self, forKey: .volume)
+        self.kind = try container.decode(FileKind.self, forKey: .kind)
+        self.linkCount = try container.decode(Int.self, forKey: .linkCount)
+        self.modification = try container.decode(FileTimestamp.self, forKey: .modification)
+        self.statusChange = try container.decodeIfPresent(FileTimestamp.self, forKey: .statusChange) ?? .zero
+        self.size = try container.decodeIfPresent(Int64.self, forKey: .size) ?? 0
+        self.flags = try container.decodeIfPresent(UInt32.self, forKey: .flags) ?? 0
     }
 
     /// Bytes actually occupied on disk, from `st_blocks`. Used as the fallback when the URL

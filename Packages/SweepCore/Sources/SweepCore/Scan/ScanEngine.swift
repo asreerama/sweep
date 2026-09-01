@@ -1,69 +1,67 @@
 import Foundation
 
-/// Cooperative cancellation shared between the scan thread and the stream's termination
-/// handler. Both sides are outside the actor, so the flag carries its own lock.
-final class ScanCancellationFlag: @unchecked Sendable {
-    private let lock = NSLock()
-    private var cancelled = false
-
-    var isCancelled: Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return cancelled
-    }
-
-    func cancel() {
-        lock.lock()
-        defer { lock.unlock() }
-        cancelled = true
-    }
-}
-
-/// Owns volume walks. One walk runs per call on a dedicated blocking thread, never on the
-/// cooperative pool; the actor itself only keeps bookkeeping so a scan can be cancelled by id
-/// or wholesale.
+/// Owns volume walks.
+///
+/// Walks run on a fixed pool of blocking threads, never on the cooperative pool and never one
+/// thread per call; events reach the consumer through a watermarked buffer that blocks the walk
+/// when the consumer falls behind. The actor itself only keeps bookkeeping, so a scan can be
+/// cancelled by id or wholesale.
 public actor ScanEngine {
+    /// Events a walk may run ahead of its consumer. Past this the walk thread parks.
+    public static let defaultEventWatermark = 256
+
     private let walker: any VolumeWalker
+    private let pool: ScanWorkerPool
+    private let eventWatermark: Int
     private var active: [UUID: ScanCancellationFlag] = [:]
 
     public init(walker: any VolumeWalker = FileManagerVolumeWalker()) {
+        self.init(walker: walker, eventWatermark: Self.defaultEventWatermark, pool: .shared)
+    }
+
+    init(walker: any VolumeWalker, eventWatermark: Int, pool: ScanWorkerPool) {
         self.walker = walker
+        self.pool = pool
+        self.eventWatermark = eventWatermark
     }
 
     public var activeScanCount: Int { active.count }
 
     /// Stream of scan events. Terminating the stream (breaking out of the `for await`, or
     /// cancelling the enclosing task) cancels the walk at the next entry.
+    ///
+    /// The stream is demand-driven: one element is produced per consumer pull, and the walk is
+    /// allowed at most ``defaultEventWatermark`` events of slack before it blocks.
     public func scan(_ request: ScanRequest) -> AsyncThrowingStream<ScanEvent, any Error> {
         let scanID = UUID()
         let flag = ScanCancellationFlag()
+        let buffer = ScanEventBuffer(watermark: eventWatermark)
         active[scanID] = flag
 
         let walker = self.walker
-        let (stream, continuation) = AsyncThrowingStream<ScanEvent, any Error>.makeStream(
-            bufferingPolicy: .unbounded
-        )
-
-        continuation.onTermination = { [weak self] termination in
-            if case .cancelled = termination { flag.cancel() }
+        let lifetime = ScanLifetime(flag: flag, buffer: buffer) { [weak self] in
             Task { await self?.forget(scanID) }
         }
 
-        let thread = Thread {
+        pool.submit {
             Self.performWalk(
                 scanID: scanID,
                 request: request,
                 walker: walker,
                 flag: flag,
-                continuation: continuation
+                buffer: buffer
             )
         }
-        thread.name = "com.sweep.scan.\(scanID.uuidString)"
-        thread.stackSize = 4 << 20
-        thread.qualityOfService = .utility
-        thread.start()
 
-        return stream
+        return AsyncThrowingStream { () async throws -> ScanEvent? in
+            if Task.isCancelled {
+                lifetime.cancel()
+                return nil
+            }
+            let event = try await buffer.next()
+            if event == nil { lifetime.cancel() }
+            return event
+        }
     }
 
     /// Convenience for callers that want the whole result: collects the stream.
@@ -95,18 +93,18 @@ public actor ScanEngine {
         active[scanID] = nil
     }
 
-    // MARK: - Walk body (runs on the dedicated thread)
+    // MARK: - Walk body (runs on a pool thread)
 
     private static func performWalk(
         scanID: UUID,
         request: ScanRequest,
         walker: any VolumeWalker,
         flag: ScanCancellationFlag,
-        continuation: AsyncThrowingStream<ScanEvent, any Error>.Continuation
+        buffer: ScanEventBuffer
     ) {
         let start = Date()
         guard !request.roots.isEmpty else {
-            continuation.finish(throwing: ScanError.noRoots)
+            buffer.finish(throwing: ScanError.noRoots)
             return
         }
 
@@ -124,11 +122,11 @@ public actor ScanEngine {
             do {
                 boundary = try VolumeIdentity.read(at: root)
             } catch {
-                continuation.finish(throwing: ScanError.rootUnavailable(root, String(describing: error)))
+                buffer.finish(throwing: ScanError.rootUnavailable(root, String(describing: error)))
                 return
             }
 
-            continuation.yield(.started(scanID: scanID, root: root))
+            guard buffer.push(.started(scanID: scanID, root: root)) else { return }
 
             let options = WalkOptions(
                 boundary: boundary,
@@ -163,38 +161,41 @@ public actor ScanEngine {
                         totals.otherCount += 1
                     }
 
-                    continuation.yield(.candidate(ScanCandidate(entry: entry, ruleID: request.ruleID)))
+                    // Blocks here when the consumer is behind, and returns false once it is gone.
+                    guard buffer.push(.candidate(ScanCandidate(entry: entry, ruleID: request.ruleID))) else {
+                        return .stop
+                    }
 
                     if itemsSeen - lastProgressAt >= request.progressInterval {
                         lastProgressAt = itemsSeen
-                        continuation.yield(.progress(ScanProgress(
+                        guard buffer.push(.progress(ScanProgress(
                             itemsSeen: itemsSeen,
                             allocatedBytes: totals.allocatedBytes,
                             currentPath: entry.url.path
-                        )))
+                        ))) else { return .stop }
                     }
                     return .continue
                 }
                 issues.append(contentsOf: summary.issues)
             } catch {
-                continuation.finish(throwing: error)
+                buffer.finish(throwing: error)
                 return
             }
         }
 
-        continuation.yield(.progress(ScanProgress(
+        guard buffer.push(.progress(ScanProgress(
             itemsSeen: itemsSeen,
             allocatedBytes: totals.allocatedBytes,
             currentPath: nil
-        )))
-        continuation.yield(.finished(ScanSummary(
+        ))) else { return }
+        guard buffer.push(.finished(ScanSummary(
             scanID: scanID,
             totals: totals,
             issues: issues,
             duration: Date().timeIntervalSince(start),
             cancelled: flag.isCancelled
-        )))
-        continuation.finish()
+        ))) else { return }
+        buffer.finish()
     }
 }
 

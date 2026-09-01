@@ -9,7 +9,7 @@ final class WALJournalTests: XCTestCase {
         let operationID = UUID()
         let items = [Self.item(path: "/fixture/a"), Self.item(path: "/fixture/b")]
 
-        let journal = try WALJournal(url: url)
+        let journal = try await WALJournal(url: url)
         try await journal.appendPlanned(operationID: operationID, planVersion: 1, items: items)
         try await journal.appendStarted(operationID: operationID)
         for item in items {
@@ -19,7 +19,7 @@ final class WALJournalTests: XCTestCase {
         await journal.close()
 
         // Fresh instance = process restart. Recovery runs during init.
-        let reopened = try WALJournal(url: url)
+        let reopened = try await WALJournal(url: url)
         let interrupted = await reopened.interrupted
         XCTAssertTrue(interrupted.isEmpty)
         let state = try await reopened.state(of: operationID)
@@ -32,14 +32,14 @@ final class WALJournalTests: XCTestCase {
         let operationID = UUID()
         let items = [Self.item(path: "/fixture/a"), Self.item(path: "/fixture/b")]
 
-        let journal = try WALJournal(url: url)
+        let journal = try await WALJournal(url: url)
         try await journal.appendPlanned(operationID: operationID, planVersion: 1, items: items)
         try await journal.appendStarted(operationID: operationID)
         try await journal.appendItemResult(operationID: operationID, item: items[0], outcome: .succeeded)
         // Process dies here: no committed record is ever written.
         await journal.close()
 
-        let recovered = try WALJournal(url: url)
+        let recovered = try await WALJournal(url: url)
         let interrupted = await recovered.interrupted
         XCTAssertEqual(interrupted.count, 1)
 
@@ -57,7 +57,7 @@ final class WALJournalTests: XCTestCase {
         let url = tree.url("ops.jsonl")
         let operationID = UUID()
 
-        let journal = try WALJournal(url: url)
+        let journal = try await WALJournal(url: url)
         try await journal.appendPlanned(
             operationID: operationID,
             planVersion: 1,
@@ -65,7 +65,7 @@ final class WALJournalTests: XCTestCase {
         )
         await journal.close()
 
-        let recovered = try WALJournal(url: url)
+        let recovered = try await WALJournal(url: url)
         let interrupted = await recovered.interrupted
         XCTAssertEqual(interrupted.first?.state, .planned)
         XCTAssertEqual(interrupted.first?.unresolvedItems.count, 1)
@@ -77,7 +77,7 @@ final class WALJournalTests: XCTestCase {
         let dead = UUID()
         let live = UUID()
 
-        let journal = try WALJournal(url: url)
+        let journal = try await WALJournal(url: url)
         try await journal.appendPlanned(operationID: dead, planVersion: 1, items: [Self.item(path: "/fixture/a")])
         try await journal.appendStarted(operationID: dead)
         try await journal.appendPlanned(operationID: live, planVersion: 1, items: [Self.item(path: "/fixture/b")])
@@ -93,7 +93,7 @@ final class WALJournalTests: XCTestCase {
         let url = tree.url("ops.jsonl")
         let operationID = UUID()
 
-        let journal = try WALJournal(url: url)
+        let journal = try await WALJournal(url: url)
         try await journal.appendPlanned(operationID: operationID, planVersion: 1, items: [Self.item(path: "/fixture/a")])
         try await journal.appendStarted(operationID: operationID)
         await journal.close()
@@ -104,7 +104,7 @@ final class WALJournalTests: XCTestCase {
         try handle.write(contentsOf: Data(#"{"version":1,"kind":"itemRes"#.utf8))
         try handle.close()
 
-        let recovered = try WALJournal(url: url)
+        let recovered = try await WALJournal(url: url)
         let tornTail = await recovered.recoveredTornTail
         XCTAssertTrue(tornTail)
         let records = try await recovered.records()
@@ -117,7 +117,7 @@ final class WALJournalTests: XCTestCase {
         let tree = try TempTree("wal-corrupt")
         let url = tree.url("ops.jsonl")
 
-        let journal = try WALJournal(url: url)
+        let journal = try await WALJournal(url: url)
         try await journal.appendPlanned(operationID: UUID(), planVersion: 1, items: [Self.item(path: "/fixture/a")])
         await journal.close()
 
@@ -128,8 +128,11 @@ final class WALJournalTests: XCTestCase {
         try handle.write(contentsOf: Data("\n".utf8))
         try handle.close()
 
-        XCTAssertThrowsError(try WALJournal(url: url)) { error in
-            guard case .corruptRecord(let line, _) = error as? JournalError else {
+        do {
+            _ = try await WALJournal(url: url)
+            XCTFail("expected corruptRecord")
+        } catch let error as JournalError {
+            guard case .corruptRecord(let line, _) = error else {
                 return XCTFail("expected corruptRecord, got \(error)")
             }
             XCTAssertEqual(line, 2)
@@ -144,8 +147,11 @@ final class WALJournalTests: XCTestCase {
             contents: #"{"version":99,"kind":"started","operationID":"\#(UUID().uuidString)","recordedAt":"2026-01-01T00:00:00Z"}"# + "\n"
         )
 
-        XCTAssertThrowsError(try WALJournal(url: url)) { error in
-            guard case .unsupportedRecordVersion(_, let version) = error as? JournalError else {
+        do {
+            _ = try await WALJournal(url: url)
+            XCTFail("expected unsupportedRecordVersion")
+        } catch let error as JournalError {
+            guard case .unsupportedRecordVersion(_, let version) = error else {
                 return XCTFail("expected unsupportedRecordVersion, got \(error)")
             }
             XCTAssertEqual(version, 99)
@@ -168,7 +174,7 @@ final class WALJournalTests: XCTestCase {
         let trashURL = URL(fileURLWithPath: "/Users/tester/.Trash/payload.bin")
         let operationID = UUID()
 
-        let journal = try WALJournal(url: url)
+        let journal = try await WALJournal(url: url)
         try await journal.appendPlanned(operationID: operationID, planVersion: 1, items: [item])
         try await journal.appendItemResult(
             operationID: operationID,
@@ -179,7 +185,7 @@ final class WALJournalTests: XCTestCase {
         )
         await journal.close()
 
-        let reopened = try WALJournal(url: url)
+        let reopened = try await WALJournal(url: url)
         let records = try await reopened.records()
         XCTAssertEqual(records.count, 2)
         XCTAssertEqual(records[0].items?.first?.identity, identity)
@@ -193,7 +199,7 @@ final class WALJournalTests: XCTestCase {
         let url = tree.url("ops.jsonl")
         let operationID = UUID()
 
-        let journal = try WALJournal(url: url)
+        let journal = try await WALJournal(url: url)
         try await journal.appendPlanned(operationID: operationID, planVersion: 1, items: [Self.item(path: "/fixture/a")])
         try await journal.appendCommitted(operationID: operationID)
         await journal.close()
@@ -209,7 +215,7 @@ final class WALJournalTests: XCTestCase {
 
     func testWritingToAClosedJournalThrows() async throws {
         let tree = try TempTree("wal-closed")
-        let journal = try WALJournal(url: tree.url("ops.jsonl"))
+        let journal = try await WALJournal(url: tree.url("ops.jsonl"))
         await journal.close()
 
         do {
@@ -218,6 +224,104 @@ final class WALJournalTests: XCTestCase {
         } catch let error as JournalError {
             guard case .closed = error else { return XCTFail("unexpected \(error)") }
         }
+    }
+
+    // MARK: - Review finding #6: a torn tail is removed, not merely skipped
+
+    func testTornTailIsTruncatedSoTheNextAppendIsReadable() async throws {
+        let tree = try TempTree("wal-torn-repair")
+        let url = tree.url("ops.jsonl")
+        let first = UUID()
+        let second = UUID()
+
+        let journal = try await WALJournal(url: url)
+        try await journal.appendPlanned(operationID: first, planVersion: 1, items: [Self.item(path: "/fixture/a")])
+        try await journal.appendStarted(operationID: first)
+        await journal.close()
+
+        // Crash mid-append: a partial line with no trailing newline.
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data(#"{"version":1,"kind":"itemRes"#.utf8))
+        try handle.close()
+        let tornLength = try Data(contentsOf: url).count
+
+        let recovered = try await WALJournal(url: url)
+        let sawTornTail = await recovered.recoveredTornTail
+        XCTAssertTrue(sawTornTail)
+        let repairedLength = try Data(contentsOf: url).count
+        XCTAssertLessThan(repairedLength, tornLength, "the fragment is cut off the file, not just ignored")
+
+        // Without the truncation the next record is concatenated onto the fragment and becomes
+        // fatal mid-file corruption on the following open.
+        try await recovered.appendPlanned(operationID: second, planVersion: 1, items: [Self.item(path: "/fixture/b")])
+        try await recovered.appendCommitted(operationID: second)
+        await recovered.close()
+
+        let reopened = try await WALJournal(url: url)
+        let records = try await reopened.records()
+        XCTAssertEqual(records.count, 4)
+        let stillTorn = await reopened.recoveredTornTail
+        XCTAssertFalse(stillTorn, "the repair is durable, so the tail is clean now")
+        let interrupted = await reopened.interrupted
+        XCTAssertEqual(interrupted.map(\.operationID), [first])
+    }
+
+    // MARK: - Review finding #7: exactly one owner at a time
+
+    func testASecondJournalOnTheSameFileIsRefused() async throws {
+        let tree = try TempTree("wal-lock")
+        let url = tree.url("ops.jsonl")
+        let first = try await WALJournal(url: url)
+
+        do {
+            _ = try await WALJournal(url: url)
+            XCTFail("two owners can interleave records and lose them")
+        } catch let error as JournalError {
+            guard case .locked = error else { return XCTFail("expected locked, got \(error)") }
+        }
+
+        // The lock is released with the descriptor, so a clean handover still works.
+        await first.close()
+        let second = try await WALJournal(url: url)
+        try await second.appendStarted(operationID: UUID())
+        await second.close()
+    }
+
+    // MARK: - Review finding #8: the journal's directory entry is durable before any mutation
+
+    func testCreatingTheJournalSyncsItsDirectoryAndEveryCreatedAncestor() async throws {
+        let tree = try TempTree("wal-durable")
+        let url = tree.url("a/b/c/ops.jsonl")
+
+        let journal = try await WALJournal(url: url)
+        let synced = await journal.syncedDirectories
+
+        XCTAssertTrue(synced.contains(url.deletingLastPathComponent().path), "the containing directory is synced")
+        for ancestor in ["a/b/c", "a/b", "a"] {
+            XCTAssertTrue(
+                synced.contains(tree.url(ancestor).path),
+                "\(ancestor) was created by this open and must be synced too"
+            )
+        }
+        XCTAssertEqual(
+            synced.first,
+            url.deletingLastPathComponent().path,
+            "deepest first: an entry is only durable once the directory holding it is"
+        )
+        await journal.close()
+    }
+
+    func testReopeningAnExistingJournalStillSyncsItsDirectory() async throws {
+        let tree = try TempTree("wal-durable-reopen")
+        let url = tree.url("ops.jsonl")
+        let first = try await WALJournal(url: url)
+        await first.close()
+
+        let second = try await WALJournal(url: url)
+        let synced = await second.syncedDirectories
+        XCTAssertEqual(synced, [url.deletingLastPathComponent().path])
+        await second.close()
     }
 
     static func item(path: String) -> JournalItem {

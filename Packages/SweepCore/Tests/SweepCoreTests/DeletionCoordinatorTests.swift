@@ -1,3 +1,4 @@
+import Darwin
 import XCTest
 @testable import SweepCore
 import SweepPolicy
@@ -8,6 +9,7 @@ final class RecordingExecutor: FileMutating, @unchecked Sendable {
     private let lock = NSLock()
     private(set) var trashed: [URL] = []
     private(set) var deleted: [URL] = []
+    private(set) var requests: [MutationRequest] = []
     var trashResult: URL?
     var errorToThrow: (any Error)?
 
@@ -16,19 +18,21 @@ final class RecordingExecutor: FileMutating, @unchecked Sendable {
         self.errorToThrow = errorToThrow
     }
 
-    func trash(_ url: URL) throws -> URL? {
-        lock.lock()
-        defer { lock.unlock() }
-        if let errorToThrow { throw errorToThrow }
-        trashed.append(url)
-        return trashResult
+    func trash(_ request: MutationRequest) async throws -> URL? {
+        try lock.withLock {
+            requests.append(request)
+            if let errorToThrow { throw errorToThrow }
+            trashed.append(request.url)
+            return trashResult
+        }
     }
 
-    func delete(_ url: URL) throws {
-        lock.lock()
-        defer { lock.unlock() }
-        if let errorToThrow { throw errorToThrow }
-        deleted.append(url)
+    func delete(_ request: MutationRequest) async throws {
+        try lock.withLock {
+            requests.append(request)
+            if let errorToThrow { throw errorToThrow }
+            deleted.append(request.url)
+        }
     }
 }
 
@@ -41,8 +45,8 @@ final class DeletionCoordinatorTests: XCTestCase {
         let file = try fixture.write("caches/app/blob.bin", bytes: 2048)
         let journalURL = fixture.url("journal.jsonl")
 
-        let journal = try WALJournal(url: journalURL)
-        let coordinator = DeletionCoordinator(mode: .fixtureOnly(root: fixture.root), journal: journal)
+        let journal = try await WALJournal(url: journalURL)
+        let coordinator = try DeletionCoordinator(mode: .fixtureOnly(root: fixture.root), journal: journal)
         let plan = try Self.plan(for: [file], action: .delete, tier: .safe)
 
         let report = try await coordinator.execute(plan)
@@ -65,7 +69,7 @@ final class DeletionCoordinatorTests: XCTestCase {
         let trashURL = URL(fileURLWithPath: "/Users/tester/.Trash/doc.bin")
         let executor = RecordingExecutor(trashResult: trashURL)
 
-        let journal = try WALJournal(url: fixture.url("journal.jsonl"))
+        let journal = try await WALJournal(url: fixture.url("journal.jsonl"))
         let coordinator = DeletionCoordinator(
             mode: .fixtureOnly(root: fixture.root),
             journal: journal,
@@ -100,16 +104,49 @@ final class DeletionCoordinatorTests: XCTestCase {
             throw XCTSkip("FileManager.trashItem unavailable here: \(error.localizedDescription)")
         }
 
-        let journal = try WALJournal(url: fixture.url("journal.jsonl"))
-        let coordinator = DeletionCoordinator(mode: .fixtureOnly(root: fixture.root), journal: journal)
+        let journal = try await WALJournal(url: fixture.url("journal.jsonl"))
+        let coordinator = try DeletionCoordinator(mode: .fixtureOnly(root: fixture.root), journal: journal)
         let report = try await coordinator.execute(try Self.plan(for: [file], action: .trash, tier: .safe))
 
-        XCTAssertEqual(report.succeededCount, 1)
+        XCTAssertEqual(report.succeededCount, 1, "\(report.results)")
         XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
 
         let landed = try XCTUnwrap(report.results.first?.trashURL)
         XCTAssertTrue(FileManager.default.fileExists(atPath: landed.path))
         try? FileManager.default.removeItem(at: landed)
+    }
+
+    /// Review finding #2: `trashItem` only ever sees a pathname inside a quarantine directory
+    /// this process created and holds open, never the item's own pathname.
+    func testTrashStagesThroughAnIdentityPinnedQuarantine() async throws {
+        let fixture = try TempTree("del-quarantine")
+        let file = try fixture.write("caches/quarantine-\(UUID().uuidString).bin", bytes: 128)
+
+        var probe: NSURL?
+        let probeFile = try fixture.write("probe.bin", bytes: 1)
+        do {
+            try FileManager.default.trashItem(at: probeFile, resultingItemURL: &probe)
+            if let probe = probe as URL? { try? FileManager.default.removeItem(at: probe) }
+        } catch {
+            throw XCTSkip("FileManager.trashItem unavailable here: \(error.localizedDescription)")
+        }
+
+        let journal = try await WALJournal(url: fixture.url("journal.jsonl"))
+        let coordinator = try DeletionCoordinator(mode: .fixtureOnly(root: fixture.root), journal: journal)
+        let report = try await coordinator.execute(try Self.plan(for: [file], action: .trash, tier: .safe))
+        XCTAssertEqual(report.succeededCount, 1, "\(report.results)")
+
+        let quarantine = fixture.root.appending(path: FileDescriptorExecutor.quarantineDirectoryName)
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: quarantine.path),
+            "the staging directory is created inside the root, on the same volume"
+        )
+        let leftovers = try FileManager.default.contentsOfDirectory(atPath: quarantine.path)
+        XCTAssertTrue(leftovers.isEmpty, "the per-item staging slot is cleaned up after the trash succeeds")
+
+        if let landed = report.results.first?.trashURL {
+            try? FileManager.default.removeItem(at: landed)
+        }
     }
 
     // MARK: - Identity revalidation
@@ -127,7 +164,7 @@ final class DeletionCoordinatorTests: XCTestCase {
         XCTAssertNotEqual(scannedInode, replacedInode, "precondition: the replacement has a new inode")
 
         let executor = RecordingExecutor()
-        let journal = try WALJournal(url: fixture.url("journal.jsonl"))
+        let journal = try await WALJournal(url: fixture.url("journal.jsonl"))
         let coordinator = DeletionCoordinator(
             mode: .fixtureOnly(root: fixture.root),
             journal: journal,
@@ -158,7 +195,7 @@ final class DeletionCoordinatorTests: XCTestCase {
         XCTAssertEqual(after.inode, plan.items[0].identity.inode, "precondition: same inode")
 
         let executor = RecordingExecutor()
-        let journal = try WALJournal(url: fixture.url("journal.jsonl"))
+        let journal = try await WALJournal(url: fixture.url("journal.jsonl"))
         let coordinator = DeletionCoordinator(
             mode: .fixtureOnly(root: fixture.root),
             journal: journal,
@@ -174,14 +211,57 @@ final class DeletionCoordinatorTests: XCTestCase {
         XCTAssertTrue(executor.deleted.isEmpty)
     }
 
+    /// Review finding #5: mtime is settable, so an attacker rewrites the file, puts mtime back
+    /// and the old identity check waves it through. Nothing can put `st_ctimespec` back.
+    func testInPlaceRewriteWithRestoredMtimeIsStillRefused() async throws {
+        let fixture = try TempTree("del-ctime")
+        let file = try fixture.write("caches/forged.bin", bytes: 128)
+        // `utimes` has microsecond granularity, so the scan-time mtime is pinned to a value it
+        // can reproduce exactly. Otherwise the forgery would fail on rounding rather than on the
+        // check under test.
+        let pinned = FileTimestamp(seconds: 1_700_000_000, nanoseconds: 0)
+        try Self.restoreModificationTime(of: file, to: pinned)
+
+        let plan = try Self.plan(for: [file], action: .delete, tier: .safe)
+        let original = plan.items[0].identity
+        XCTAssertEqual(original.modification, pinned)
+
+        // Same inode, same length, same link count, and mtime restored to the byte.
+        let handle = try FileHandle(forWritingTo: file)
+        try handle.seek(toOffset: 0)
+        try handle.write(contentsOf: Data(repeating: 0x5A, count: 128))
+        try handle.close()
+        try Self.restoreModificationTime(of: file, to: original.modification)
+
+        let after = try FileIdentity.read(at: file)
+        XCTAssertEqual(after.inode, original.inode, "precondition: same inode")
+        XCTAssertEqual(after.modification, original.modification, "precondition: mtime was forged back")
+        XCTAssertEqual(after.size, original.size, "precondition: the rewrite preserved the length")
+        XCTAssertNotEqual(after.statusChange, original.statusChange, "precondition: ctime moved")
+
+        let executor = RecordingExecutor()
+        let journal = try await WALJournal(url: fixture.url("journal.jsonl"))
+        let coordinator = DeletionCoordinator(
+            mode: .fixtureOnly(root: fixture.root),
+            journal: journal,
+            additionalDenials: .none,
+            executor: executor
+        )
+
+        let report = try await coordinator.execute(plan)
+        XCTAssertEqual(report.changedCount, 1)
+        XCTAssertEqual(report.results.first?.failureReason, .identityChanged)
+        XCTAssertTrue(executor.deleted.isEmpty)
+    }
+
     func testVanishedItemIsSkippedNotFailed() async throws {
         let fixture = try TempTree("del-vanished")
         let file = try fixture.write("caches/ghost.bin", bytes: 64)
         let plan = try Self.plan(for: [file], action: .delete, tier: .safe)
         try FileManager.default.removeItem(at: file)
 
-        let journal = try WALJournal(url: fixture.url("journal.jsonl"))
-        let coordinator = DeletionCoordinator(mode: .fixtureOnly(root: fixture.root), journal: journal)
+        let journal = try await WALJournal(url: fixture.url("journal.jsonl"))
+        let coordinator = try DeletionCoordinator(mode: .fixtureOnly(root: fixture.root), journal: journal)
         let report = try await coordinator.execute(plan)
 
         XCTAssertEqual(report.skippedCount, 1)
@@ -197,8 +277,8 @@ final class DeletionCoordinatorTests: XCTestCase {
         try FileManager.default.removeItem(at: swapped)
         try Data(repeating: 0x43, count: 100).write(to: swapped)
 
-        let journal = try WALJournal(url: fixture.url("journal.jsonl"))
-        let coordinator = DeletionCoordinator(mode: .fixtureOnly(root: fixture.root), journal: journal)
+        let journal = try await WALJournal(url: fixture.url("journal.jsonl"))
+        let coordinator = try DeletionCoordinator(mode: .fixtureOnly(root: fixture.root), journal: journal)
         let report = try await coordinator.execute(plan)
 
         XCTAssertEqual(report.succeededCount, 1)
@@ -206,6 +286,69 @@ final class DeletionCoordinatorTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: good.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: swapped.path))
         XCTAssertEqual(report.plannedBytesRemoved, plan.items[0].allocatedSize)
+    }
+
+    // MARK: - Review finding #3: directories are emptied bottom-up, never removed recursively
+
+    func testPlannedDirectoryIsRemovedLeafByLeaf() async throws {
+        let fixture = try TempTree("del-dir")
+        try fixture.write("caches/tree/a.bin", bytes: 32)
+        try fixture.write("caches/tree/sub/b.bin", bytes: 32)
+        try fixture.write("caches/tree/sub/deeper/c.bin", bytes: 32)
+        let directory = fixture.url("caches/tree")
+
+        let journal = try await WALJournal(url: fixture.url("journal.jsonl"))
+        let coordinator = try DeletionCoordinator(mode: .fixtureOnly(root: fixture.root), journal: journal)
+        let report = try await coordinator.execute(try Self.plan(for: [directory], action: .delete, tier: .safe))
+
+        XCTAssertEqual(report.succeededCount, 1, "\(report.results)")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.url("caches").path), "only the plan's directory goes")
+    }
+
+    func testDirectoryDeletionUnlinksASymlinkedDescendantWithoutFollowingIt() async throws {
+        let fixture = try TempTree("del-dir-symlink")
+        let outside = try TempTree("del-dir-symlink-outside")
+        let precious = try outside.write("precious.bin", bytes: 64)
+        try fixture.write("caches/tree/a.bin", bytes: 32)
+        try FileManager.default.createSymbolicLink(
+            at: fixture.url("caches/tree/escape"),
+            withDestinationURL: outside.root
+        )
+        let directory = fixture.url("caches/tree")
+
+        let journal = try await WALJournal(url: fixture.url("journal.jsonl"))
+        let coordinator = try DeletionCoordinator(mode: .fixtureOnly(root: fixture.root), journal: journal)
+        let report = try await coordinator.execute(try Self.plan(for: [directory], action: .delete, tier: .safe))
+
+        XCTAssertEqual(report.succeededCount, 1, "\(report.results)")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: precious.path),
+            "the symlink was unlinked; what it pointed at is not ours to touch"
+        )
+    }
+
+    /// A recursive `removeItem` happily descends forever. The bottom-up walk has a ceiling, so a
+    /// pathological tree fails the *item* instead of running unbounded recursion over unvalidated
+    /// descendants.
+    func testDirectoryDeletionIsDepthLimited() async throws {
+        let fixture = try TempTree("del-dir-deep")
+        let depth = FileDescriptorExecutor.maximumTreeDepth + 6
+        var relative = "caches/tree"
+        for index in 0..<depth {
+            relative += "/d\(index)"
+        }
+        try fixture.write(relative + "/bottom.bin", bytes: 8)
+        let directory = fixture.url("caches/tree")
+
+        let journal = try await WALJournal(url: fixture.url("journal.jsonl"))
+        let coordinator = try DeletionCoordinator(mode: .fixtureOnly(root: fixture.root), journal: journal)
+        let report = try await coordinator.execute(try Self.plan(for: [directory], action: .delete, tier: .safe))
+
+        XCTAssertEqual(report.succeededCount, 0)
+        XCTAssertEqual(report.failedCount, 1)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: directory.path), "the item failed; the tree is still there")
     }
 
     // MARK: - Fixture-only confinement
@@ -216,7 +359,7 @@ final class DeletionCoordinatorTests: XCTestCase {
         let victim = try outside.write("precious.bin", bytes: 64)
 
         let journalURL = fixture.url("journal.jsonl")
-        let journal = try WALJournal(url: journalURL)
+        let journal = try await WALJournal(url: journalURL)
         let executor = RecordingExecutor()
         let coordinator = DeletionCoordinator(
             mode: .fixtureOnly(root: fixture.root),
@@ -245,8 +388,8 @@ final class DeletionCoordinatorTests: XCTestCase {
         let inside = try fixture.write("caches/inside.bin", bytes: 64)
         let victim = try outside.write("precious.bin", bytes: 64)
 
-        let journal = try WALJournal(url: fixture.url("journal.jsonl"))
-        let coordinator = DeletionCoordinator(mode: .fixtureOnly(root: fixture.root), journal: journal)
+        let journal = try await WALJournal(url: fixture.url("journal.jsonl"))
+        let coordinator = try DeletionCoordinator(mode: .fixtureOnly(root: fixture.root), journal: journal)
         let plan = try Self.plan(for: [inside, victim], action: .delete, tier: .safe)
 
         await XCTAssertThrowsErrorAsync(try await coordinator.execute(plan))
@@ -271,8 +414,8 @@ final class DeletionCoordinatorTests: XCTestCase {
 
         XCTAssertFalse(DeletionCoordinator.isStrictlyContained(traversal, in: fixture.root))
 
-        let journal = try WALJournal(url: fixture.url("journal.jsonl"))
-        let coordinator = DeletionCoordinator(mode: .fixtureOnly(root: fixture.root), journal: journal)
+        let journal = try await WALJournal(url: fixture.url("journal.jsonl"))
+        let coordinator = try DeletionCoordinator(mode: .fixtureOnly(root: fixture.root), journal: journal)
         let plan = DeletionPlan(items: [
             DeletionItem(
                 url: traversal,
@@ -290,9 +433,9 @@ final class DeletionCoordinatorTests: XCTestCase {
     func testLiveModeIsGatedShut() async throws {
         let fixture = try TempTree("del-live")
         let file = try fixture.write("caches/x.bin", bytes: 16)
-        let journal = try WALJournal(url: fixture.url("journal.jsonl"))
+        let journal = try await WALJournal(url: fixture.url("journal.jsonl"))
         // The token is internal; outside this package `.live` cannot be constructed at all.
-        let coordinator = DeletionCoordinator(mode: .live(LiveExecutionToken()), journal: journal)
+        let coordinator = try DeletionCoordinator(mode: .live(LiveExecutionToken()), journal: journal)
 
         do {
             _ = try await coordinator.execute(try Self.plan(for: [file], action: .delete, tier: .safe))
@@ -312,7 +455,7 @@ final class DeletionCoordinatorTests: XCTestCase {
         let deniedPath = denied.path
 
         let executor = RecordingExecutor()
-        let journal = try WALJournal(url: fixture.url("journal.jsonl"))
+        let journal = try await WALJournal(url: fixture.url("journal.jsonl"))
         let coordinator = DeletionCoordinator(
             mode: .fixtureOnly(root: fixture.root),
             journal: journal,
@@ -342,8 +485,8 @@ final class DeletionCoordinatorTests: XCTestCase {
         // Fixture confinement refuses it first; the denylist is the second line of defense,
         // checked independently below.
         let fixture = try TempTree("del-policy")
-        let journal = try WALJournal(url: fixture.url("journal.jsonl"))
-        let coordinator = DeletionCoordinator(mode: .fixtureOnly(root: fixture.root), journal: journal)
+        let journal = try await WALJournal(url: fixture.url("journal.jsonl"))
+        let coordinator = try DeletionCoordinator(mode: .fixtureOnly(root: fixture.root), journal: journal)
         let plan = DeletionPlan(items: [
             DeletionItem(
                 url: documents,
@@ -367,8 +510,8 @@ final class DeletionCoordinatorTests: XCTestCase {
     func testDirectDeleteOutsideSafeTierIsRefused() async throws {
         let fixture = try TempTree("del-tier")
         let file = try fixture.write("caches/expert.bin", bytes: 64)
-        let journal = try WALJournal(url: fixture.url("journal.jsonl"))
-        let coordinator = DeletionCoordinator(mode: .fixtureOnly(root: fixture.root), journal: journal)
+        let journal = try await WALJournal(url: fixture.url("journal.jsonl"))
+        let coordinator = try DeletionCoordinator(mode: .fixtureOnly(root: fixture.root), journal: journal)
         let plan = try Self.plan(for: [file], action: .delete, tier: .expert)
 
         do {
@@ -383,8 +526,8 @@ final class DeletionCoordinatorTests: XCTestCase {
     func testUnsupportedPlanVersionIsRefused() async throws {
         let fixture = try TempTree("del-version")
         let file = try fixture.write("caches/x.bin", bytes: 16)
-        let journal = try WALJournal(url: fixture.url("journal.jsonl"))
-        let coordinator = DeletionCoordinator(mode: .fixtureOnly(root: fixture.root), journal: journal)
+        let journal = try await WALJournal(url: fixture.url("journal.jsonl"))
+        let coordinator = try DeletionCoordinator(mode: .fixtureOnly(root: fixture.root), journal: journal)
         let items = try Self.plan(for: [file], action: .delete, tier: .safe).items
         let plan = DeletionPlan(version: 99, items: items)
 
@@ -400,8 +543,8 @@ final class DeletionCoordinatorTests: XCTestCase {
 
     func testEmptyPlanIsRefused() async throws {
         let fixture = try TempTree("del-empty")
-        let journal = try WALJournal(url: fixture.url("journal.jsonl"))
-        let coordinator = DeletionCoordinator(mode: .fixtureOnly(root: fixture.root), journal: journal)
+        let journal = try await WALJournal(url: fixture.url("journal.jsonl"))
+        let coordinator = try DeletionCoordinator(mode: .fixtureOnly(root: fixture.root), journal: journal)
         await XCTAssertThrowsErrorAsync(try await coordinator.execute(DeletionPlan(items: [])))
     }
 
@@ -412,7 +555,7 @@ final class DeletionCoordinatorTests: XCTestCase {
         let file = try fixture.write("caches/x.bin", bytes: 64)
         let executor = RecordingExecutor()
 
-        let journal = try WALJournal(url: fixture.url("journal.jsonl"))
+        let journal = try await WALJournal(url: fixture.url("journal.jsonl"))
         await journal.close()
 
         let coordinator = DeletionCoordinator(
@@ -441,7 +584,7 @@ final class DeletionCoordinatorTests: XCTestCase {
             code: NSFileWriteNoPermissionError
         ))
 
-        let journal = try WALJournal(url: fixture.url("journal.jsonl"))
+        let journal = try await WALJournal(url: fixture.url("journal.jsonl"))
         let coordinator = DeletionCoordinator(
             mode: .fixtureOnly(root: fixture.root),
             journal: journal,
@@ -467,6 +610,7 @@ final class DeletionCoordinatorTests: XCTestCase {
             DeletionItem(
                 url: url,
                 identity: try FileIdentity.read(at: url),
+                parentIdentity: try FileIdentity.read(at: url.deletingLastPathComponent()),
                 action: action,
                 tier: tier,
                 allocatedSize: Int64((try? url.resourceValues(forKeys: [.totalFileAllocatedSizeKey]).totalFileAllocatedSize) ?? 0),
@@ -474,6 +618,18 @@ final class DeletionCoordinatorTests: XCTestCase {
             )
         }
         return DeletionPlan(operationID: operationID, items: items)
+    }
+
+    /// `utimes(2)`: sets mtime to anything a caller likes, which is exactly why mtime alone was
+    /// never proof that a file is unchanged.
+    static func restoreModificationTime(of url: URL, to timestamp: FileTimestamp) throws {
+        var times = [
+            timeval(tv_sec: Int(timestamp.seconds), tv_usec: Int32(timestamp.nanoseconds / 1000)),
+            timeval(tv_sec: Int(timestamp.seconds), tv_usec: Int32(timestamp.nanoseconds / 1000)),
+        ]
+        guard url.path.withCString({ utimes($0, &times) }) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
     }
 }
 

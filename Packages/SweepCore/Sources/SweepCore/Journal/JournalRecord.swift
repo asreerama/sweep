@@ -28,6 +28,10 @@ public enum ItemFailureReason: String, Sendable, Codable, CaseIterable {
 public struct JournalItem: Sendable, Equatable, Codable {
     public let path: String
     public let identity: FileIdentity
+    /// Scan-time identity of the containing directory. Recorded so recovery can tell "the file
+    /// we planned" from "a file with that name in a directory that has since been replaced".
+    /// Optional, so a journal written before this field existed still replays.
+    public let parentIdentity: FileIdentity?
     public let action: DeletionAction
     public let tier: Tier
     public let allocatedSize: Int64
@@ -36,6 +40,7 @@ public struct JournalItem: Sendable, Equatable, Codable {
     public init(
         path: String,
         identity: FileIdentity,
+        parentIdentity: FileIdentity? = nil,
         action: DeletionAction,
         tier: Tier,
         allocatedSize: Int64,
@@ -43,6 +48,7 @@ public struct JournalItem: Sendable, Equatable, Codable {
     ) {
         self.path = path
         self.identity = identity
+        self.parentIdentity = parentIdentity
         self.action = action
         self.tier = tier
         self.allocatedSize = allocatedSize
