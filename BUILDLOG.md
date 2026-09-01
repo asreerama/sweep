@@ -7,10 +7,13 @@ Sonnet agents + Fable review + Codex (raw `codex exec`, plugin wrapper broken) f
 
 - [x] P0 research · P1 scaffold · P2 engines (Codex-reviewed, 18 findings fixed) · M1
 - [x] P3 UI wave read-only · M2 (commit e3a8fb1)
-- [ ] WAVE-G1 (running): A=SweepCore CleanService trash-only + #9 authorization pipeline;
-      B=UI bounded groups (32k fix) + safe-tier Smart Scan + confirm/progress/report flow;
-      C=standalone screens (Large&Old, Memory, Startup) — Fable wires into shell after.
-      Then: Fable review -> Codex adversarial review -> fix -> flip CleanService gate -> M3.
+- [x] WAVE-G1 built + wired. Design recalibrations applied (palette v2 indigo SaaS,
+      volume raise, motion continuity frame-verified, ring proportions). M2 shipped to user.
+- [ ] GATE-1 security loop (running): Codex review 1 -> 7 findings fixed (e1522d9) ->
+      re-check verdict GATE: HOLD -> fix loop 2 in flight (catalog byte-pinning, trashItem
+      decoy verification via slot FD, journal append fail-closed, WAL trusted anchor +
+      nlink==1, sealed SelectionBatch, identity-bound adapter, clone Codable removal,
+      quarantine scan gaps). Then Codex re-check 2 -> flip gate1Open -> M3.
 - [ ] WAVE-P4: SweepHelper (SMAppService + XPC codesign validation, maintenance ops),
       Uninstaller screen + AppCleaner parity (Dock/window drop targets, SmartDelete watcher,
       quit-first), Developer + Homebrew screens, clone-detector UI wiring, menubar
