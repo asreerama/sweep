@@ -180,3 +180,76 @@ final class CleanAdapterPipelineTests: XCTestCase {
         )
     }
 }
+
+extension CleanAdapterPipelineTests {
+    /// Codex G1 verdict 4 (controlling reason): a degraded or uncommitted operation must never
+    /// surface as a plain success. Injects a pipeline that "succeeds" while reporting
+    /// `journalingDegraded: true` and asserts the adapter marks the item failed with the
+    /// degraded-journal explanation. Fixture setup mirrors the real-pipeline test so the
+    /// adapter's own pre-checks (rule on record, reviewed identity, depth-1 rescan) all pass
+    /// and the degraded branch is what gets exercised.
+    func testDegradedOrUncommittedOperationIsNeverPresentedAsSuccess() async throws {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let logsRoot = home.appending(path: "Library/Logs")
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: logsRoot.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            throw XCTSkip("~/Library/Logs is not available in this environment")
+        }
+        let nodeName = "SweepDegradedTest-\(UUID().uuidString)"
+        let nodeURL = logsRoot.appending(path: nodeName, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: nodeURL, withIntermediateDirectories: true)
+        try Data("junk".utf8).write(to: nodeURL.appending(path: "junk.log"))
+        addTeardownBlock { try? FileManager.default.removeItem(at: nodeURL) }
+
+        let ruleID = "test.cleanadapter.degraded"
+        let rule = Rule(
+            id: ruleID, title: "Degraded surfacing test", group: .systemJunk, root: .userLogs,
+            pattern: "*", itemTypes: [.directory], tier: .safe, action: .trash, undo: .trashRestore,
+            rationale: "Codex G1 verdict-4 regression: degraded ops must never present as success"
+        )
+        let catalog = RuleCatalog(rules: [rule])
+        let schemaDirectory = FileManager.default.temporaryDirectory
+            .appending(path: "SweepDegradedTest-catalog-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: schemaDirectory, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: schemaDirectory) }
+        try Data("{}".utf8).write(to: schemaDirectory.appending(path: "schema.json"))
+        try JSONEncoder().encode(catalog).write(to: schemaDirectory.appending(path: "catalog.json"))
+        SweepCore.CleanService.resetBundledCatalogDirectoryForTesting()
+        SweepCore.CleanService.configureBundledCatalogDirectory(schemaDirectory)
+        addTeardownBlock { SweepCore.CleanService.resetBundledCatalogDirectoryForTesting() }
+        let reviewedIdentity = try SweepCore.FileIdentity.read(at: nodeURL)
+        let context = CleanExecutionContext(
+            catalog: catalog, ruleIDByItemID: [nodeURL.path: ruleID],
+            reviewedIdentityByItemID: [nodeURL.path: reviewedIdentity]
+        )
+        let item = InventoryItem(id: nodeURL.path, title: nodeName, byteCount: 4, tier: .safe)
+
+        let degradedPipeline: @Sendable (SweepCore.CleanRequest) -> AsyncThrowingStream<SweepCore.CleanEvent, Error> = { _ in
+            AsyncThrowingStream { continuation in
+                continuation.yield(.started(operationID: UUID(), itemCount: 1))
+                continuation.yield(.finished(SweepCore.CleanReport(
+                    operationID: UUID(), outcomes: [], committed: false,
+                    catalogDigest: "test-digest", journalingDegraded: true, freedBytesEstimate: 0
+                )))
+                continuation.finish()
+            }
+        }
+        let adapter = CleanAdapter(context: context, items: [item], executePipeline: degradedPipeline)
+
+        var finalReport: SweepUI.CleanReport?
+        for try await event in adapter.execute(itemIDs: [item.id]) {
+            if case .finished(let report) = event { finalReport = report }
+        }
+
+        let report = try XCTUnwrap(finalReport)
+        XCTAssertEqual(report.succeededCount, 0, "a degraded operation must not count as succeeded")
+        XCTAssertFalse(report.failures.isEmpty, "the degraded operation must surface as a failure")
+        let reason = report.failures.first.map(String.init(describing:)) ?? ""
+        XCTAssertTrue(reason.localizedCaseInsensitiveContains("journal") || reason.localizedCaseInsensitiveContains("stopped"),
+                      "failure reason must explain the journaling degradation, got: \(reason)")
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: nodeURL.path),
+            "nothing was actually trashed by the injected pipeline; the fixture must survive"
+        )
+    }
+}
