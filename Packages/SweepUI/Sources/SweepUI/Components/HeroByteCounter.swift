@@ -66,6 +66,8 @@ public struct HeroByteCounter: View {
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                    .fixedSize(horizontal: true, vertical: false)
             }
         }
         .accessibilityElement(children: .ignore)
