@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Sweep rule catalog schema",
+  "description": "FROZEN v1 (P1, 2026-08-31). Deny-wins. Unknown fields or actions must be rejected by the loader. Catalog ships read-only inside the signed bundle.",
+  "type": "object",
+  "required": ["schemaVersion", "rules"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "rules": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/rule" }
+    }
+  },
+  "$defs": {
+    "rule": {
+      "type": "object",
+      "required": ["id", "title", "group", "root", "pattern", "itemTypes", "tier", "action", "undo", "rationale"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9.-]{2,64}$" },
+        "title": { "type": "string", "maxLength": 80 },
+        "group": { "enum": ["systemJunk", "developer", "homebrew", "largeFiles", "uninstall", "maintenance"] },
+        "root": {
+          "enum": ["userCaches", "userLogs", "sandboxedAppCaches", "xcodeDerivedData", "xcodeDeviceSupport", "developerToolCaches", "homebrewCache", "browserCaches", "crashReports", "trash", "systemCaches", "systemLogs"],
+          "description": "Symbolic SweepPolicy.OperationRoot. Never an absolute path."
+        },
+        "pattern": { "type": "string", "description": "Fixed relative glob under root. No .., no leading /." },
+        "itemTypes": { "type": "array", "minItems": 1, "items": { "enum": ["file", "directory"] } },
+        "minAgeDays": { "type": "integer", "minimum": 0, "default": 0 },
+        "requiresAppNotRunning": { "type": "string", "description": "Bundle id that must not be running, if any." },
+        "tier": { "enum": ["safe", "caution", "expert"], "description": "Ambiguous => caution until audited." },
+        "action": { "enum": ["trash", "delete", "commandPreview"], "description": "delete only valid with tier=safe cache paths; commandPreview = typed adapter, preview-first." },
+        "command": { "enum": ["brewCleanup", "brewAutoremove", "simctlDeleteUnavailable", "tmutilThin", "mdutilReindex", "dnsFlush"], "description": "Required iff action=commandPreview." },
+        "undo": { "enum": ["trashRestore", "none", "regenerated"], "description": "regenerated = OS/tool recreates content (caches)." },
+        "exclusions": { "type": "array", "items": { "type": "string" }, "description": "Relative globs never matched within pattern." },
+        "rationale": { "type": "string", "maxLength": 300 }
+      },
+      "allOf": [
+        { "if": { "properties": { "action": { "const": "commandPreview" } } }, "then": { "required": ["command"] } },
+        { "if": { "properties": { "action": { "const": "delete" } } }, "then": { "properties": { "tier": { "const": "safe" } } } }
+      ]
+    }
+  }
+}
