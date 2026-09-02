@@ -41,6 +41,11 @@ final class LipoModel {
     /// there is no code path that reaches `LipoThinningService.thin` without this having been
     /// shown and explicitly confirmed first.
     var pendingThinTarget: LipoAppRow?
+    /// Whether the pending target's bundle is one this process cannot write into (root-owned
+    /// installer-package apps) — probed at request time so the confirm dialog can say up front
+    /// that macOS will ask for an administrator password, instead of the prompt appearing
+    /// unannounced.
+    private(set) var pendingThinNeedsAdmin = false
 
     private var scanTask: Task<Void, Never>?
 
@@ -115,6 +120,10 @@ final class LipoModel {
     /// showing one it would then have to refuse.
     func requestThin(_ row: LipoAppRow) {
         guard !row.isProtected, !isRunning(row) else { return }
+        pendingThinNeedsAdmin = {
+            guard let executableURL = Bundle(url: row.bundlePath)?.executableURL else { return false }
+            return !LipoWriteAccess.canWriteAlongside(executableURL: executableURL)
+        }()
         pendingThinTarget = row
     }
 
@@ -190,8 +199,12 @@ struct LipoScreen: View {
 
     private var confirmMessage: String {
         let savings = SweepFormat.bytes(model.pendingThinTarget?.savingsBytes ?? 0)
-        return "Removes the Intel portion of its code. Frees ~\(savings). "
+        var message = "Removes the Intel portion of its code. Frees ~\(savings). "
             + "Cannot be undone; the app is re-signed locally afterward."
+        if model.pendingThinNeedsAdmin {
+            message += " This app is installed by the system, so macOS will ask for an administrator password."
+        }
+        return message
     }
 
     @ViewBuilder
@@ -326,6 +339,16 @@ private struct LipoAppRowView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.tail)
+                // A failure's reason lives in the row itself, not only behind the chip's hover
+                // tooltip — "Thin failed" alone is exactly the opaque dead-end the first
+                // real-world run of this screen produced.
+                if let outcome, !outcome.succeeded {
+                    Text(outcome.message)
+                        .font(SweepFont.caption)
+                        .foregroundStyle(SweepTokens.tierExpert)
+                        .lineLimit(2)
+                        .truncationMode(.tail)
+                }
             }
 
             Spacer(minLength: SweepTokens.s3)
@@ -344,17 +367,24 @@ private struct LipoAppRowView: View {
 
     @ViewBuilder
     private var trailing: some View {
-        if let outcome {
+        if let outcome, outcome.succeeded {
             LipoOutcomeChip(outcome: outcome)
         } else {
+            // A failed attempt keeps its Thin button: the failure is stated in the row's own
+            // caption, and most failures (a canceled password prompt, an app quit since) are
+            // exactly the kind a second attempt resolves.
             HStack(spacing: SweepTokens.s3) {
-                Text(SweepFormat.bytes(row.savingsBytes))
-                    .font(SweepFont.monoEmphasis)
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .fixedSize()
-                    .frame(width: SweepTokens.sizeColumnWidth, alignment: .trailing)
+                if let outcome {
+                    LipoOutcomeChip(outcome: outcome)
+                } else {
+                    Text(SweepFormat.bytes(row.savingsBytes))
+                        .font(SweepFont.monoEmphasis)
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .fixedSize()
+                        .frame(width: SweepTokens.sizeColumnWidth, alignment: .trailing)
+                }
 
                 if isThinning {
                     ProgressView()

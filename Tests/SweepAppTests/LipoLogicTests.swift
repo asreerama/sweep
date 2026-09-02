@@ -307,4 +307,56 @@ final class LipoLogicTests: XCTestCase {
             bundlePath: URL(fileURLWithPath: "/Applications/Firefox.app"), runningBundlePaths: []
         ))
     }
+
+    // MARK: - Privileged thin script
+
+    private func makePlan(
+        path: String = "/Applications/Some App.app/Contents/MacOS/Some App",
+        tempPath: String = "/Applications/Some App.app/Contents/MacOS/.Some App.sweeplipo-abc123",
+        owner: UInt32 = 0, group: UInt32 = 0, permissions: String = "755"
+    ) -> LipoPrivilegedScript.FilePlan {
+        LipoPrivilegedScript.FilePlan(
+            path: path, tempPath: tempPath,
+            ownerAccountID: owner, groupAccountID: group, permissionsOctal: permissions
+        )
+    }
+
+    func testShellQuotingEscapesApostrophes() {
+        XCTAssertEqual(
+            LipoPrivilegedScript.shellQuoted("/Applications/O'Brien's App.app"),
+            "'/Applications/O'\\''Brien'\\''s App.app'"
+        )
+    }
+
+    func testScriptThinsEachFileAndRestoresOwnershipAndPermissions() {
+        let script = LipoPrivilegedScript.build(
+            files: [makePlan(owner: 0, group: 0, permissions: "755")],
+            bundlePath: "/Applications/Some App.app"
+        )
+        XCTAssertTrue(script.contains(
+            "/usr/bin/lipo -thin arm64 '/Applications/Some App.app/Contents/MacOS/Some App'"
+        ))
+        XCTAssertTrue(script.contains("/bin/chmod 755 "))
+        XCTAssertTrue(script.contains("/usr/sbin/chown 0:0 "))
+        XCTAssertTrue(script.contains("/bin/mv -f "))
+    }
+
+    func testScriptAlwaysReSignsEvenAfterAFileFailure() {
+        // Per-file failure sets `fail=1` and continues; codesign lines are unconditional, so a
+        // partially thinned bundle is never left unsigned.
+        let script = LipoPrivilegedScript.build(
+            files: [makePlan()], bundlePath: "/Applications/Some App.app"
+        )
+        XCTAssertTrue(script.contains("|| { fail=1; /bin/rm -f "))
+        XCTAssertTrue(script.contains("/usr/bin/codesign --force --deep --sign - '/Applications/Some App.app' || fail=1"))
+        XCTAssertTrue(script.contains("/usr/bin/codesign --verify '/Applications/Some App.app' || fail=1"))
+        XCTAssertTrue(script.hasSuffix("exit $fail\n"))
+    }
+
+    func testScriptPreservesSetuidStylePermissionBits() {
+        let script = LipoPrivilegedScript.build(
+            files: [makePlan(permissions: "4755")], bundlePath: "/Applications/Some App.app"
+        )
+        XCTAssertTrue(script.contains("/bin/chmod 4755 "))
+    }
 }

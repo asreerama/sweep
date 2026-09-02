@@ -506,6 +506,77 @@ enum LipoEngine {
     }
 }
 
+// MARK: - Write access probe (impure: one create+delete of a hidden probe file)
+
+/// Whether Sweep's own (user-privileged) process can write inside an app bundle at all.
+///
+/// This is the question the first real-world run of this module answered the hard way: Chrome,
+/// Word, Excel and UTM in `/Applications` are owned by `root:wheel` (installer-package installs)
+/// or by a different local user entirely, so `lipo -thin` fails on its very first output write
+/// with a bare "Permission denied" — before that fix, surfaced only as an opaque "Thin failed"
+/// chip. The probe attempts the exact operation the thin will perform first (create a file next
+/// to the main executable), so the answer can steer the flow *before* anything is promised:
+/// writable bundles thin in-process as before, non-writable ones go through the
+/// administrator-privileged path below, and the confirm dialog says which will happen.
+enum LipoWriteAccess {
+    static func canWriteAlongside(executableURL: URL, fileManager: FileManager = .default) -> Bool {
+        let probe = executableURL.deletingLastPathComponent()
+            .appending(path: ".sweep-write-probe-\(UUID().uuidString.prefix(8))")
+        guard fileManager.createFile(atPath: probe.path, contents: nil) else { return false }
+        try? fileManager.removeItem(at: probe)
+        return true
+    }
+}
+
+// MARK: - Privileged thin script (pure builder; unit-tested)
+
+/// Builds the `/bin/sh` script the administrator-privileged path executes for bundles the user
+/// process cannot write into.
+///
+/// Pure string assembly, kept separate from the execution so `LipoLogicTests` can pin down the
+/// two things that actually matter here: every path is single-quote-escaped (app names carry
+/// spaces and apostrophes), and the control flow never leaves a bundle thinned-but-unsigned — a
+/// mid-loop file failure is recorded, the loop continues, and `codesign` ALWAYS runs at the end
+/// so whatever did change is re-signed. Same per-file-failure-then-sign semantics as the
+/// in-process path in `LipoThinningService.thin`.
+enum LipoPrivilegedScript {
+    /// One file the script will thin: the target, the pre-chosen temp name beside it (chosen in
+    /// Swift so the script does no name generation of its own), and the ownership/permissions to
+    /// restore on the replacement — root runs the script, but the file must come back owned
+    /// exactly as it was.
+    struct FilePlan: Sendable, Equatable {
+        let path: String
+        let tempPath: String
+        let ownerAccountID: UInt32
+        let groupAccountID: UInt32
+        let permissionsOctal: String
+    }
+
+    static func shellQuoted(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    static func build(files: [FilePlan], bundlePath: String) -> String {
+        var lines = ["#!/bin/sh", "fail=0"]
+        for file in files {
+            let source = shellQuoted(file.path)
+            let temp = shellQuoted(file.tempPath)
+            lines.append(
+                "{ /usr/bin/lipo -thin arm64 \(source) -output \(temp)"
+                    + " && /bin/chmod \(file.permissionsOctal) \(temp)"
+                    + " && /usr/sbin/chown \(file.ownerAccountID):\(file.groupAccountID) \(temp)"
+                    + " && /bin/mv -f \(temp) \(source); }"
+                    + " || { fail=1; /bin/rm -f \(temp); }"
+            )
+        }
+        let bundle = shellQuoted(bundlePath)
+        lines.append("/usr/bin/codesign --force --deep --sign - \(bundle) || fail=1")
+        lines.append("/usr/bin/codesign --verify \(bundle) || fail=1")
+        lines.append("exit $fail")
+        return lines.joined(separator: "\n") + "\n"
+    }
+}
+
 // MARK: - Thinning (the mutation: process spawns + an in-place file replace)
 
 /// One app's finished (or failed) thin attempt.
@@ -536,6 +607,15 @@ enum LipoThinningService {
         let candidates = LipoBundleWalker.machOCandidates(
             bundlePath: bundlePath, mainExecutable: executableURL, fileManager: fileManager
         )
+
+        // Bundles the user process cannot write into (root-owned installer-package apps — see
+        // `LipoWriteAccess`) take the administrator-privileged path instead of failing on the
+        // first `lipo` output write.
+        guard LipoWriteAccess.canWriteAlongside(executableURL: executableURL, fileManager: fileManager) else {
+            return await thinPrivileged(
+                bundlePath: bundlePath, candidates: candidates, fileManager: fileManager
+            )
+        }
 
         var freedBytes: Int64 = 0
         var thinnedAny = false
@@ -627,15 +707,124 @@ enum LipoThinningService {
 
         _ = try fileManager.replaceItemAt(url, withItemAt: tempURL)
     }
+
+    /// The administrator-privileged thin: same candidates, same fat-with-arm64 re-check, but the
+    /// mutation runs as root through one `osascript … with administrator privileges` call — the
+    /// standard GUI password prompt, the same mechanism every Mac utility that repairs root-owned
+    /// apps uses. The script itself is generated fresh per run (`LipoPrivilegedScript`), written
+    /// 0700 into this process's own temp directory, and deleted afterward; it contains only
+    /// fixed absolute tool paths and quoted file paths computed here — no user-typed input.
+    private static func thinPrivileged(
+        bundlePath: URL, candidates: [URL], fileManager: FileManager
+    ) async -> LipoThinOutcome {
+        var plans: [LipoPrivilegedScript.FilePlan] = []
+        var beforeSizes: [String: Int64] = [:]
+
+        for file in candidates {
+            // Same freshness rule as the in-process path: only files that are fat WITH an arm64
+            // slice right now, re-parsed here rather than trusted from the scan.
+            guard case .fat(let slices) = LipoFileReader.machOKind(at: file),
+                  slices.contains(where: { $0.cpuType == LipoArch.arm64 })
+            else { continue }
+
+            guard let attributes = try? fileManager.attributesOfItem(atPath: file.path),
+                  let permissions = attributes[.posixPermissions] as? NSNumber,
+                  let owner = attributes[.ownerAccountID] as? NSNumber,
+                  let group = attributes[.groupOwnerAccountID] as? NSNumber
+            else { continue }
+
+            beforeSizes[file.path] = LipoFileReader.allocatedSize(at: file)
+            let tempPath = file.deletingLastPathComponent()
+                .appending(path: ".\(file.lastPathComponent).sweeplipo-\(UUID().uuidString.prefix(8))").path
+            plans.append(LipoPrivilegedScript.FilePlan(
+                path: file.path,
+                tempPath: tempPath,
+                ownerAccountID: owner.uint32Value,
+                groupAccountID: group.uint32Value,
+                permissionsOctal: String(permissions.uint16Value, radix: 8)
+            ))
+        }
+
+        guard !plans.isEmpty else {
+            return LipoThinOutcome(succeeded: false, freedBytes: 0, message: "Nothing here needed thinning.")
+        }
+
+        let scriptURL = fileManager.temporaryDirectory
+            .appending(path: "sweep-lipo-\(UUID().uuidString).sh")
+        defer { try? fileManager.removeItem(at: scriptURL) }
+        do {
+            let script = LipoPrivilegedScript.build(files: plans, bundlePath: bundlePath.path)
+            try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+            try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: scriptURL.path)
+        } catch {
+            return LipoThinOutcome(
+                succeeded: false, freedBytes: 0,
+                message: "Could not prepare the privileged thin (\((error as NSError).localizedDescription))."
+            )
+        }
+
+        do {
+            // The generous timeout is for the password dialog itself, not the tools: the user may
+            // reasonably leave it up for a while before typing.
+            try LipoProcessRunner.run(
+                "/usr/bin/osascript",
+                ["-e", "do shell script \"/bin/sh \(LipoPrivilegedScript.shellQuoted(scriptURL.path))\" with administrator privileges"],
+                timeout: 300
+            )
+        } catch {
+            let text = String(describing: error)
+            if text.contains("-128") {
+                return LipoThinOutcome(
+                    succeeded: false, freedBytes: 0,
+                    message: "The password prompt was canceled \u{2014} nothing was changed."
+                )
+            }
+            if text.contains("Operation not permitted") {
+                return LipoThinOutcome(
+                    succeeded: false, freedBytes: 0,
+                    message: "macOS blocked the change. Grant Sweep \u{201C}App Management\u{201D} in "
+                        + "System Settings \u{2192} Privacy & Security, then try again."
+                )
+            }
+            return LipoThinOutcome(
+                succeeded: false, freedBytes: freedBytesMeasured(beforeSizes: beforeSizes),
+                message: "Thinning as administrator failed (\(text))."
+            )
+        }
+
+        // Ground truth, exactly as the in-process path insists on it: every plan's file must
+        // honestly parse as single-architecture now.
+        for plan in plans {
+            if case .fat = LipoFileReader.machOKind(at: URL(fileURLWithPath: plan.path)) {
+                return LipoThinOutcome(
+                    succeeded: false, freedBytes: freedBytesMeasured(beforeSizes: beforeSizes),
+                    message: "\(URL(fileURLWithPath: plan.path).lastPathComponent) is still a fat binary after thinning."
+                )
+            }
+        }
+
+        let freed = freedBytesMeasured(beforeSizes: beforeSizes)
+        return LipoThinOutcome(
+            succeeded: true, freedBytes: freed,
+            message: "Freed \(ByteCountFormatter.lipoDecimalString(freed))"
+        )
+    }
+
+    private static func freedBytesMeasured(beforeSizes: [String: Int64]) -> Int64 {
+        beforeSizes.reduce(into: Int64(0)) { total, entry in
+            total += max(0, entry.value - LipoFileReader.allocatedSize(at: URL(fileURLWithPath: entry.key)))
+        }
+    }
 }
 
 // MARK: - Process runner (impure: the only two process spawns in this whole module)
 
-/// Spawns exactly two fixed-path system tools, `/usr/bin/lipo` and `/usr/bin/codesign` — never a
-/// shell, never a `PATH` lookup, matching PLAN §2's "typed adapters only, fixed absolute
-/// executable paths." This is the ONE place `LipoThinningService` forks a process at all, and
-/// only ever as a direct, synchronous consequence of the user confirming one specific thin
-/// action — never during discovery (`LipoEngine.scan` never calls this). That split is the
+/// Spawns exactly three fixed-path system tools — `/usr/bin/lipo`, `/usr/bin/codesign`, and (for
+/// the administrator-privileged path only) `/usr/bin/osascript` running a Sweep-generated script
+/// of further fixed-path tools — never a `PATH` lookup, matching PLAN §2's "typed adapters only,
+/// fixed absolute executable paths." This is the ONE place `LipoThinningService` forks a process
+/// at all, and only ever as a direct, synchronous consequence of the user confirming one specific
+/// thin action — never during discovery (`LipoEngine.scan` never calls this). That split is the
 /// entire point of `MachOFatParser` existing: see its doc comment for the measured cost of a
 /// per-item process spawn during a scan elsewhere in this codebase.
 ///
@@ -668,7 +857,9 @@ enum LipoProcessRunner {
     static let timeout: TimeInterval = 60
 
     @discardableResult
-    static func run(_ executablePath: String, _ arguments: [String]) throws -> String {
+    static func run(
+        _ executablePath: String, _ arguments: [String], timeout: TimeInterval = LipoProcessRunner.timeout
+    ) throws -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executablePath)
         process.arguments = arguments
