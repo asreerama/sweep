@@ -54,6 +54,12 @@ final class UninstallModel {
     /// `~/Library` every click. `@ObservationIgnored` — nothing in the UI observes it directly.
     @ObservationIgnored private var rootIndex: LeftoverRootIndex?
     @ObservationIgnored private var rootIndexTask: Task<Void, Never>?
+    /// Prefetched pkgutil receipts (ids + per-package file lists), same session-cache pattern as
+    /// `rootIndex` and for the same reason: consulting the live provider inside a click meant one
+    /// `pkgutil --files` process spawn per installed package — measured at ~4.4 s for 49 packages,
+    /// ~95% of the user-reported "Looking for leftovers…" stall.
+    @ObservationIgnored private var receiptsCache: PrefetchedPkgutilReceipts?
+    @ObservationIgnored private var receiptsTask: Task<Void, Never>?
 
     init(home: URL = FileManager.default.homeDirectoryForCurrentUser) {
         self.home = home
@@ -97,6 +103,12 @@ final class UninstallModel {
             }.value
             guard !Task.isCancelled else { return }
             self.rootIndex = index
+        }
+        receiptsTask?.cancel()
+        receiptsTask = Task {
+            let receipts = await PrefetchedPkgutilReceipts.load()
+            guard !Task.isCancelled else { return }
+            self.receiptsCache = receipts
         }
     }
 
@@ -207,11 +219,18 @@ final class UninstallModel {
         leftoverSizeByID = [:]
         let installedApps = apps
         let home = self.home
-        let index = self.rootIndex
 
         leftoverTask = Task {
+            // A click that lands before the background prefetches finish WAITS for them —
+            // never falls back to the slow per-click path (a fresh root walk, or one pkgutil
+            // spawn per installed package). Both tasks are normally long done by now; awaiting
+            // a finished task is free.
+            await rootIndexTask?.value
+            await receiptsTask?.value
+            let index = self.rootIndex
+            let receipts = self.receiptsCache ?? PrefetchedPkgutilReceipts.empty
             let candidates = await Task.detached(priority: .userInitiated) {
-                LeftoverMatcher.candidates(for: app, homeDirectory: home, installedApps: installedApps, index: index)
+                LeftoverMatcher.candidates(for: app, homeDirectory: home, receipts: receipts, installedApps: installedApps, index: index)
             }.value
             guard !Task.isCancelled, case .app(let current) = selection, current == app else { return }
             let groups = LeftoverGrouping.groups(for: candidates, home: home)
@@ -232,11 +251,15 @@ final class UninstallModel {
         leftoverSizeByID = [:]
         let installedIDs = Set(apps.compactMap(\.bundleIdentifier))
         let home = self.home
-        let index = self.rootIndex
 
         leftoverTask = Task {
+            // Same wait-for-prefetch contract as `loadLeftovers(for:)`.
+            await rootIndexTask?.value
+            await receiptsTask?.value
+            let index = self.rootIndex
+            let receipts = self.receiptsCache ?? PrefetchedPkgutilReceipts.empty
             let allOrphans = await Task.detached(priority: .userInitiated) {
-                LeftoverMatcher.orphanCandidates(installedBundleIDs: installedIDs, homeDirectory: home, index: index)
+                LeftoverMatcher.orphanCandidates(installedBundleIDs: installedIDs, homeDirectory: home, receipts: receipts, index: index)
             }.value
             let matching = allOrphans.filter { candidate in
                 BundleIDMatch.isExact(candidate.apparentBundleID, bundleID: bundleIdentifier)

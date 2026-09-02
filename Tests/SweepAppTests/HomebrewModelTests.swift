@@ -198,6 +198,39 @@ final class HomebrewModelTests: XCTestCase {
         XCTAssertEqual(applied.packages[1].latestVersion, "2.4")
     }
 
+    // MARK: - Refresh queueing + stale-slow-tail discard (the "my upgrade undid itself" race)
+
+    func testRefreshRequestedMidRefreshRunsAfterInsteadOfBeingDropped() async {
+        let gateway = SlowCheckGateway(inner: FixtureBrewGateway(), checkDelayMilliseconds: 80)
+        let model = HomebrewModel(gateway: gateway)
+        async let first: Void = model.refresh()
+        try? await Task.sleep(for: .milliseconds(20))
+        // Lands while the first refresh's update check is still sleeping — must queue, not drop.
+        async let second: Void = model.refresh()
+        _ = await (first, second)
+        try? await Task.sleep(for: .milliseconds(250))
+        let callsAfterQueued = await gateway.listingCalls()
+        XCTAssertEqual(callsAfterQueued, 2, "the mid-flight request must run a second refresh")
+        XCTAssertFalse(model.isRefreshing)
+    }
+
+    func testAMutationDuringRefreshDiscardsTheStaleUpdateCheck() async {
+        let gateway = SlowCheckGateway(inner: FixtureBrewGateway(), checkDelayMilliseconds: 80)
+        let model = HomebrewModel(gateway: gateway)
+        let refreshTask = Task { await model.refresh() }
+        try? await Task.sleep(for: .milliseconds(20))
+        // An upgrade completes while the pre-mutation `brew outdated` is still in flight.
+        model.noteMutationCompleted()
+        await refreshTask.value
+        // The stale check must not have been applied on the first pass; the queued second pass
+        // (post-mutation truth) is what settles the chips. Let it finish.
+        try? await Task.sleep(for: .milliseconds(400))
+        let callsAfterMutation = await gateway.listingCalls()
+        XCTAssertEqual(callsAfterMutation, 2, "a discarded stale check must queue a fresh refresh")
+        XCTAssertFalse(model.isCheckingUpdates)
+        XCTAssertFalse(model.isRefreshing)
+    }
+
     // MARK: - Kind.matches (race guard for a superseded preview)
 
     func testPendingActionKindMatchesIdentifiesTheSameSingletonAction() {
@@ -212,6 +245,42 @@ final class HomebrewModelTests: XCTestCase {
         XCTAssertTrue(HomebrewPendingAction.Kind.upgrade(node).matches(.upgrade(node)))
         XCTAssertFalse(HomebrewPendingAction.Kind.upgrade(node).matches(.upgrade(go)))
     }
+}
+
+/// Wraps a `FixtureBrewGateway` with a slow `updateCheck` and a listing-call counter, so a test
+/// can hold a refresh's slow tail open long enough to race a second refresh or a mutation
+/// against it deterministically.
+private actor SlowCheckGatewayState {
+    var listingCalls = 0
+    func bump() { listingCalls += 1 }
+}
+
+private struct SlowCheckGateway: BrewGateway {
+    let inner: FixtureBrewGateway
+    let checkDelayMilliseconds: Int
+    private let state = SlowCheckGatewayState()
+
+    var isAvailable: Bool { inner.isAvailable }
+    func listingCalls() async -> Int { await state.listingCalls }
+
+    func listing() async throws -> BrewSnapshot {
+        await state.bump()
+        return try await inner.listing()
+    }
+
+    func sizes(for packages: [BrewPackage]) async -> [String: Int64] { await inner.sizes(for: packages) }
+
+    func updateCheck() async throws -> BrewUpdateCheck {
+        try? await Task.sleep(for: .milliseconds(checkDelayMilliseconds))
+        return try await inner.updateCheck()
+    }
+
+    func cleanupPreview() async throws -> String { try await inner.cleanupPreview() }
+    func cleanup() async throws -> String { try await inner.cleanup() }
+    func autoremovePreview() async throws -> String { try await inner.autoremovePreview() }
+    func autoremove() async throws -> String { try await inner.autoremove() }
+    func upgrade(_ package: BrewPackage) async throws -> String { try await inner.upgrade(package) }
+    func uninstall(_ package: BrewPackage) async throws -> String { try await inner.uninstall(package) }
 }
 
 /// Wraps a `FixtureBrewGateway` but always fails its cleanup preview — `FixtureBrewGateway` has

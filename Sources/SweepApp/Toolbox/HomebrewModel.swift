@@ -106,6 +106,21 @@ final class HomebrewModel {
     /// True while `brew outdated` is still deciding which rows get an "Update available" chip.
     private(set) var isCheckingUpdates = false
 
+    /// A refresh requested while one is already in flight — the guard below used to just drop
+    /// it, which is how an upgrade's post-mutation refresh could vanish (user-reported: "showed
+    /// the updating loader and then it just went back to the original state"). Queued requests
+    /// run once, immediately after the in-flight refresh finishes.
+    private var refreshQueued = false
+    /// Bumped when a mutating command completes. A refresh remembers the generation it started
+    /// at and refuses to apply slow-tail results (sizes, `brew outdated`) born before a
+    /// mutation — without this, an update check started BEFORE an upgrade lands AFTER it and
+    /// re-paints the stale "Update available" chip the upgrade just cleared.
+    private var mutationGeneration = 0
+
+    func noteMutationCompleted() {
+        mutationGeneration += 1
+    }
+
     /// Staged load (user-reported "the Homebrew listing is still slow — PearClean gets it
     /// instantly"): the old single-await refresh held the whole screen on a spinner for the
     /// full ~4.6 s snapshot. Now the filesystem listing renders in milliseconds, then the two
@@ -119,12 +134,26 @@ final class HomebrewModel {
             snapshot = .empty
             return
         }
-        guard !isRefreshing else { return }
+        guard !isRefreshing else {
+            refreshQueued = true
+            return
+        }
         let hadContent = loadState == .loaded
         if !hadContent { loadState = .loading }
         isRefreshing = true
-        defer { isRefreshing = false }
+        let generationAtStart = mutationGeneration
 
+        let finished: Bool = await runRefreshBody(hadContent: hadContent, generationAtStart: generationAtStart)
+        isRefreshing = false
+        if finished, refreshQueued {
+            refreshQueued = false
+            await refresh()
+        }
+    }
+
+    /// One refresh pass. Returns true when the pass ran to its end (successfully or not) —
+    /// the caller drains the queued-refresh flag either way.
+    private func runRefreshBody(hadContent: Bool, generationAtStart: Int) async -> Bool {
         let listing: BrewSnapshot
         do {
             listing = try await gateway.listing()
@@ -136,7 +165,7 @@ final class HomebrewModel {
             } else {
                 loadState = .failed(String(describing: error))
             }
-            return
+            return true
         }
         snapshot = Self.merged(listing: listing, carryingForwardFrom: snapshot)
         loadState = .loaded
@@ -146,15 +175,29 @@ final class HomebrewModel {
         async let pendingSizes = gateway.sizes(for: listing.packages)
         async let pendingCheck = gateway.updateCheck()
 
-        snapshot = Self.applying(sizes: await pendingSizes, to: snapshot)
+        let sizes = await pendingSizes
+        if mutationGeneration == generationAtStart {
+            snapshot = Self.applying(sizes: sizes, to: snapshot)
+        } else {
+            refreshQueued = true
+        }
         isSizing = false
 
         do {
-            snapshot = Self.applying(check: try await pendingCheck, to: snapshot)
+            let check = try await pendingCheck
+            if mutationGeneration == generationAtStart {
+                snapshot = Self.applying(check: check, to: snapshot)
+            } else {
+                // Born before a mutation that has since landed: applying it would resurrect
+                // pre-mutation state (the classic "my upgrade undid itself"). Discard and let
+                // the queued refresh fetch the truth.
+                refreshQueued = true
+            }
         } catch {
             appendConsole("Update check failed: \(String(describing: error))")
         }
         isCheckingUpdates = false
+        return true
     }
 
     // MARK: - Staged-snapshot merging (internal, unit-tested directly)
@@ -329,6 +372,7 @@ final class HomebrewModel {
                 await runSingle(action)
             }
             isRunningAction = false
+            noteMutationCompleted()
             await refresh()
         }
     }
@@ -347,6 +391,7 @@ final class HomebrewModel {
                 appendConsole("$ brew upgrade \(package.name)\n\(String(describing: error))")
             }
             upgradingPackageIDs.remove(package.id)
+            noteMutationCompleted()
             if upgradingPackageIDs.isEmpty, !isRunningAction {
                 await refresh()
             }

@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import SweepSystem
 import SweepUI
 import SwiftUI
@@ -373,19 +374,39 @@ struct MemoryScreen: View {
         return map
     }
 
-    /// App icon per pid for the current top processes. Anything with a bundle (a real app, or an
-    /// app's helper like `Chrome Helper`) resolves to that bundle's icon so the row shows where the
-    /// process came from; a bundleless process (a pure system daemon) resolves to nothing and the
-    /// row shows the Apple mark. Reuses `cache` so an unchanged pid isn't re-resolved, and prunes to
+    /// App icon per pid for the current top processes. A `.regular` app resolves through
+    /// `NSRunningApplication`; a helper process (`Notion Helper (Renderer)`, `Code Helper
+    /// (Plugin)`, every Electron/browser child — user-reported showing the Apple mark) is NOT
+    /// registered with LaunchServices, so it resolves through its executable path instead: the
+    /// OUTERMOST `.app` bundle on that path is the app the user recognizes
+    /// (`/Applications/Notion.app/Contents/Frameworks/Notion Helper (Renderer).app/...` →
+    /// Notion's icon). Only a genuinely bundleless process (a pure system daemon) falls through
+    /// to the Apple mark. Reuses `cache` so an unchanged pid isn't re-resolved, and prunes to
     /// the current pids so the map can't grow without bound as processes come and go.
     private static func resolveIcons(for pids: [Int32], cache: [Int32: NSImage]) -> [Int32: NSImage] {
         var result = cache
         for pid in pids where result[pid] == nil {
             if let app = NSRunningApplication(processIdentifier: pid), app.bundleURL != nil, let icon = app.icon {
                 result[pid] = icon
+            } else if let bundlePath = outermostAppBundlePath(forPID: pid) {
+                result[pid] = NSWorkspace.shared.icon(forFile: bundlePath)
             }
         }
         return result.filter { pids.contains($0.key) }
+    }
+
+    /// `/Applications/Notion.app/Contents/Frameworks/Notion Helper (Renderer).app/Contents/MacOS/…`
+    /// → `/Applications/Notion.app`. The LEFTMOST `.app` component wins on purpose: nested helper
+    /// bundles carry no icon of their own, and the outermost bundle is the identity the user
+    /// actually recognizes. Returns nil for any process not living inside an app bundle.
+    private static func outermostAppBundlePath(forPID pid: Int32) -> String? {
+        // `PROC_PIDPATHINFO_MAXSIZE` is a C macro (4 × MAXPATHLEN) the Swift importer can't see.
+        var buffer = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+        guard proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { return nil }
+        let path = String(cString: buffer)
+        let components = path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        guard let appIndex = components.firstIndex(where: { $0.hasSuffix(".app") }) else { return nil }
+        return "/" + components[0...appIndex].joined(separator: "/")
     }
 
     // MARK: - Actions
