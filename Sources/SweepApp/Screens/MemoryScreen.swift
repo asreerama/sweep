@@ -97,6 +97,10 @@ private struct MemoryProcessRow: Identifiable {
 struct MemoryScreen: View {
     @State private var snapshot: SystemSnapshot?
     @State private var runningAppsByPID: [Int32: NSRunningApplication] = [:]
+    /// App icon per process pid, so each row shows what launched it instead of leaving the user to
+    /// decode a bare process name. Resolved from the process's own bundle; a bundleless system
+    /// process resolves to `nil` and the row falls back to a tasteful Apple mark.
+    @State private var iconsByPID: [Int32: NSImage] = [:]
     @State private var pendingForceQuit: MemoryProcessRow?
 
     var body: some View {
@@ -120,6 +124,7 @@ struct MemoryScreen: View {
             for await value in await sampler.snapshots() {
                 snapshot = value
                 runningAppsByPID = Self.regularRunningApps()
+                iconsByPID = Self.resolveIcons(for: value.topProcesses.map(\.pid), cache: iconsByPID)
             }
         }
         .confirmationDialog(
@@ -277,10 +282,8 @@ struct MemoryScreen: View {
 
     private func processRow(_ row: MemoryProcessRow) -> some View {
         HStack(spacing: SweepTokens.s3 - 2) {
-            Image(systemName: "app.fill")
-                .font(.system(size: 12, weight: .regular))
-                .foregroundStyle(.secondary)
-                .frame(width: 17, alignment: .center)
+            processIcon(for: row)
+                .frame(width: 20, height: 20, alignment: .center)
             VStack(alignment: .leading, spacing: 0) {
                 Text(row.name)
                     .font(SweepFont.rowTitle)
@@ -304,6 +307,22 @@ struct MemoryScreen: View {
             }
         }
         .frame(height: SweepTokens.inventoryRowHeight)
+    }
+
+    /// The launching app's real icon, or the Apple mark for a bundleless system process.
+    @ViewBuilder
+    private func processIcon(for row: MemoryProcessRow) -> some View {
+        if let icon = iconsByPID[row.pid] {
+            Image(nsImage: icon)
+                .resizable()
+                .interpolation(.high)
+                .frame(width: 18, height: 18)
+        } else {
+            Image(systemName: "apple.logo")
+                .font(.system(size: 13, weight: .regular))
+                .foregroundStyle(.secondary)
+                .help("System process")
+        }
     }
 
     private var footer: some View {
@@ -352,6 +371,21 @@ struct MemoryScreen: View {
             map[app.processIdentifier] = app
         }
         return map
+    }
+
+    /// App icon per pid for the current top processes. Anything with a bundle (a real app, or an
+    /// app's helper like `Chrome Helper`) resolves to that bundle's icon so the row shows where the
+    /// process came from; a bundleless process (a pure system daemon) resolves to nothing and the
+    /// row shows the Apple mark. Reuses `cache` so an unchanged pid isn't re-resolved, and prunes to
+    /// the current pids so the map can't grow without bound as processes come and go.
+    private static func resolveIcons(for pids: [Int32], cache: [Int32: NSImage]) -> [Int32: NSImage] {
+        var result = cache
+        for pid in pids where result[pid] == nil {
+            if let app = NSRunningApplication(processIdentifier: pid), app.bundleURL != nil, let icon = app.icon {
+                result[pid] = icon
+            }
+        }
+        return result.filter { pids.contains($0.key) }
     }
 
     // MARK: - Actions

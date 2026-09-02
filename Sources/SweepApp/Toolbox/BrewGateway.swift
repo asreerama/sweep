@@ -66,6 +66,9 @@ protocol BrewGateway: Sendable {
     func autoremovePreview() async throws -> String
     func autoremove() async throws -> String
     func upgrade(_ package: BrewPackage) async throws -> String
+    /// `brew uninstall [--cask] <name>` — only ever called through the preview-then-confirm flow,
+    /// same contract as every other mutation here.
+    func uninstall(_ package: BrewPackage) async throws -> String
 }
 
 // MARK: - Real gateway
@@ -96,6 +99,10 @@ struct RealBrewGateway: BrewGateway {
 
     func upgrade(_ package: BrewPackage) async throws -> String {
         try await run(package.isCask ? ["upgrade", "--cask", package.name] : ["upgrade", package.name])
+    }
+
+    func uninstall(_ package: BrewPackage) async throws -> String {
+        try await run(package.isCask ? ["uninstall", "--cask", package.name] : ["uninstall", package.name])
     }
 
     private func run(_ arguments: [String]) async throws -> String {
@@ -254,6 +261,7 @@ struct FixtureBrewGateway: BrewGateway {
     func autoremovePreview() async throws -> String { previewOutput }
     func autoremove() async throws -> String { try mutationResult.get() }
     func upgrade(_ package: BrewPackage) async throws -> String { try mutationResult.get() }
+    func uninstall(_ package: BrewPackage) async throws -> String { try mutationResult.get() }
 }
 
 extension BrewSnapshot {

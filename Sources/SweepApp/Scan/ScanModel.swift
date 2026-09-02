@@ -31,6 +31,10 @@ final class ScanModel {
     private(set) var claimedBytes: Int64 = 0
     private(set) var claimedFiles = 0
     private(set) var filesExamined = 0
+    /// 0…1 estimate driving the determinate hero ring; see `ScanTick.fraction`. Unlike the byte
+    /// counter it is not throttled — it is cheap and wants to track every tick so the arc reads as
+    /// continuously advancing rather than stepping.
+    private(set) var progress: Double = 0
     private(set) var currentPath: String?
     private(set) var summaryGroups: [InventoryGroup] = []
     private(set) var ruleGroups: [InventoryGroup] = []
@@ -108,6 +112,7 @@ final class ScanModel {
         claimedBytes = 0
         claimedFiles = 0
         filesExamined = 0
+        progress = 0
         currentPath = nil
         summaryGroups = []
         ruleGroups = []
@@ -120,6 +125,10 @@ final class ScanModel {
         reviewedIdentityByItemID = [:]
 
         let environment = self.environment
+        // How many files the last scan of this same home examined — the denominator for an honest
+        // progress bar. Zero on a first-ever scan, which the service handles with its coarse
+        // fallback.
+        let expectedTotalFiles = UserDefaults.standard.integer(forKey: Self.fileCountKey(for: environment.home))
         task = Task { [weak self] in
             let catalog: RuleCatalog
             do {
@@ -131,13 +140,20 @@ final class ScanModel {
 
             // Ticks arrive off the main actor; each one hops back on its own. `weak` unwrapped
             // into a local so the escaping tick closure never captures the mutable weak binding.
-            let outcome = await ScanService.run(catalog: catalog, home: environment.home) { [weak self] tick in
+            let outcome = await ScanService.run(
+                catalog: catalog,
+                home: environment.home,
+                expectedTotalFiles: expectedTotalFiles
+            ) { [weak self] tick in
                 guard let model = self else { return }
                 Task { @MainActor in model.apply(tick) }
             }
             self?.finish(outcome)
         }
     }
+
+    /// Per-home so a fixture scan's tiny total never becomes the denominator for a real one.
+    private static func fileCountKey(for home: URL) -> String { "sweep.scan.lastFileCount:" + home.path }
 
     func cancel() {
         task?.cancel()
@@ -156,6 +172,7 @@ final class ScanModel {
         lastSequence = tick.sequence
         claimedFiles = tick.claimedFiles
         filesExamined = tick.filesExamined
+        progress = tick.fraction
         currentPath = tick.currentPath
 
         // The path ticker and the file count are plain text and can move at the tick rate. The
@@ -178,7 +195,14 @@ final class ScanModel {
         skipped = outcome.skipped
         duration = outcome.duration
         wasCancelled = outcome.cancelled
+        progress = 1
         currentPath = nil
+        // Learn this scan's file count as the denominator for the next scan's progress bar. Only a
+        // complete scan teaches it — a cancelled one saw only part of the tree and would shrink the
+        // baseline, making the next bar race to 100% and stall.
+        if !outcome.cancelled, outcome.filesExamined > 0 {
+            UserDefaults.standard.set(outcome.filesExamined, forKey: Self.fileCountKey(for: environment.home))
+        }
         selection = .safeDefaults(in: outcome.ruleGroups)
         catalog = outcome.catalog
         reviewedIdentityByItemID = outcome.reviewedIdentityByItemID

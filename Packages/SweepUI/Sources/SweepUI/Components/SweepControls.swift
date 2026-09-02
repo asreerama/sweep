@@ -261,7 +261,11 @@ public struct PathTicker: View {
             .foregroundStyle(.tertiary)
             .lineLimit(1)
             .truncationMode(.middle)
-            .frame(width: width, height: 13, alignment: .center)
+            // `maxWidth`, not a fixed width: on a narrow window the ticker shrinks with the pane
+            // instead of forcing horizontal overflow. Fixed height keeps the layout from bouncing
+            // as paths appear and disappear.
+            .frame(maxWidth: width)
+            .frame(height: 16, alignment: .center)
             .opacity(path == nil ? 0 : 1)
             .accessibilityHidden(true)
     }

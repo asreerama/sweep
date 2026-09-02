@@ -1,16 +1,28 @@
+import AppKit
 import SwiftUI
 
 /// The Clean flow's final state: what freed, what did not go as planned, and how to get it back.
 public struct CleanReportState: View {
     private let report: CleanReport
     private let onDone: () -> Void
+    /// Shown only when the backend can actually retry (Gate 1 open). Left off, the failures still
+    /// explain themselves and offer Reveal / fix-permission, but no dead "Try again" button.
+    private let canRetry: Bool
+    private let onRetry: (() -> Void)?
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var appeared = false
 
-    public init(report: CleanReport, onDone: @escaping () -> Void) {
+    public init(
+        report: CleanReport,
+        onDone: @escaping () -> Void,
+        canRetry: Bool = false,
+        onRetry: (() -> Void)? = nil
+    ) {
         self.report = report
         self.onDone = onDone
+        self.canRetry = canRetry
+        self.onRetry = onRetry
     }
 
     public var body: some View {
@@ -90,13 +102,32 @@ public struct CleanReportState: View {
                     failureRow(outcome)
                 }
             }
+
+            // Whole-batch guidance + retry: if any failure looks permission-related, name the fix
+            // once here and offer to open the exact settings pane, then re-run just the failures.
+            if report.failures.contains(where: { Self.isPermissionFailure($0.failureReason) }) {
+                Text("Some items are in folders Sweep can't reach yet. Grant Sweep Full Disk Access, then try again.")
+                    .font(SweepFont.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: SweepTokens.s2) {
+                if report.failures.contains(where: { Self.isPermissionFailure($0.failureReason) }) {
+                    Button("Open Full Disk Access") { Self.openFullDiskAccessSettings() }
+                        .buttonStyle(.sweepQuiet)
+                }
+                if canRetry, let onRetry {
+                    Button("Try again", action: onRetry)
+                        .buttonStyle(.sweepQuiet)
+                }
+            }
         }
         .padding(.horizontal, SweepTokens.s5)
     }
 
     private func failureRow(_ outcome: CleanItemOutcome) -> some View {
         HStack(alignment: .top, spacing: SweepTokens.s3 - 2) {
-            Image(systemName: "xmark.circle")
+            Image(systemName: Self.isPermissionFailure(outcome.failureReason) ? "lock" : "xmark.circle")
                 .font(.system(size: 12, weight: .regular))
                 .foregroundStyle(SweepTokens.tierCaution)
                 .frame(width: 17, alignment: .center)
@@ -108,16 +139,47 @@ public struct CleanReportState: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                 if let reason = outcome.failureReason {
-                    Text(reason)
+                    // The reason as reported, plus a concrete next step when it is a permission
+                    // block — never a bare "deletion failed".
+                    Text(Self.isPermissionFailure(reason) ? "\(reason). Grant Full Disk Access to remove it." : reason)
                         .font(SweepFont.caption)
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             Spacer(minLength: SweepTokens.s3)
+            // Reveal in Finder so the user can inspect (or remove) the item themselves. Item ids
+            // are absolute paths for every real clean source.
+            if outcome.id.hasPrefix("/") {
+                Button {
+                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: outcome.id)])
+                } label: {
+                    Image(systemName: "arrow.up.forward.app")
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Reveal in Finder")
+                .padding(.top, 1)
+            }
             SizeColumn(byteCount: outcome.byteCount)
         }
         .padding(.horizontal, SweepTokens.s3 - 2)
         .padding(.vertical, SweepTokens.s2)
+    }
+
+    /// Heuristic: does this failure reason describe a permission/access block the user can fix by
+    /// granting Full Disk Access? Kept on the reason text (rather than a structured status) so it
+    /// needs no change to the pinned `CleanBackend`/`CleanService` contract.
+    private static func isPermissionFailure(_ reason: String?) -> Bool {
+        guard let reason = reason?.lowercased() else { return false }
+        return ["permission", "denied", "not permitted", "operation not permitted",
+                "access", "full disk", "protected", "privilege"].contains { reason.contains($0) }
+    }
+
+    private static func openFullDiskAccessSettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") else { return }
+        NSWorkspace.shared.open(url)
     }
 }
 

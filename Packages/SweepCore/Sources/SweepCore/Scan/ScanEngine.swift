@@ -15,8 +15,24 @@ public actor ScanEngine {
     private let eventWatermark: Int
     private var active: [UUID: ScanCancellationFlag] = [:]
 
-    public init(walker: any VolumeWalker = FileManagerVolumeWalker()) {
-        self.init(walker: walker, eventWatermark: Self.defaultEventWatermark, pool: .shared)
+    public init(
+        walker: any VolumeWalker = ScanEngine.defaultWalker(),
+        eventWatermark: Int = ScanEngine.defaultEventWatermark
+    ) {
+        self.init(walker: walker, eventWatermark: max(1, eventWatermark), pool: .shared)
+    }
+
+    /// ``BulkVolumeWalker``, unless `SWEEP_WALKER=filemanager` says otherwise.
+    ///
+    /// The two backends are semantically interchangeable, so the escape hatch exists purely to
+    /// isolate a suspected enumeration bug in the field without a rebuild: set the variable, and
+    /// a scan runs on the `FileManager.enumerator` implementation it shipped on.
+    public static func defaultWalker(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> any VolumeWalker {
+        environment["SWEEP_WALKER"]?.lowercased() == "filemanager"
+            ? FileManagerVolumeWalker()
+            : BulkVolumeWalker()
     }
 
     init(walker: any VolumeWalker, eventWatermark: Int, pool: ScanWorkerPool) {

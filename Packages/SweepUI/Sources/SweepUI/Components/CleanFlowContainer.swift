@@ -30,8 +30,13 @@ public struct CleanFlowContainer: View {
                 CleanProgressState(update: update, totalBytes: model.requestSummary.totalBytes)
                     .frame(width: 420, height: 420)
             case .report(let report):
-                CleanReportState(report: report, onDone: onDismiss)
-                    .frame(width: 460, height: 480)
+                CleanReportState(
+                    report: report,
+                    onDone: onDismiss,
+                    canRetry: model.isBackendEnabled,
+                    onRetry: { model.retryFailed() }
+                )
+                .frame(width: 460, height: 480)
             case .failed(let message):
                 failure(message)
                     .frame(width: 420, height: 320)

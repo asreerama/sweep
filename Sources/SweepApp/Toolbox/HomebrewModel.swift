@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import SweepUI
 
 enum HomebrewLoadState: Equatable {
     case idle
@@ -21,6 +22,8 @@ struct HomebrewPendingAction: Identifiable {
         case cleanup
         case autoremove
         case upgrade(BrewPackage)
+        case upgradeAll
+        case uninstall(BrewPackage)
     }
 
     let id = UUID()
@@ -54,6 +57,24 @@ final class HomebrewModel {
     /// raced into an unpreviewed confirm.
     private(set) var isPendingActionReady = false
 
+    /// Live progress of an "Update all" run: which package is upgrading now and how many are done,
+    /// so the screen shows a determinate bar that advances as each package finishes. `nil` when no
+    /// batch upgrade is running.
+    private(set) var upgradeAllProgress: UpgradeAllProgress?
+
+    /// Packages with a per-item upgrade in flight, by `BrewPackage.id`. Deliberately NOT the
+    /// exclusive `isRunningAction` machinery: one package upgrading must not lock the other rows'
+    /// Upgrade buttons (user-reported), and brew's own per-keg locking makes parallel single
+    /// upgrades safe — the worst case is one process briefly waiting on brew's internal lock.
+    private(set) var upgradingPackageIDs: Set<String> = []
+
+    struct UpgradeAllProgress: Equatable {
+        var total: Int
+        var completed: Int
+        var current: String?
+        var fraction: Double { total == 0 ? 0 : Double(completed) / Double(total) }
+    }
+
     private let gateway: any BrewGateway
 
     init(gateway: any BrewGateway = HomebrewModel.defaultGateway()) {
@@ -72,18 +93,35 @@ final class HomebrewModel {
 
     var isAvailable: Bool { gateway.isAvailable }
 
+    /// True while a re-fetch of an already-loaded listing is in flight. Separate from `loadState`
+    /// on purpose: flipping `loadState` back to `.loading` after an upgrade blanked the whole
+    /// listing to the "Checking Homebrew…" empty state for the duration of the re-snapshot
+    /// (user-reported). A refresh over visible content keeps the stale listing on screen and swaps
+    /// the new snapshot in place; only the first-ever load shows the empty loading state.
+    private(set) var isRefreshing = false
+
     func refresh() async {
         guard gateway.isAvailable else {
             loadState = .unavailable
             snapshot = .empty
             return
         }
-        loadState = .loading
+        guard !isRefreshing else { return }
+        let hadContent = loadState == .loaded
+        if !hadContent { loadState = .loading }
+        isRefreshing = true
+        defer { isRefreshing = false }
         do {
             snapshot = try await gateway.snapshot()
             loadState = .loaded
         } catch {
-            loadState = .failed(String(describing: error))
+            // A background refresh of a listing the user is looking at must not blank it either:
+            // keep the stale content, surface the failure in the console.
+            if hadContent {
+                appendConsole("Refresh failed: \(String(describing: error))")
+            } else {
+                loadState = .failed(String(describing: error))
+            }
         }
     }
 
@@ -119,6 +157,42 @@ final class HomebrewModel {
         isPendingActionReady = true
     }
 
+    /// The trash icon's confirmation: what will be removed, how big it is, and the exact command —
+    /// shown before anything runs, same preview-first contract as every other mutation. Content is
+    /// data already on hand, so the sheet is ready immediately.
+    func requestUninstall(_ package: BrewPackage) {
+        let kindNoun = package.isCask ? "Mac app" : "command-line tool"
+        let version = package.installedVersion.map { " \($0)" } ?? ""
+        let command = "brew uninstall \(package.isCask ? "--cask " : "")\(package.name)"
+        pendingAction = HomebrewPendingAction(
+            kind: .uninstall(package),
+            title: "Uninstall \(package.name)",
+            previewText: "Will completely remove \(package.name)\(version) — a \(kindNoun) taking "
+                + "\(SweepFormat.bytes(package.sizeBytes)) on disk. Homebrew can reinstall it later, "
+                + "but its settings and data may not survive.\n\n\(command)"
+        )
+        isPendingActionReady = true
+    }
+
+    /// Preview-first, same contract as the others: show exactly which packages will upgrade (data
+    /// already on hand from the last refresh) before anything runs. The batch upgrades one package
+    /// at a time so the screen can report live per-package progress.
+    func requestUpgradeAll() {
+        let outdated = snapshot.outdated
+        guard !outdated.isEmpty, upgradingPackageIDs.isEmpty else { return }
+        let lines = outdated.map { package -> String in
+            let jump = package.latestVersion.map { "\(package.installedVersion ?? "current") \u{2192} \($0)" } ?? "latest"
+            return "\u{2022} \(package.name)  (\(jump))"
+        }.joined(separator: "\n")
+        let noun = outdated.count == 1 ? "package" : "packages"
+        pendingAction = HomebrewPendingAction(
+            kind: .upgradeAll,
+            title: "Update All (\(outdated.count))",
+            previewText: "Will upgrade \(outdated.count) \(noun), one at a time:\n\n\(lines)"
+        )
+        isPendingActionReady = true
+    }
+
     /// Sets the "Checking…" placeholder synchronously, before the async fetch even starts, so
     /// the confirm sheet appears the instant the user taps Cleanup/Autoremove rather than after a
     /// runloop hop — and so a caller that checks `pendingAction` right after calling
@@ -150,25 +224,83 @@ final class HomebrewModel {
     }
 
     func confirmPendingAction() {
-        guard let action = pendingAction, isPendingActionReady, !isRunningAction else { return }
+        guard let action = pendingAction, isPendingActionReady else { return }
+        // Per-item upgrades run outside the exclusive-action machinery so several can be in
+        // flight at once and the rest of the screen stays usable.
+        if case .upgrade(let package) = action.kind {
+            pendingAction = nil
+            isPendingActionReady = false
+            runItemUpgrade(package)
+            return
+        }
+        guard !isRunningAction else { return }
         pendingAction = nil
         isPendingActionReady = false
         isRunningAction = true
         Task {
-            do {
-                let output: String
-                switch action.kind {
-                case .cleanup: output = try await gateway.cleanup()
-                case .autoremove: output = try await gateway.autoremove()
-                case .upgrade(let package): output = try await gateway.upgrade(package)
-                }
-                appendConsole("$ \(action.title)\n\(output.isEmpty ? "(no output)" : output)")
-            } catch {
-                appendConsole("$ \(action.title)\n\(String(describing: error))")
+            if case .upgradeAll = action.kind {
+                await runUpgradeAll()
+            } else {
+                await runSingle(action)
             }
             isRunningAction = false
             await refresh()
         }
+    }
+
+    /// One package's upgrade, tracked per row (`upgradingPackageIDs`) rather than through
+    /// `isRunningAction`. The snapshot refresh waits for the *last* in-flight upgrade to land so
+    /// parallel upgrades don't thrash the package list mid-run.
+    private func runItemUpgrade(_ package: BrewPackage) {
+        guard !upgradingPackageIDs.contains(package.id) else { return }
+        upgradingPackageIDs.insert(package.id)
+        Task {
+            do {
+                let output = try await gateway.upgrade(package)
+                appendConsole("$ brew upgrade \(package.name)\n\(output.isEmpty ? "(no output)" : output)")
+            } catch {
+                appendConsole("$ brew upgrade \(package.name)\n\(String(describing: error))")
+            }
+            upgradingPackageIDs.remove(package.id)
+            if upgradingPackageIDs.isEmpty, !isRunningAction {
+                await refresh()
+            }
+        }
+    }
+
+    private func runSingle(_ action: HomebrewPendingAction) async {
+        do {
+            let output: String
+            switch action.kind {
+            case .cleanup: output = try await gateway.cleanup()
+            case .autoremove: output = try await gateway.autoremove()
+            case .upgrade(let package): output = try await gateway.upgrade(package)
+            case .uninstall(let package): output = try await gateway.uninstall(package)
+            case .upgradeAll: return
+            }
+            appendConsole("$ \(action.title)\n\(output.isEmpty ? "(no output)" : output)")
+        } catch {
+            appendConsole("$ \(action.title)\n\(String(describing: error))")
+        }
+    }
+
+    /// Upgrades every outdated package sequentially, publishing progress after each one so the
+    /// screen's bar advances live. One package failing never aborts the batch — its error goes to
+    /// the console and the run moves on.
+    private func runUpgradeAll() async {
+        let outdated = snapshot.outdated
+        upgradeAllProgress = UpgradeAllProgress(total: outdated.count, completed: 0, current: nil)
+        for package in outdated {
+            upgradeAllProgress?.current = package.name
+            do {
+                let output = try await gateway.upgrade(package)
+                appendConsole("$ brew upgrade \(package.name)\n\(output.isEmpty ? "(no output)" : output)")
+            } catch {
+                appendConsole("$ brew upgrade \(package.name)\n\(String(describing: error))")
+            }
+            upgradeAllProgress?.completed += 1
+        }
+        upgradeAllProgress = nil
     }
 
     private func appendConsole(_ text: String) {
@@ -182,8 +314,9 @@ extension HomebrewPendingAction.Kind {
     /// requesting a different action while it was in flight.
     func matches(_ other: HomebrewPendingAction.Kind) -> Bool {
         switch (self, other) {
-        case (.cleanup, .cleanup), (.autoremove, .autoremove): true
+        case (.cleanup, .cleanup), (.autoremove, .autoremove), (.upgradeAll, .upgradeAll): true
         case (.upgrade(let lhs), .upgrade(let rhs)): lhs.id == rhs.id
+        case (.uninstall(let lhs), .uninstall(let rhs)): lhs.id == rhs.id
         default: false
         }
     }

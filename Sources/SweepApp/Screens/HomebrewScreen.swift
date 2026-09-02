@@ -8,7 +8,9 @@ import SweepUI
 /// through `HomebrewModel`'s preview-then-confirm flow, never runs on first tap, and streams its
 /// raw output into the console disclosure at the bottom rather than a silent success/fail toast.
 struct HomebrewScreen: View {
-    @State private var model = HomebrewModel()
+    // Shared, launch-warmed model from `AppState` — not a per-screen `@State` instance, so
+    // navigating away and back does not re-run `brew`.
+    @Environment(HomebrewModel.self) private var model
     @State private var query = ""
 
     var body: some View {
@@ -22,9 +24,12 @@ struct HomebrewScreen: View {
                         SweepSearchField(text: $query, prompt: "Filter packages")
                             .frame(width: 200)
                     }
+                    if model.isRefreshing {
+                        ProgressView().controlSize(.small)
+                    }
                     Button("Refresh") { Task { await model.refresh() } }
                         .buttonStyle(.sweepQuiet)
-                        .disabled(model.loadState == .loading)
+                        .disabled(model.loadState == .loading || model.isRefreshing)
                 }
             }
 
@@ -33,11 +38,9 @@ struct HomebrewScreen: View {
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        // Read-mostly listing (PLAN's own vocabulary for this module) auto-loads once, the same
-        // way `StartupItemsScreen`/`MemoryScreen` do — unlike Developer's disk walk, this is a
-        // handful of fast `brew` metadata reads plus directory sizing, not a scan worth gating
-        // behind an explicit first click.
-        .task { await model.refresh() }
+        // The model is warmed at launch (`AppState`), so this only loads if that has not happened
+        // yet — revisiting the screen never re-runs `brew`. Manual reload is the Refresh button.
+        .task { if model.loadState == .idle { await model.refresh() } }
         .sheet(item: Binding(
             get: { model.pendingAction },
             set: { newValue in if newValue == nil { model.cancelPendingAction() } }
@@ -125,9 +128,29 @@ struct HomebrewScreen: View {
 
     private var outdatedSection: some View {
         VStack(alignment: .leading, spacing: SweepTokens.s2) {
-            Text("Outdated")
-                .font(SweepFont.sectionTitle)
-                .foregroundStyle(.primary)
+            HStack(spacing: SweepTokens.s2) {
+                Text("Outdated")
+                    .font(SweepFont.sectionTitle)
+                    .foregroundStyle(.primary)
+                Spacer()
+                if let progress = model.upgradeAllProgress {
+                    Text("Upgrading \(progress.current ?? "\u{2026}") \u{00B7} \(progress.completed) of \(progress.total)")
+                        .font(SweepFont.caption)
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                } else {
+                    Button("Update All (\(model.snapshot.outdated.count))") { model.requestUpgradeAll() }
+                        .buttonStyle(.sweepQuiet)
+                        .disabled(model.isRunningAction || !model.upgradingPackageIDs.isEmpty)
+                }
+            }
+            if let progress = model.upgradeAllProgress {
+                ProgressView(value: progress.fraction)
+                    .progressViewStyle(.linear)
+                    .tint(SweepTokens.accent)
+                    .animation(SweepMotion.layout, value: progress.completed)
+            }
             SectionCard {
                 ForEach(Array(model.snapshot.outdated.enumerated()), id: \.element.id) { index, package in
                     if index > 0 { Divider().padding(.horizontal, SweepTokens.s3) }
@@ -176,37 +199,115 @@ struct HomebrewScreen: View {
         }
     }
 
+    /// One package as a taller, self-explanatory card row: an icon chip that says what KIND of
+    /// thing this is (a Mac app vs a command-line tool — "cask"/"formula" mean nothing to a
+    /// non-technical user), a plain-language status line, and an emphasized size. The update state
+    /// lives in the subtitle ("Update available · 1.2 → 1.4"), so no separate badge is needed.
     private func packageRow(_ package: BrewPackage) -> some View {
-        HStack(spacing: SweepTokens.s3 - 2) {
-            Image(systemName: package.isCask ? "app.dashed" : "shippingbox")
-                .font(.system(size: 12, weight: .regular))
-                .symbolRenderingMode(.hierarchical)
-                .foregroundStyle(.secondary)
-                .frame(width: 17, alignment: .center)
-            VStack(alignment: .leading, spacing: 0) {
+        HStack(spacing: SweepTokens.s3) {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(package.isCask ? AnyShapeStyle(SweepTokens.accent.opacity(0.12)) : AnyShapeStyle(.fill.quaternary))
+                .frame(width: 34, height: 34)
+                .overlay {
+                    Image(systemName: package.isCask ? "macwindow" : "terminal")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(package.isCask ? AnyShapeStyle(SweepTokens.accent) : AnyShapeStyle(.secondary))
+                }
+            VStack(alignment: .leading, spacing: 2) {
                 Text(package.name)
-                    .font(SweepFont.rowTitle)
+                    .font(SweepFont.rowTitleEmphasis)
                     .foregroundStyle(.primary)
                     .lineLimit(1)
-                Text(package.installedVersion ?? (package.isCask ? "cask" : "formula"))
-                    .font(SweepFont.monoSmall)
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
+                packageSubtitle(package)
             }
             Spacer(minLength: SweepTokens.s3)
-            if package.isOutdated {
-                BrewUpdateBadge()
-            }
-            SizeColumn(byteCount: package.sizeBytes)
-            if package.isOutdated {
-                Button("Upgrade") { model.requestUpgrade(package) }
-                    .buttonStyle(.sweepQuiet)
-                    .disabled(model.isRunningAction)
+            SizeColumn(byteCount: package.sizeBytes, emphasized: true)
+            upgradeAccessory(for: package)
+            // Uninstall: routes through the same preview-then-confirm sheet as every other
+            // mutation — the sheet is the confirmation dialog, naming the package, its size and
+            // the exact command. Hidden while a batch run owns the rows.
+            if model.upgradeAllProgress == nil, !model.upgradingPackageIDs.contains(package.id) {
+                Button {
+                    model.requestUninstall(package)
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.system(size: 12, weight: .regular))
+                        .foregroundStyle(.secondary)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Uninstall \(package.name)")
+                .disabled(model.isRunningAction)
+                .accessibilityLabel("Uninstall \(package.name)")
             }
         }
-        .frame(height: SweepTokens.inventoryRowHeight)
+        .padding(.vertical, SweepTokens.s2)
+        .frame(minHeight: 54)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(package.name), \(SweepFormat.bytes(package.sizeBytes))\(package.isOutdated ? ", update available" : "")")
+        .accessibilityLabel("\(package.name), \(package.isCask ? "Mac app" : "command-line tool"), \(SweepFormat.bytes(package.sizeBytes))\(package.isOutdated ? ", update available" : "")")
+    }
+
+    @ViewBuilder
+    private func packageSubtitle(_ package: BrewPackage) -> some View {
+        if let latest = package.latestVersion {
+            HStack(spacing: SweepTokens.s1) {
+                Text("Update available")
+                    .font(SweepFont.caption)
+                    .foregroundStyle(SweepTokens.accent)
+                Text("\(package.installedVersion ?? "current") \u{2192} \(latest)")
+                    .font(SweepFont.caption)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+        } else {
+            Text([
+                package.isCask ? "Mac app" : "Command-line tool",
+                package.installedVersion,
+                "up to date",
+            ].compactMap(\.self).joined(separator: " \u{00B7} "))
+                .font(SweepFont.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+    }
+
+    /// The trailing slot of a package row. Four states: a batch run replaces every Upgrade button
+    /// with live text ("Upgrading…" on the active row, "Waiting…" on the rest); a per-item upgrade
+    /// shows an in-row progress bar on exactly that row while every other row's Upgrade button
+    /// stays enabled (one upgrade must never lock the others out); otherwise an outdated row gets
+    /// its Upgrade button, disabled only during the exclusive actions (cleanup/autoremove/batch).
+    @ViewBuilder
+    private func upgradeAccessory(for package: BrewPackage) -> some View {
+        if let progress = model.upgradeAllProgress {
+            if progress.current == package.name {
+                HStack(spacing: SweepTokens.s1 + 2) {
+                    ProgressView().controlSize(.small)
+                    Text("Upgrading\u{2026}")
+                        .font(SweepFont.caption)
+                        .foregroundStyle(SweepTokens.accent)
+                }
+            } else if package.isOutdated {
+                Text("Waiting\u{2026}")
+                    .font(SweepFont.caption)
+                    .foregroundStyle(.tertiary)
+            }
+        } else if model.upgradingPackageIDs.contains(package.id) {
+            HStack(spacing: SweepTokens.s1 + 2) {
+                ProgressView()
+                    .progressViewStyle(.linear)
+                    .controlSize(.small)
+                    .frame(width: 56)
+                Text("Upgrading\u{2026}")
+                    .font(SweepFont.caption)
+                    .foregroundStyle(SweepTokens.accent)
+            }
+        } else if package.isOutdated {
+            Button("Upgrade") { model.requestUpgrade(package) }
+                .buttonStyle(.sweepQuiet)
+                .disabled(model.isRunningAction)
+        }
     }
 
     private var maintenanceSection: some View {
@@ -235,10 +336,10 @@ struct HomebrewScreen: View {
                     HStack(spacing: SweepTokens.s3) {
                         Button("Clean Cache") { model.requestCleanup() }
                             .buttonStyle(.sweepQuiet)
-                            .disabled(model.isRunningAction)
+                            .disabled(model.isRunningAction || !model.upgradingPackageIDs.isEmpty)
                         Button("Remove Unused Dependencies") { model.requestAutoremove() }
                             .buttonStyle(.sweepQuiet)
-                            .disabled(model.isRunningAction)
+                            .disabled(model.isRunningAction || !model.upgradingPackageIDs.isEmpty)
                         if model.isRunningAction {
                             ProgressView().controlSize(.small)
                         }

@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security issue (deletion-safety bypass, symlink escape, TOCTOU)
+    url: mailto:aditya.sreerama@gmail.com
+    about: Do not open a public issue for anything that could make Sweep delete the wrong files — email directly.

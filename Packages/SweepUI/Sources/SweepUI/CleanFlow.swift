@@ -172,16 +172,29 @@ public final class CleanFlowModel {
     /// disabled in both those states, but the guard keeps the model correct on its own terms too.
     public func confirmClean() {
         guard isBackendEnabled, task == nil else { return }
+        run(ids: itemIDs, remainingBytes: requestSummary.totalBytes)
+    }
+
+    /// Re-run only the items that failed in the report currently on screen — the "fix permission,
+    /// then try again" path (`CleanReportState`). No-op unless the backend is enabled, nothing is
+    /// already running, and the current phase is a report that actually has failures.
+    public func retryFailed() {
+        guard isBackendEnabled, task == nil, case .report(let report) = phase else { return }
+        let failed = report.failures
+        guard !failed.isEmpty else { return }
+        run(ids: Set(failed.map(\.id)), remainingBytes: failed.reduce(0) { $0 + $1.byteCount })
+    }
+
+    private func run(ids: Set<String>, remainingBytes: Int64) {
         phase = .running(CleanProgressUpdate(
-            remainingBytes: requestSummary.totalBytes,
-            remainingItems: requestSummary.itemCount,
+            remainingBytes: remainingBytes,
+            remainingItems: ids.count,
             currentItemCaption: nil
         ))
         let backend = self.backend
-        let itemIDs = self.itemIDs
         task = Task { [weak self] in
             do {
-                for try await event in backend.execute(itemIDs: itemIDs) {
+                for try await event in backend.execute(itemIDs: ids) {
                     guard !Task.isCancelled else { return }
                     self?.apply(event)
                 }

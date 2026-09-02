@@ -35,7 +35,14 @@ public struct InventoryList: View {
                     Section {
                         if !expansion.isCollapsed(group) {
                             ForEach(group.items.prefix(expansion.visibleCount(for: group))) { item in
-                                InventoryRow(item: item, selection: binding(for: item), indented: true)
+                                InventoryRow(
+                                    item: item,
+                                    selection: binding(for: item),
+                                    indented: true,
+                                    // Item ids are absolute paths for every scan/inventory source;
+                                    // anything else (a synthetic id) simply gets no reveal button.
+                                    revealURL: item.id.hasPrefix("/") ? URL(fileURLWithPath: item.id) : nil
+                                )
                             }
                             .padding(.bottom, 1)
                             if expansion.hasMore(group) {

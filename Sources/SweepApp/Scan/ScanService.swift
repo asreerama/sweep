@@ -35,6 +35,10 @@ struct ScanTick: Sendable {
     let filesExamined: Int
     let claimedFiles: Int
     let currentPath: String?
+    /// A 0…1 estimate of how far the whole scan has run, for the determinate hero ring. Coarse by
+    /// construction — a filesystem walk has no true total up front — so it is `unitsDone/unitCount`
+    /// plus a saturating within-unit term, never a promise. Held below 1 until the final outcome.
+    let fraction: Double
 }
 
 struct ScanOutcome: Sendable {
@@ -112,11 +116,15 @@ enum ScanService {
     static func run(
         catalog: RuleCatalog,
         home: URL,
+        expectedTotalFiles: Int = 0,
         onTick: @Sendable @escaping (ScanTick) -> Void
     ) async -> ScanOutcome {
         let started = Date()
         let units = buildUnits(catalog: catalog, home: home)
-        let engine = ScanEngine()
+        // A deeper watermark than the default so a pre-running walk can get meaningfully ahead
+        // (buffering during a high-latency root's I/O stalls) rather than parking almost
+        // immediately. Two walks in flight at once = the pool's whole budget.
+        let engine = ScanEngine(eventWatermark: 4096)
         let displayHome = FileManager.default.homeDirectoryForCurrentUser.path
 
         var nodes: [NodeKey: Node] = [:]
@@ -129,23 +137,44 @@ enum ScanService {
         var lastEmit = ContinuousClock.now
         var cancelled = false
 
+        // Progress. The honest signal is files examined against how many the *last* scan of this
+        // same home examined (`expectedTotalFiles`): a real, monotonic "how much of the work is
+        // done" for every repeat scan, which is the common case. Only a first-ever scan (no learned
+        // total) falls back to the coarse per-unit estimate — one equal slice per root plus a
+        // saturating within-root term so a single huge root never reads as fully stalled.
+        let unitCount = max(1, units.count)
+        let itemScale = 8_000.0
+        var unitsDone = 0
+
         // ~25 Hz. Enough that the counter never looks stepped, few enough that the main actor
         // is not the bottleneck of a 200,000-file walk.
         let tickInterval = Duration.milliseconds(40)
 
+        // Submit every unit's walk up front. The engine's two-thread pool then keeps a second walk
+        // pre-running while the current one is consumed, so a slow, high-latency root (e.g. a dev
+        // root symlinked onto an external volume) overlaps with the others instead of blocking the
+        // whole scan behind it. Consumption below still drains the streams strictly in `units`
+        // order (deepest path first), so inode dedup and byte attribution are byte-for-byte
+        // identical to the old one-walk-at-a-time loop — only the wall-clock changes.
+        var streams: [(unit: Unit, stream: AsyncThrowingStream<ScanEvent, any Error>)] = []
+        streams.reserveCapacity(units.count)
         for unit in units {
-            if Task.isCancelled { cancelled = true; break }
-
-            var decisionCache: [String: PrefixOutcome] = [:]
-            let rootPrefix = unit.url.path.hasSuffix("/") ? unit.url.path : unit.url.path + "/"
             let request = ScanRequest(
                 roots: [unit.url],
                 honorsPolicyDenylist: true,
                 progressInterval: 512
             )
+            streams.append((unit, await engine.scan(request)))
+        }
+
+        for (unit, stream) in streams {
+            if Task.isCancelled { cancelled = true; break }
+
+            var decisionCache: [String: PrefixOutcome] = [:]
+            let rootPrefix = unit.url.path.hasSuffix("/") ? unit.url.path : unit.url.path + "/"
 
             do {
-                for try await event in await engine.scan(request) {
+                for try await event in stream {
                     if Task.isCancelled { cancelled = true; break }
                     switch event {
                     case .started:
@@ -156,6 +185,13 @@ enum ScanService {
                         if now - lastEmit >= tickInterval {
                             lastEmit = now
                             sequence += 1
+                            let fraction: Double
+                            if expectedTotalFiles > 0 {
+                                fraction = min(0.99, Double(filesExamined) / Double(expectedTotalFiles))
+                            } else {
+                                let withinUnit = 1 - exp(-Double(progress.itemsSeen) / itemScale)
+                                fraction = min(0.95, (Double(unitsDone) + withinUnit) / Double(unitCount))
+                            }
                             onTick(ScanTick(
                                 sequence: sequence,
                                 claimedBytes: claimedBytes,
@@ -163,7 +199,8 @@ enum ScanService {
                                 claimedFiles: claimedFiles,
                                 currentPath: progress.currentPath.map {
                                     SweepFormat.abbreviatingHome($0, home: displayHome)
-                                }
+                                },
+                                fraction: fraction
                             ))
                         }
 
@@ -230,6 +267,8 @@ enum ScanService {
             } catch {
                 skipped.append(SkippedLocation(path: unit.url.path, reason: .unreadable))
             }
+
+            unitsDone += 1
         }
 
         // Abbreviate against the *real* account home as well as the injected scan home: several

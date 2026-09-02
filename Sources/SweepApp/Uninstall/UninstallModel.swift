@@ -49,6 +49,11 @@ final class UninstallModel {
     private var sizeTask: Task<Void, Never>?
     private var leftoverTask: Task<Void, Never>?
     private var leftoverSizeTask: Task<Void, Never>?
+    /// Pre-walked search-root index (see `LeftoverRootIndex`): built once in the background when the
+    /// uninstaller opens so selecting an app matches against cached entries instead of re-walking
+    /// `~/Library` every click. `@ObservationIgnored` — nothing in the UI observes it directly.
+    @ObservationIgnored private var rootIndex: LeftoverRootIndex?
+    @ObservationIgnored private var rootIndexTask: Task<Void, Never>?
 
     init(home: URL = FileManager.default.homeDirectoryForCurrentUser) {
         self.home = home
@@ -67,6 +72,7 @@ final class UninstallModel {
     func loadApps() {
         guard !isLoadingApps, apps.isEmpty else { return }
         isLoadingApps = true
+        buildRootIndex()
         Task {
             let found = await Task.detached(priority: .userInitiated) {
                 AppInventory.scan().sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
@@ -74,6 +80,23 @@ final class UninstallModel {
             apps = found
             isLoadingApps = false
             computeSizesAndUsage(for: found)
+        }
+    }
+
+    /// Walk every leftover search root once, in the background, the moment the uninstaller opens,
+    /// and keep the result. Selecting an app then matches against this cached index instead of
+    /// re-walking `~/Library` each time — the difference between "instant" and a multi-second
+    /// per-click stall. Runs in parallel with the app-inventory scan, so it is usually ready before
+    /// the user has finished reading the app list.
+    private func buildRootIndex() {
+        rootIndexTask?.cancel()
+        let home = self.home
+        rootIndexTask = Task {
+            let index = await Task.detached(priority: .userInitiated) {
+                LeftoverRootIndex(homeDirectory: home)
+            }.value
+            guard !Task.isCancelled else { return }
+            self.rootIndex = index
         }
     }
 
@@ -184,10 +207,11 @@ final class UninstallModel {
         leftoverSizeByID = [:]
         let installedApps = apps
         let home = self.home
+        let index = self.rootIndex
 
         leftoverTask = Task {
             let candidates = await Task.detached(priority: .userInitiated) {
-                LeftoverMatcher.candidates(for: app, homeDirectory: home, installedApps: installedApps)
+                LeftoverMatcher.candidates(for: app, homeDirectory: home, installedApps: installedApps, index: index)
             }.value
             guard !Task.isCancelled, case .app(let current) = selection, current == app else { return }
             let groups = LeftoverGrouping.groups(for: candidates, home: home)
@@ -208,10 +232,11 @@ final class UninstallModel {
         leftoverSizeByID = [:]
         let installedIDs = Set(apps.compactMap(\.bundleIdentifier))
         let home = self.home
+        let index = self.rootIndex
 
         leftoverTask = Task {
             let allOrphans = await Task.detached(priority: .userInitiated) {
-                LeftoverMatcher.orphanCandidates(installedBundleIDs: installedIDs, homeDirectory: home)
+                LeftoverMatcher.orphanCandidates(installedBundleIDs: installedIDs, homeDirectory: home, index: index)
             }.value
             let matching = allOrphans.filter { candidate in
                 BundleIDMatch.isExact(candidate.apparentBundleID, bundleID: bundleIdentifier)

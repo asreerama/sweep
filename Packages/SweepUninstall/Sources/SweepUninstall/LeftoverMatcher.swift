@@ -52,6 +52,40 @@ public struct OrphanCandidate: Sendable, Hashable, Identifiable {
 /// `pkgutil` queries. No `FileManager` write/remove/trash call exists anywhere in this
 /// package; deletion is `SweepCore`'s `DeletionCoordinator`'s job, later, on the caller's own
 /// timeline.
+/// A one-time walk of every leftover search root, reusable across app selections.
+///
+/// Building this is the expensive half of leftover discovery — the directory walks over the big
+/// `~/Library` trees. Matching a specific app against already-walked entries afterwards is pure
+/// in-memory work. The uninstaller builds one of these in the background when it opens and hands it
+/// to every `candidates(for:)`/`orphanCandidates` call, so clicking an app is instant instead of
+/// re-walking `~/Library` from scratch each time. The roots walk concurrently while building.
+public struct LeftoverRootIndex: Sendable {
+    let entriesByRoot: [SearchRoot: [RootEntry]]
+
+    public init(
+        roots: [SearchRoot] = SearchRoot.filesystemRoots,
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+        systemLaunchDaemonsDirectory: URL = URL(fileURLWithPath: "/Library/LaunchDaemons"),
+        fileManager: FileManager = .default
+    ) {
+        let fsRoots = roots.filter { $0 != .pkgReceipt }
+        var perRoot = [[RootEntry]](repeating: [], count: fsRoots.count)
+        perRoot.withUnsafeMutableBufferPointer { buffer in
+            DispatchQueue.concurrentPerform(iterations: fsRoots.count) { slot in
+                buffer[slot] = RootWalker.entries(
+                    in: fsRoots[slot],
+                    homeDirectory: homeDirectory,
+                    systemLaunchDaemonsDirectory: systemLaunchDaemonsDirectory,
+                    fileManager: fileManager
+                )
+            }
+        }
+        var map: [SearchRoot: [RootEntry]] = [:]
+        for (slot, root) in fsRoots.enumerated() { map[root] = perRoot[slot] }
+        entriesByRoot = map
+    }
+}
+
 public enum LeftoverMatcher {
     /// Finds every leftover candidate for `app` across `roots`.
     ///
@@ -66,7 +100,8 @@ public enum LeftoverMatcher {
         systemLaunchDaemonsDirectory: URL = URL(fileURLWithPath: "/Library/LaunchDaemons"),
         receipts: PkgutilReceiptsProviding = PkgutilReceiptsProvider(),
         fileManager: FileManager = .default,
-        installedApps: [InstalledApp] = []
+        installedApps: [InstalledApp] = [],
+        index: LeftoverRootIndex? = nil
     ) -> [LeftoverCandidate] {
         let attributedID = app.bundleIdentifier ?? NameNormalization.alphanumeric(app.name)
         let conditions = ConditionsTable.conditions(for: app.bundleIdentifier)
@@ -81,23 +116,38 @@ public enum LeftoverMatcher {
 
         var results: [LeftoverCandidate] = []
 
-        for root in roots where root != .pkgReceipt {
-            let entries = RootWalker.entries(
-                in: root,
-                homeDirectory: homeDirectory,
-                systemLaunchDaemonsDirectory: systemLaunchDaemonsDirectory,
-                fileManager: fileManager
-            )
-            for entry in entries {
-                var evidence = evaluate(entry: entry, root: root, app: app, nameForms: nameForms, conditions: conditions, fileManager: fileManager)
-                guard !evidence.isEmpty else { continue }
-                let comparableName = groupContainerBaseName(entry.baseName, root: root)
-                if sharedOwnership.isAmbiguous(comparableName: comparableName) {
-                    evidence.insert(.ambiguousOwner)
+        // Each search root is an independent tree walk (`~/Library/Caches`, `Application Support`,
+        // `Containers`, …), and per-entry `evaluate` is a pure function of read-only inputs — so the
+        // roots walk concurrently and the whole pass costs the *slowest* root instead of the sum of
+        // all of them. Each iteration owns its own output slot, so nothing is shared mutably; the
+        // fixed `fsRoots` order is preserved, keeping results deterministic.
+        let fsRoots = roots.filter { $0 != .pkgReceipt }
+        var perRoot = [[LeftoverCandidate]](repeating: [], count: fsRoots.count)
+        perRoot.withUnsafeMutableBufferPointer { buffer in
+            DispatchQueue.concurrentPerform(iterations: fsRoots.count) { slot in
+                let root = fsRoots[slot]
+                // Reuse the pre-walked index when the caller supplied one (instant); only walk
+                // from scratch when there is none.
+                let entries = index?.entriesByRoot[root] ?? RootWalker.entries(
+                    in: root,
+                    homeDirectory: homeDirectory,
+                    systemLaunchDaemonsDirectory: systemLaunchDaemonsDirectory,
+                    fileManager: fileManager
+                )
+                var local: [LeftoverCandidate] = []
+                for entry in entries {
+                    var evidence = evaluate(entry: entry, root: root, app: app, nameForms: nameForms, conditions: conditions, fileManager: fileManager)
+                    guard !evidence.isEmpty else { continue }
+                    let comparableName = groupContainerBaseName(entry.baseName, root: root)
+                    if sharedOwnership.isAmbiguous(comparableName: comparableName) {
+                        evidence.insert(.ambiguousOwner)
+                    }
+                    local.append(LeftoverCandidate(url: entry.url, root: root, attributedBundleID: attributedID, evidence: evidence))
                 }
-                results.append(LeftoverCandidate(url: entry.url, root: root, attributedBundleID: attributedID, evidence: evidence))
+                buffer[slot] = local
             }
         }
+        for rootResults in perRoot { results.append(contentsOf: rootResults) }
 
         if roots.contains(.pkgReceipt) {
             results.append(contentsOf: receiptCandidates(for: app, attributedID: attributedID, receipts: receipts, sharedOwnership: sharedOwnership))
@@ -128,7 +178,8 @@ public enum LeftoverMatcher {
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
         systemLaunchDaemonsDirectory: URL = URL(fileURLWithPath: "/Library/LaunchDaemons"),
         receipts: PkgutilReceiptsProviding? = PkgutilReceiptsProvider(),
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        index: LeftoverRootIndex? = nil
     ) -> [OrphanCandidate] {
         let installedLower = Set(installedBundleIDs.map { $0.lowercased() })
         let receiptedLower = Set((receipts?.packageIdentifiers() ?? []).map { $0.lowercased() })
@@ -141,27 +192,37 @@ public enum LeftoverMatcher {
             }
         }
 
-        var results: [OrphanCandidate] = []
-        for root in roots where root != .pkgReceipt {
-            let entries = RootWalker.entries(
-                in: root,
-                homeDirectory: homeDirectory,
-                systemLaunchDaemonsDirectory: systemLaunchDaemonsDirectory,
-                fileManager: fileManager
-            )
-            for entry in entries {
-                let candidateName = groupContainerBaseName(entry.baseName, root: root)
-                guard looksLikeBundleID(candidateName) else { continue }
-                let normalized = candidateName.lowercased()
-                guard !isOwned(normalized) else { continue }
-                results.append(OrphanCandidate(
-                    url: entry.url,
-                    root: root,
-                    apparentBundleID: candidateName,
-                    isLikelyHelperTool: isHelperToolFalsePositive(candidateName)
-                ))
+        // Same rationale as `candidates(for:)`: independent per-root walks run concurrently into
+        // their own slots, preserving `fsRoots` order.
+        let fsRoots = roots.filter { $0 != .pkgReceipt }
+        var perRoot = [[OrphanCandidate]](repeating: [], count: fsRoots.count)
+        perRoot.withUnsafeMutableBufferPointer { buffer in
+            DispatchQueue.concurrentPerform(iterations: fsRoots.count) { slot in
+                let root = fsRoots[slot]
+                let entries = index?.entriesByRoot[root] ?? RootWalker.entries(
+                    in: root,
+                    homeDirectory: homeDirectory,
+                    systemLaunchDaemonsDirectory: systemLaunchDaemonsDirectory,
+                    fileManager: fileManager
+                )
+                var local: [OrphanCandidate] = []
+                for entry in entries {
+                    let candidateName = groupContainerBaseName(entry.baseName, root: root)
+                    guard looksLikeBundleID(candidateName) else { continue }
+                    let normalized = candidateName.lowercased()
+                    guard !isOwned(normalized) else { continue }
+                    local.append(OrphanCandidate(
+                        url: entry.url,
+                        root: root,
+                        apparentBundleID: candidateName,
+                        isLikelyHelperTool: isHelperToolFalsePositive(candidateName)
+                    ))
+                }
+                buffer[slot] = local
             }
         }
+        var results: [OrphanCandidate] = []
+        for rootResults in perRoot { results.append(contentsOf: rootResults) }
         return results
     }
 

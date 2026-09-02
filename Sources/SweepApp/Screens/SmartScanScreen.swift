@@ -35,12 +35,34 @@ struct SmartScanScreen: View {
 
     /// What this screen is actually showing — see the type doc for why this is not just
     /// `scan.phase` re-read.
-    @State private var displayPhase: ScanDisplayPhase = .idle
+    ///
+    /// Stored as an *override* over the model's phase, `nil` by default, so the very first body
+    /// evaluation — including every time this screen is re-created from scratch on navigation,
+    /// since `RootView` keys the detail on `.id(destination)` — already resolves to the correct
+    /// phase with no transition to play. Previously this was a plain `@State` seeded at `.idle`:
+    /// returning to a finished scan rendered one `.idle` frame and then animated the whole
+    /// idle→results morph (ring shrinking and repositioning, footer sliding, completion pulse),
+    /// which read as the ring "flying into position" on every visit. With the override left `nil`
+    /// at mount, `displayPhase` is `.results` on frame one and nothing animates; only the live
+    /// scanning→settling→results choreography (driven by `onChange`) ever sets it.
+    @State private var displayPhaseOverride: ScanDisplayPhase?
 
-    /// The ring's diameter while idle/scanning/settling. `HeroByteCounter`'s `size` is always
-    /// computed from this constant, never from `resultsRingDiameter` — see `heroRing`.
-    private let scanRingDiameter: CGFloat = 224
-    private let resultsRingDiameter: CGFloat = 120
+    private var displayPhase: ScanDisplayPhase { displayPhaseOverride ?? Self.mapped(scan.phase) }
+
+    private static func mapped(_ phase: ScanPhase) -> ScanDisplayPhase {
+        switch phase {
+        case .idle: .idle
+        case .scanning: .scanning
+        case .results: .results
+        case .failed(let message): .failed(message)
+        }
+    }
+
+    /// The ring's diameter. The hero holds one confident size across scanning and results rather
+    /// than collapsing to a small dot when the scan lands — a shrunk results ring read as "so small
+    /// nobody can see it." `HeroByteCounter`'s `size` is computed from this constant.
+    private let scanRingDiameter: CGFloat = 240
+    private let resultsRingDiameter: CGFloat = 240
 
     private enum ScanDisplayPhase: Equatable {
         case idle
@@ -77,8 +99,7 @@ struct SmartScanScreen: View {
             }
         }
         .animation(reduceMotion ? SweepMotion.crossfade : SweepMotion.layout, value: displayPhase)
-        .onAppear { syncDisplayPhase(immediate: true) }
-        .onChange(of: scan.phase) { _, _ in syncDisplayPhase(immediate: false) }
+        .onChange(of: scan.phase) { _, _ in syncDisplayPhase() }
     }
 
     /// Mirrors `scan.phase` into `displayPhase` — immediately on every edge except
@@ -87,21 +108,21 @@ struct SmartScanScreen: View {
     /// to `.scanning` right away (still resolved by the same unconditional `heroScreen`, so
     /// nothing unmounts) and the pending delayed flip below no-ops itself via the phase check
     /// when it wakes up — the "everything interruptible" half of PLAN §5's continuity requirement.
-    private func syncDisplayPhase(immediate: Bool) {
+    private func syncDisplayPhase() {
         switch scan.phase {
-        case .idle: displayPhase = .idle
-        case .scanning: displayPhase = .scanning
-        case .failed(let message): displayPhase = .failed(message)
+        case .idle: displayPhaseOverride = .idle
+        case .scanning: displayPhaseOverride = .scanning
+        case .failed(let message): displayPhaseOverride = .failed(message)
         case .results:
             guard displayPhase != .results else { return }
-            if immediate || reduceMotion {
-                displayPhase = .results
+            if reduceMotion {
+                displayPhaseOverride = .results
             } else {
-                displayPhase = .settling
+                displayPhaseOverride = .settling
                 Task {
                     try? await Task.sleep(for: .seconds(SweepMotion.resultsMorphDelay))
-                    guard scan.phase == .results, displayPhase == .settling else { return }
-                    displayPhase = .results
+                    guard scan.phase == .results, displayPhaseOverride == .settling else { return }
+                    displayPhaseOverride = .results
                 }
             }
         }
@@ -166,12 +187,9 @@ struct SmartScanScreen: View {
     /// never torn down and remounted by a phase change — only `heroDiameter`/`heroRingState`/the
     /// counter's own inputs move, and they move on ordinary animatable state.
     private var heroRing: some View {
-        ScanRing(state: heroRingState, diameter: heroDiameter) {
-            if displayPhase == .idle {
-                Image(systemName: "sparkles")
-                    .font(.system(size: 30, weight: .light))
-                    .foregroundStyle(.quaternary)
-            } else {
+        ScanRing(state: heroRingState, diameter: heroDiameter, progress: scan.progress) {
+            // Idle shows an empty ring (no glyph): the invitation is the Scan button below.
+            if displayPhase != .idle {
                 HeroByteCounter(
                     // Safe-tier bytes only once the ring lands (PLAN §6b): the counter settles
                     // to the number that is both the hero total and the clean scope, not the raw
@@ -182,6 +200,16 @@ struct SmartScanScreen: View {
                     caption: isSettled ? scan.safeResultsCaption : scan.scanningCaption
                 )
                 .scaleEffect(heroCounterScale)
+            }
+        }
+        // A soft accent bloom behind the ring for depth (Palette v2 volume-raise); skipped while
+        // idle so an untouched screen stays completely calm.
+        .background {
+            if displayPhase != .idle {
+                Circle()
+                    .fill(SweepTokens.heroGlow)
+                    .frame(width: heroDiameter * 1.5, height: heroDiameter * 1.5)
+                    .allowsHitTesting(false)
             }
         }
     }

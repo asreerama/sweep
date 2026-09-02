@@ -1,0 +1,32 @@
+name: Feature request
+description: Propose a new capability or an improvement.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before proposing: read `PLAN.md` (the canonical architecture/safety plan) and Sweep's philosophy in the README. Features that fake value — placebo "boosts", numbers that can't be computed honestly — will be declined regardless of demand.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: The user-visible pain, not the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: dropdown
+    id: safety
+    attributes:
+      label: Does this touch deletion or scanning scope?
+      description: Anything that widens what Sweep can claim or remove goes through the safety-gate process in PLAN.md.
+      options:
+        - "No — UI/UX or read-only"
+        - "Yes — it changes what can be scanned/claimed"
+        - "Yes — it changes what can be deleted"
+    validations:
+      required: true

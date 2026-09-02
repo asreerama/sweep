@@ -129,10 +129,14 @@ public struct FileManagerVolumeWalker: VolumeWalker {
         var identityByPath: [String: FileIdentity] = [root.standardizedFileURL.path: rootIdentity]
         var stopped = false
 
+        // One prepared denylist for the whole walk (exact: the walk never crosses the root's
+        // volume) instead of the per-call convenience — see `LexicalDenyList`'s doc comment.
+        let denyList = options.honorsPolicyDenylist ? LexicalDenyList(volumeOf: root) : nil
+
         while let url = enumerator.nextObject() as? URL {
             let depth = enumerator.level
 
-            if options.honorsPolicyDenylist, SweepPolicy.isDeniedLexically(url) {
+            if let denyList, denyList.isDenied(url) {
                 collector.record(WalkIssue(url: url, reason: .policyDenied))
                 enumerator.skipDescendants()
                 continue

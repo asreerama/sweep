@@ -55,6 +55,13 @@ public enum SweepTokens {
         adaptive(light: .white, dark: Color(hex: 0x1D2025))
     }
 
+    /// The sidebar pane's ground: one step separated from `ground`, so the integrated split reads
+    /// as two planes of the same window — replacing the macOS 26 floating-glass sidebar overlay,
+    /// which read as a detached panel rather than part of the window.
+    public static var sidebarGround: Color {
+        adaptive(light: Color(hex: 0xF1F2F6), dark: Color(hex: 0x131519))
+    }
+
     /// Low-contrast dividers and hairline borders — a tint of the ground/card relationship, not
     /// a hard system separator line.
     public static var hairline: Color {
@@ -92,6 +99,48 @@ public enum SweepTokens {
         )
     }
 
+    /// The indigo end of the ring/progress gradient's *volume* — a soft violet that `accent`
+    /// blends into so the stroke reads as a lit object with depth rather than a flat line. Adjacent
+    /// to `accent` on the wheel (indigo → periwinkle → violet), not a second semantic color: it
+    /// carries no meaning of its own and appears only inside `ringArc`/`heroGlow`.
+    public static var accentViolet: Color {
+        adaptive(light: Color(hex: 0xA78BFA), dark: Color(hex: 0xC4B5FD))
+    }
+
+    /// The determinate scan arc's stroke: a diagonal indigo→periwinkle→violet gradient. Gives the
+    /// thick progress ring the color volume the flat single-hue stroke lacked, while staying in the
+    /// one adjacent-hue family `accent` anchors.
+    public static var ringArc: LinearGradient {
+        LinearGradient(
+            colors: [accent, adaptive(light: Color(hex: 0x7C8AEE), dark: Color(hex: 0x94A0F2)), accentViolet],
+            startPoint: .topLeading, endPoint: .bottomTrailing
+        )
+    }
+
+    /// Soft radial bloom placed *behind* the hero ring for depth — a faint accent halo that fades
+    /// to nothing, never a hard edge.
+    public static var heroGlow: RadialGradient {
+        RadialGradient(
+            colors: [accent.opacity(0.14), accent.opacity(0)],
+            center: .center, startRadius: 6, endRadius: 190
+        )
+    }
+
+    /// The page ground as a gradient rather than a flat fill: an indigo-tinted wash at the top
+    /// easing through neutral into a faint violet at the bottom — the modern-SaaS flavor the flat
+    /// slab lacked, still restrained enough that white cards and flat-`ground` lists sit on it
+    /// without seaming. One hue family (the accent's), never a second color story.
+    public static var groundGradient: LinearGradient {
+        LinearGradient(
+            colors: [
+                adaptive(light: Color(hex: 0xEEF1FB), dark: Color(hex: 0x181C26)),
+                ground,
+                adaptive(light: Color(hex: 0xF5F3FB), dark: Color(hex: 0x1A1723)),
+            ],
+            startPoint: .top, endPoint: .bottom
+        )
+    }
+
     // Spacing scale. Every gap in the app is one of these.
     public static let s1: CGFloat = 4
     public static let s2: CGFloat = 8
@@ -106,17 +155,18 @@ public enum SweepTokens {
     public static let rowRadius: CGFloat = 6
 
     /// Fixed column widths for the size readout, so every row's digits line up across groups
-    /// without a Table. Value right-aligned, unit left-aligned beside it.
-    public static let sizeValueWidth: CGFloat = 44
-    public static let sizeUnitWidth: CGFloat = 24
-    public static let sizeColumnWidth: CGFloat = 72
+    /// without a Table. Value right-aligned, unit left-aligned beside it. Sized for the raised
+    /// mono ramp.
+    public static let sizeValueWidth: CGFloat = 52
+    public static let sizeUnitWidth: CGFloat = 28
+    public static let sizeColumnWidth: CGFloat = 84
 
     /// Indent applied to inventory rows so their checkbox sits under the group header's,
     /// past the header's disclosure chevron.
     public static let rowDisclosureIndent: CGFloat = 20
 
-    public static let inventoryRowHeight: CGFloat = 34
-    public static let summaryRowHeight: CGFloat = 44
+    public static let inventoryRowHeight: CGFloat = 38
+    public static let summaryRowHeight: CGFloat = 50
 
     /// Oversized animated number (GB found / freed): the app's visual signature.
     public static func heroNumberFont(size: CGFloat = 56) -> Font {
@@ -129,27 +179,31 @@ public enum SweepTokens {
 
 /// The type ramp. Hierarchy is carried by weight and size, never by color alone.
 /// SF Pro (system) for text, SF Mono for anything columnar or path-shaped.
+///
+/// Raised one step across the board (2026-09-01, user-reported): the original ramp bottomed out at
+/// 9–11.5 pt, which read as unreadably small in daily use. Nothing in the app should set type
+/// below ~10 pt now. Row metrics in `SweepTokens` moved with it so nothing clips.
 public enum SweepFont {
     // Sidebar, two tiers.
-    public static let sidebarPrimary = Font.system(size: 13, weight: .medium)
-    public static let sidebarToolbox = Font.system(size: 12, weight: .regular)
-    public static let sidebarSection = Font.system(size: 10, weight: .semibold)
+    public static let sidebarPrimary = Font.system(size: 13.5, weight: .medium)
+    public static let sidebarToolbox = Font.system(size: 13, weight: .regular)
+    public static let sidebarSection = Font.system(size: 10.5, weight: .semibold)
 
     // Content pane.
-    public static let screenTitle = Font.system(size: 22, weight: .semibold)
-    public static let screenSubtitle = Font.system(size: 11.5, weight: .regular)
-    public static let sectionTitle = Font.system(size: 12.5, weight: .semibold)
+    public static let screenTitle = Font.system(size: 24, weight: .semibold)
+    public static let screenSubtitle = Font.system(size: 13, weight: .regular)
+    public static let sectionTitle = Font.system(size: 14, weight: .semibold)
 
     // Rows.
-    public static let rowTitle = Font.system(size: 12.5, weight: .regular)
-    public static let rowTitleEmphasis = Font.system(size: 13, weight: .medium)
-    public static let caption = Font.system(size: 11, weight: .regular)
-    public static let badge = Font.system(size: 9, weight: .semibold)
+    public static let rowTitle = Font.system(size: 13.5, weight: .regular)
+    public static let rowTitleEmphasis = Font.system(size: 14.5, weight: .medium)
+    public static let caption = Font.system(size: 12.5, weight: .regular)
+    public static let badge = Font.system(size: 10, weight: .semibold)
 
     // Data. Always paired with `.monospacedDigit()` at the call site where the glyphs must align.
-    public static let mono = Font.system(size: 11.5, weight: .regular, design: .monospaced)
-    public static let monoSmall = Font.system(size: 10, weight: .regular, design: .monospaced)
-    public static let monoEmphasis = Font.system(size: 12.5, weight: .medium, design: .monospaced)
+    public static let mono = Font.system(size: 12.5, weight: .regular, design: .monospaced)
+    public static let monoSmall = Font.system(size: 11.5, weight: .regular, design: .monospaced)
+    public static let monoEmphasis = Font.system(size: 14, weight: .medium, design: .monospaced)
 
     /// SF Pro Display is selected automatically at these sizes; tracking is tightened by hand.
     public static func hero(_ size: CGFloat) -> Font { .system(size: size, weight: .medium) }

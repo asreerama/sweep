@@ -1,0 +1,59 @@
+name: Bug report
+description: Something is wrong — a crash, a wrong number, a UI defect.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Sweep shows numbers about *your* disk, so the more precisely you can describe the tree it misread, the faster this gets fixed.
+  - type: input
+    id: version
+    attributes:
+      label: Sweep version / commit
+      placeholder: "commit 8e28df3, built with scripts/build-app.sh"
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version and hardware
+      placeholder: "macOS 26.x, M2 Mac mini"
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Smart Scan / System Junk (scan results, sizes, attribution)
+        - Uninstaller / leftovers
+        - Memory
+        - Homebrew
+        - Maintenance / Startup Items
+        - Menubar
+        - UI / design / animation
+        - Build / tooling
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+      description: For scan-correctness bugs (wrong size, wrong item claimed, something missed), describe the on-disk tree that reproduces it — `scripts/make-fixtures.sh` shows the shape of a good reproduction.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. …
+        2. …
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Screenshots / logs
+      description: Screenshots for UI issues; `log stream --predicate 'subsystem == "com.aditya.sweep"'` output for behavior issues.

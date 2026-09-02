@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import SweepPolicy
 import SweepUninstall
@@ -106,16 +107,43 @@ enum UninstallLogic {
 
 // MARK: - Size / last-used (impure: touches the filesystem)
 
-/// On-disk allocated size for an arbitrary file or directory tree.
+/// On-disk allocated size for an arbitrary file or directory tree (PLAN Appendix B:
+/// `totalFileAllocatedSizeKey` semantics — allocated, not logical, size).
 ///
-/// This is a plain `URLResourceValues` walk (PLAN Appendix B: `totalFileAllocatedSizeKey`), not
-/// `SweepCore.ScanEngine` — the Uninstaller's read-only inventory has no need for that engine's
-/// hardlink/clone-family dedup machinery (that precision matters for a cleaning report's honest
-/// "freed" number; it doesn't change what an app-bundle-or-leftover size readout is for here),
-/// and pulling it in would mean this display-only screen depending on SweepCore for something
-/// `LargeOldFilesScreen` already shows is unnecessary at this tier.
+/// This is its own small walk, not `SweepCore.ScanEngine` — the Uninstaller's read-only inventory
+/// has no need for that engine's hardlink/clone-family dedup machinery (that precision matters
+/// for a cleaning report's honest "freed" number; it doesn't change what an app-bundle-or-
+/// leftover size readout is for here), and pulling it in would mean this display-only screen
+/// depending on SweepCore for something `LargeOldFilesScreen` already shows is unnecessary at
+/// this tier.
 enum FileSizeCalculator {
+    /// Every app-list row and every leftover group needs its own recursive size, and the naive
+    /// `FileManager.enumerator` + per-entry `url.resourceValues(forKeys:)` walk (kept below as
+    /// ``legacyAllocatedSize(at:fileManager:)``) pays a full `getattrlist` round trip per file:
+    /// on a real app bundle or a `~/Library` leftover tree with thousands of entries, that per-
+    /// entry overhead is exactly why sizes visibly trickle in. `getattrlistbulk(2)` answers a
+    /// whole directory's worth of entries — name, type, BSD flags and allocated size — in one
+    /// syscall per buffer-full, so the recursive descent below opens one directory at a time and
+    /// asks the kernel for everything it needs about that directory's children in bulk.
     static func allocatedSize(at url: URL, fileManager: FileManager = .default) -> Int64 {
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory) else { return 0 }
+        guard isDirectory.boolValue else { return singleFileAllocatedSize(url) }
+        return bulkDirectoryAllocatedSize(at: url.path)
+    }
+
+    private static func singleFileAllocatedSize(_ url: URL) -> Int64 {
+        guard let values = try? url.resourceValues(forKeys: [.totalFileAllocatedSizeKey]) else { return 0 }
+        return Int64(values.totalFileAllocatedSize ?? 0)
+    }
+
+    // MARK: - Legacy implementation (kept for the getattrlistbulk parity test)
+
+    /// The original `FileManager.enumerator`-based walk. Preserved verbatim (not called by
+    /// ``allocatedSize(at:fileManager:)`` any more) purely as the oracle
+    /// `FileSizeCalculatorTests` checks the bulk implementation against — a behavioral spec that
+    /// happens to be runnable.
+    static func legacyAllocatedSize(at url: URL, fileManager: FileManager = .default) -> Int64 {
         var isDirectory: ObjCBool = false
         guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory) else { return 0 }
         guard isDirectory.boolValue else { return singleFileAllocatedSize(url) }
@@ -138,9 +166,135 @@ enum FileSizeCalculator {
         return total
     }
 
-    private static func singleFileAllocatedSize(_ url: URL) -> Int64 {
-        guard let values = try? url.resourceValues(forKeys: [.totalFileAllocatedSizeKey]) else { return 0 }
-        return Int64(values.totalFileAllocatedSize ?? 0)
+    // MARK: - getattrlistbulk implementation
+
+    /// Comfortably holds a batch of entries (even directories with thousands of short-named
+    /// children) in one syscall; `getattrlistbulk` just returns fewer entries and this loops
+    /// again if a directory doesn't fit. The man page only requires "large enough to hold at
+    /// least one entry" — this is sized for throughput, not the minimum.
+    private static let bulkBufferSize = 128 * 1024
+
+    /// Iterative, stack-of-paths traversal (never recursive Swift calls, so an adversarially deep
+    /// tree can't blow the call stack): each loop iteration opens exactly one directory, sums its
+    /// regular-file children, queues its non-hidden subdirectories, then closes it before moving
+    /// on — so at most one directory fd is open at a time, well inside the "O(depth)" budget.
+    ///
+    /// `open(..., O_NOFOLLOW)` on the root itself is deliberate, not incidental: a symlinked app
+    /// bundle (macOS 26 cryptex-relocated system apps put a symlink at e.g.
+    /// `/Applications/Safari.app`) makes `open` fail with `ENOTDIR`, which this treats as "unreadable,
+    /// skip" → 0. Verified empirically that this matches ``legacyAllocatedSize(at:fileManager:)``:
+    /// `FileManager.enumerator(at:)` on a symlink root fails to enumerate for the same reason
+    /// (POSIX won't open a symlink path as a directory with `O_NOFOLLOW`, and Foundation's
+    /// enumerator hits the identical wall internally), so both implementations silently return 0
+    /// for a symlinked root rather than the target's size. That is a pre-existing quirk of the
+    /// original implementation, not something introduced here — this only preserves it.
+    private static func bulkDirectoryAllocatedSize(at rootPath: String) -> Int64 {
+        var total: Int64 = 0
+        var pendingDirectories: [String] = [rootPath]
+
+        let buffer = UnsafeMutableRawPointer.allocate(byteCount: bulkBufferSize, alignment: MemoryLayout<UInt64>.alignment)
+        defer { buffer.deallocate() }
+
+        while let path = pendingDirectories.popLast() {
+            let fd = path.withCString { open($0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) }
+            // Unreadable/unopenable (permission denied, disappeared mid-walk, turned out to be a
+            // symlink) — silently skipped, matching the legacy `errorHandler: nil` contract: one
+            // bad subtree contributes 0 rather than aborting the whole size calculation.
+            guard fd >= 0 else { continue }
+            defer { close(fd) }
+            total += bulkSum(directoryFD: fd, directoryPath: path, buffer: buffer, pendingDirectories: &pendingDirectories)
+        }
+        return total
+    }
+
+    /// One directory's worth of `getattrlistbulk` batches. Requests exactly the attributes
+    /// needed and nothing else, in the fixed order the kernel packs them (see the man page's
+    /// "attributes are returned in the order given" note — that order is by attribute-group bit
+    /// value, NOT request order, and `ATTR_CMN_RETURNED_ATTRS` is always emitted first when
+    /// requested, ahead of every other attribute regardless of its own bit's position):
+    ///   `uint32 entryLength │ attribute_set_t returned │ attrreference_t name │
+    ///    fsobj_type_t objType │ uint32 flags │ off_t allocSize (only if returned)`
+    /// Verified byte-for-byte against a small C harness against this exact kernel before writing
+    /// this parser, rather than trusting the man page's prose alone.
+    private static func bulkSum(
+        directoryFD: Int32,
+        directoryPath: String,
+        buffer: UnsafeMutableRawPointer,
+        pendingDirectories: inout [String]
+    ) -> Int64 {
+        var total: Int64 = 0
+
+        var attrList = attrlist()
+        attrList.bitmapcount = u_short(ATTR_BIT_MAP_COUNT)
+        attrList.commonattr = ATTR_CMN_RETURNED_ATTRS
+            | UInt32(ATTR_CMN_NAME)
+            | UInt32(ATTR_CMN_OBJTYPE)
+            | UInt32(ATTR_CMN_FLAGS)
+        attrList.fileattr = UInt32(ATTR_FILE_ALLOCSIZE)
+
+        while true {
+            let entryCount = getattrlistbulk(directoryFD, &attrList, buffer, bulkBufferSize, UInt64(FSOPT_NOFOLLOW))
+            // 0 = directory exhausted; negative = read error partway through — either way there
+            // is nothing more to safely parse out of this directory.
+            guard entryCount > 0 else { break }
+
+            var cursor = buffer
+            for _ in 0..<entryCount {
+                let entryLength = cursor.load(as: UInt32.self)
+                guard entryLength >= UInt32(MemoryLayout<UInt32>.size) else { break }
+                defer { cursor += Int(entryLength) }
+
+                var field = cursor + MemoryLayout<UInt32>.size
+                let returnedAttrs = field.load(as: attribute_set_t.self)
+                field += MemoryLayout<attribute_set_t>.size
+
+                // `attrreference_t.attr_dataoffset` is relative to the address of the reference
+                // struct itself, not to the start of the entry or the buffer.
+                let nameRef = field.load(as: attrreference_t.self)
+                let nameBytes = (field + Int(nameRef.attr_dataoffset)).assumingMemoryBound(to: UInt8.self)
+                let nameLength = max(0, Int(nameRef.attr_length) - 1) // attr_length includes the trailing NUL
+                let name = String(decoding: UnsafeBufferPointer(start: nameBytes, count: nameLength), as: UTF8.self)
+                field += MemoryLayout<attrreference_t>.size
+
+                let objectType = field.load(as: fsobj_type_t.self)
+                field += MemoryLayout<fsobj_type_t>.size
+
+                let flags = field.load(as: UInt32.self)
+                field += MemoryLayout<UInt32>.size
+
+                let allocSizeReturned = (returnedAttrs.fileattr & UInt32(ATTR_FILE_ALLOCSIZE)) != 0
+                let allocSize = allocSizeReturned ? Int64(field.load(as: off_t.self)) : 0
+
+                // `.skipsHiddenFiles` parity: a dot-prefixed name AND a `UF_HIDDEN`-flagged entry
+                // are both "hidden" — and a hidden directory is never descended into, so its
+                // contents (however large) never reach `total`.
+                if name.hasPrefix(".") { continue }
+                if flags & UInt32(UF_HIDDEN) != 0 { continue }
+
+                switch objectType {
+                case VREG.rawValue:
+                    // The returned-attrs mask is honored, not assumed: a filesystem that didn't
+                    // hand back ATTR_FILE_ALLOCSIZE for this entry (rare — some non-local
+                    // volumes) falls back to a direct `lstat`-equivalent block count, the same
+                    // `st_blocks * 512` SweepCore's own `FileIdentity` uses for the same purpose.
+                    total += allocSizeReturned ? allocSize : fallbackAllocatedSize(directoryFD: directoryFD, name: name)
+                case VDIR.rawValue:
+                    pendingDirectories.append(directoryPath + "/" + name)
+                default:
+                    // Symbolic links (and any other object type) are never followed and never
+                    // counted, matching the legacy `values.isSymbolicLink == true { continue }`.
+                    continue
+                }
+            }
+        }
+        return total
+    }
+
+    private static func fallbackAllocatedSize(directoryFD: Int32, name: String) -> Int64 {
+        var status = stat()
+        let result = name.withCString { fstatat(directoryFD, $0, &status, AT_SYMLINK_NOFOLLOW) }
+        guard result == 0 else { return 0 }
+        return Int64(status.st_blocks) * 512
     }
 }
 

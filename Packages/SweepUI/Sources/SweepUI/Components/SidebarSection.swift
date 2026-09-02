@@ -12,9 +12,9 @@ public enum SidebarTier: Sendable {
     case toolbox
 
     var font: Font { self == .primary ? SweepFont.sidebarPrimary : SweepFont.sidebarToolbox }
-    var rowHeight: CGFloat { self == .primary ? 28 : 24 }
-    var glyphSize: CGFloat { self == .primary ? 12.5 : 11 }
-    var glyphWidth: CGFloat { self == .primary ? 20 : 18 }
+    var rowHeight: CGFloat { self == .primary ? 32 : 28 }
+    var glyphSize: CGFloat { self == .primary ? 13.5 : 12 }
+    var glyphWidth: CGFloat { self == .primary ? 22 : 20 }
     var indent: CGFloat { self == .primary ? SweepTokens.s2 : SweepTokens.s2 }
 }
 

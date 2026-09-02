@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// One row of an inventory: icon, title, optional path, size, tier, optional checkbox.
@@ -24,6 +25,10 @@ public struct InventoryRow: View {
     private let emphasis: Emphasis
     private let selection: Binding<Bool>?
     private let indented: Bool
+    /// When non-nil, a "Reveal in Finder" button fades in on hover and opens Finder selecting this
+    /// URL. Callers pass the item's real on-disk location (an absolute path); summary/aggregate
+    /// rows whose id is not a filesystem path pass `nil`.
+    private let revealURL: URL?
 
     @State private var isHovering = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -40,7 +45,8 @@ public struct InventoryRow: View {
         tier: SweepTier,
         emphasis: Emphasis = .standard,
         selection: Binding<Bool>? = nil,
-        indented: Bool = false
+        indented: Bool = false,
+        revealURL: URL? = nil
     ) {
         self.symbol = symbol
         self.title = title
@@ -52,13 +58,15 @@ public struct InventoryRow: View {
         self.emphasis = emphasis
         self.selection = selection
         self.indented = indented
+        self.revealURL = revealURL
     }
 
     public init(
         item: InventoryItem,
         emphasis: Emphasis = .standard,
         selection: Binding<Bool>? = nil,
-        indented: Bool = false
+        indented: Bool = false,
+        revealURL: URL? = nil
     ) {
         self.init(
             symbol: item.symbol,
@@ -69,7 +77,8 @@ public struct InventoryRow: View {
             tier: item.tier,
             emphasis: emphasis,
             selection: selection,
-            indented: indented
+            indented: indented,
+            revealURL: revealURL
         )
     }
 
@@ -103,6 +112,25 @@ public struct InventoryRow: View {
             }
 
             Spacer(minLength: SweepTokens.s3)
+
+            // Reveal in Finder: fades in on hover, holds a fixed slot so nothing shifts. Only
+            // present for rows that carry a real filesystem location.
+            if let revealURL {
+                Button {
+                    NSWorkspace.shared.activateFileViewerSelecting([revealURL])
+                } label: {
+                    Image(systemName: "arrow.up.forward.app")
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Reveal in Finder")
+                .frame(width: 16)
+                .opacity(isHovering ? 1 : 0)
+                .allowsHitTesting(isHovering)
+                .accessibilityLabel("Reveal \(title) in Finder")
+            }
 
             TierBadge(tier, showsSafe: emphasis == .summary)
 

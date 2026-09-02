@@ -11,6 +11,10 @@ import Observation
 final class AppState {
     var destination: Destination = .smartScan
     let scan: ScanModel
+    /// Owned here, not by `HomebrewScreen`, so the listing survives navigation and is warmed once
+    /// at launch rather than re-running `brew` lazily on every visit (user-reported slowness). The
+    /// screen reads it from the environment; its Refresh button is the only manual reload.
+    let homebrew = HomebrewModel()
     let environment: ScanEnvironment
     /// Uninstaller (module 5): one model shared by the screen, the drop targets and the
     /// SmartDelete watcher's deep link, so all three land on the exact same selection state.
@@ -29,6 +33,9 @@ final class AppState {
            let dest = Destination(rawValue: raw) {
             self.destination = dest
         }
+        // Warm the Homebrew listing at launch so the screen is populated on first open instead of
+        // running `brew` on the appear of every visit.
+        Task { await homebrew.refresh() }
     }
 
     // MARK: - Uninstaller deep links (PLAN §3 module 5, AppCleaner parity)

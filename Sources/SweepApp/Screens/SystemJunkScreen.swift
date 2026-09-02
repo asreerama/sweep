@@ -87,7 +87,7 @@ struct SystemJunkScreen: View {
 
     private var scanningState: some View {
         VStack(spacing: SweepTokens.s4) {
-            ScanRing(state: .scanning, diameter: 96) {
+            ScanRing(state: .scanning, diameter: 96, progress: scan.progress) {
                 HeroByteCounter(byteCount: scan.claimedBytes, size: 22)
             }
             Text(scan.scanningCaption)

@@ -19,20 +19,26 @@ extension EnvironmentValues {
     }
 }
 
-/// The radial sweep. Motion moment one.
+/// The scan ring. Motion moment one.
 ///
-/// Three layers: a hairline track that is always there, a conic comet that turns while the scan
-/// runs, and a solid accent ring that draws itself on completion. Finishing collapses the comet
-/// inward and hands the circle to the settled ring in a single spring — one gesture, not two
-/// animations that happen to overlap.
+/// Two modes, selected by whether the caller can report a determinate `progress` fraction:
 ///
-/// The turn is a `repeatForever` rotation handed to Core Animation, so it costs nothing on the
-/// main thread and interpolates at the display's real refresh rate. Under Reduce Motion nothing
-/// turns and nothing scales: the scanning state is a dimmed accent ring, and completion is a
-/// crossfade to the full-strength one.
+/// - **Determinate** (`progress` non-nil — the Smart Scan / System Junk hero): a thick, faint
+///   track and a bold indigo→violet gradient arc that grows to `progress` with a soft static
+///   glow behind it. Nothing travels, spins or pulses while scanning — the only motion is the arc
+///   filling and the number rolling. This is the "Minimal" treatment: the confident thickness and
+///   color volume without a distracting moving element.
+/// - **Indeterminate** (`progress` nil — the smaller secondary-screen scan indicators): the
+///   original turning conic comet, kept for callers with no fraction to show.
+///
+/// Both land the same way: on completion the arc closes to a full circle and the ring gives one
+/// settle-and-release pulse. Under Reduce Motion nothing turns or scales.
 public struct ScanRing<Content: View>: View {
     private let state: ScanRingState
     private let diameter: CGFloat
+    /// A 0…1 scan fraction, or `nil` for an indeterminate spinner. Only ever grows while scanning;
+    /// `state == .complete` overrides it to a full ring regardless.
+    private let progress: Double?
     private let content: Content
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -50,28 +56,50 @@ public struct ScanRing<Content: View>: View {
     public init(
         state: ScanRingState,
         diameter: CGFloat = 240,
+        progress: Double? = nil,
         @ViewBuilder content: () -> Content
     ) {
         self.state = state
         self.diameter = diameter
+        self.progress = progress
         self.content = content()
     }
 
-    private var trackWidth: CGFloat { max(1, diameter * 0.006) }
-    private var sweepWidth: CGFloat { max(2, diameter * 0.0125) }
+    /// One thick weight for both the track and the arc, so the fill reads as filling the same
+    /// channel the track carves — the "confident, thick" look, replacing the old hairline stroke.
+    private var trackWidth: CGFloat { max(3, diameter * 0.075) }
+    private var sweepWidth: CGFloat { max(3, diameter * 0.075) }
+
+    private var isDeterminate: Bool { progress != nil }
+
+    /// How much of the ring the determinate arc draws. `.complete` always shows a full circle so a
+    /// scan whose fraction lands a hair short of 1 still closes cleanly.
+    private var shownFraction: CGFloat {
+        switch state {
+        case .idle: 0
+        case .complete: 1
+        case .scanning: CGFloat(min(max(progress ?? 0, 0), 1))
+        }
+    }
 
     public var body: some View {
         ZStack {
             Circle()
-                .strokeBorder(.quaternary, lineWidth: trackWidth)
+                .strokeBorder(SweepTokens.accent.opacity(0.14), lineWidth: trackWidth)
 
-            if reduceMotion {
+            if isDeterminate {
+                determinateArc
+            } else if reduceMotion {
                 reducedIndicator
             } else {
                 comet
             }
 
-            settledRing
+            // The self-drawing completion ring belongs to the indeterminate path only; the
+            // determinate arc closes itself by trimming to 1 on `.complete`.
+            if !isDeterminate {
+                settledRing
+            }
 
             content
                 .frame(maxWidth: diameter * 0.74)
@@ -90,6 +118,28 @@ public struct ScanRing<Content: View>: View {
     }
 
     // MARK: - Layers
+
+    /// The "Minimal" determinate arc: a soft accent bloom behind a crisp indigo→violet gradient
+    /// stroke, both trimmed to `shownFraction`. It grows as the scan reports progress and closes to
+    /// a full circle on completion; the one completion pulse rides on `pulseScale`.
+    private var determinateArc: some View {
+        ZStack {
+            Circle()
+                .inset(by: sweepWidth / 2)
+                .trim(from: 0, to: shownFraction)
+                .stroke(SweepTokens.accent, style: StrokeStyle(lineWidth: sweepWidth * 1.15, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+                .blur(radius: sweepWidth * 0.7)
+                .opacity(0.5)
+            Circle()
+                .inset(by: sweepWidth / 2)
+                .trim(from: 0, to: shownFraction)
+                .stroke(SweepTokens.ringArc, style: StrokeStyle(lineWidth: sweepWidth, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+        }
+        .scaleEffect(pulseScale)
+        .animation(reduceMotion ? SweepMotion.crossfade : .easeOut(duration: 0.32), value: shownFraction)
+    }
 
     /// Conic comet: transparent for most of the turn, ramping to full accent at its head.
     private var comet: some View {
@@ -143,7 +193,8 @@ public struct ScanRing<Content: View>: View {
     }
 
     private func syncTurning() {
-        let shouldTurn = state == .scanning && !reduceMotion && animationsEnabled
+        // Determinate arcs never turn — their motion is the fill growing, not a sweep.
+        let shouldTurn = state == .scanning && !reduceMotion && animationsEnabled && !isDeterminate
         if shouldTurn {
             startSpin()
         } else {
@@ -196,8 +247,8 @@ public struct ScanRing<Content: View>: View {
 }
 
 extension ScanRing where Content == EmptyView {
-    public init(state: ScanRingState, diameter: CGFloat = 240) {
-        self.init(state: state, diameter: diameter) { EmptyView() }
+    public init(state: ScanRingState, diameter: CGFloat = 240, progress: Double? = nil) {
+        self.init(state: state, diameter: diameter, progress: progress) { EmptyView() }
     }
 }
 

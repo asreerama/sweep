@@ -162,4 +162,5 @@ private struct FailingPreviewGateway: BrewGateway {
     func autoremovePreview() async throws -> String { try await inner.autoremovePreview() }
     func autoremove() async throws -> String { try await inner.autoremove() }
     func upgrade(_ package: BrewPackage) async throws -> String { try await inner.upgrade(package) }
+    func uninstall(_ package: BrewPackage) async throws -> String { try await inner.uninstall(package) }
 }

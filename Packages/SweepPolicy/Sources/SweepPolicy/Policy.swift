@@ -88,16 +88,63 @@ public enum SweepPolicy {
     /// defeated by a symlink, a firmlink or a differently-normalized name. Nothing may mutate
     /// the filesystem on the strength of this returning `false`; that requires
     /// ``authorize(root:resolvedPath:identity:home:)``, which resolves identities.
+    ///
+    /// Call-site note: this convenience re-derives everything per call — the volume's comparison
+    /// rule (a syscall), the protected-URL set (Bundle work), and the folded ancestors. Fine for
+    /// one-off checks; a walker asking once per enumerated entry must build a ``LexicalDenyList``
+    /// per walk instead — measured at ~69 µs/entry here vs ~2 µs there, which made this call 92%
+    /// of a bulk walk's wall time.
     public static func isDeniedLexically(
         _ url: URL,
         home: URL = FileManager.default.homeDirectoryForCurrentUser
     ) -> Bool {
+        LexicalDenyList(volumeOf: url, home: home).isDenied(url)
+    }
+}
+
+/// The lexical denylist, prepared once for one volume's comparison rule and one home, so a
+/// per-entry query is pure string work: no syscalls, no URL construction, no re-folding of the
+/// ancestor set.
+///
+/// Correctness of the one-rule-per-walk assumption: a scan walk pins its root's volume and never
+/// crosses a device boundary (`WalkOptions.boundary`), so every entry it will ever ask about lives
+/// on the volume whose comparison rule was captured here. Answers are byte-for-byte identical to
+/// ``SweepPolicy/isDeniedLexically(_:home:)`` — that convenience is now implemented on top of this
+/// type, and `LexicalDenyListTests` asserts the equivalence over the tricky shapes (case flips,
+/// decomposed Unicode, trailing slashes, prefix-but-not-child names).
+public struct LexicalDenyList: Sendable {
+    private let comparison: NameComparison
+    /// Each protected ancestor pre-folded, stored as (exact, exact + "/") so a query is one
+    /// equality plus one prefix test — mirroring `NameComparison.isAtOrUnder`'s semantics,
+    /// including its trailing-slash trimming, which is applied at build time.
+    private let ancestors: [(exact: String, prefix: String)]
+
+    public init(
+        volumeOf url: URL,
+        home: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) {
         let comparison = NameComparison.forVolume(containing: url)
-        let standardized = url.standardizedFileURL.path
-        for urls in protectedURLs(home: home).values {
-            for protected in urls where !protected.path.isEmpty {
-                if comparison.isAtOrUnder(standardized, ancestor: protected.path) { return true }
+        self.comparison = comparison
+        self.ancestors = SweepPolicy.protectedURLs(home: home).values
+            .flatMap { $0 }
+            .compactMap { protected in
+                guard !protected.path.isEmpty else { return nil }
+                var folded = comparison.fold(protected.path)
+                while folded.count > 1 && folded.hasSuffix("/") { folded.removeLast() }
+                return (exact: folded, prefix: folded.hasSuffix("/") ? folded : folded + "/")
             }
+    }
+
+    public func isDenied(_ url: URL) -> Bool {
+        isDenied(standardizedPath: url.standardizedFileURL.path)
+    }
+
+    /// The hot path: `standardizedPath` must already be a standardized filesystem path (walkers
+    /// emit these), and the only per-call work is one fold of it plus the ancestor comparisons.
+    public func isDenied(standardizedPath: String) -> Bool {
+        let folded = comparison.fold(standardizedPath)
+        for ancestor in ancestors {
+            if folded == ancestor.exact || folded.hasPrefix(ancestor.prefix) { return true }
         }
         return false
     }

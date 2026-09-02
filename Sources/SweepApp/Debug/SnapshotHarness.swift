@@ -296,7 +296,8 @@ enum SnapshotHarness {
             let renderer = ImageRenderer(
                 content: SidebarView(
                     selection: .constant(state.destination),
-                    showsStressHarness: state.environment.showsStressHarness
+                    showsStressHarness: state.environment.showsStressHarness,
+                    isCollapsed: false
                 )
                 .padding(.top, titlebarInset)
                 .frame(width: column.width, height: column.height)
