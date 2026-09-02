@@ -4,10 +4,10 @@ import SweepPolicy
 import SweepUninstall
 
 /// Gate U's authorization layer, tested the same way `AuthorizedCleanPlanTests` tests Gate 1's:
-/// directly, against `AuthorizedUninstallPlan.authorize`, independent of the (still-closed)
-/// `UninstallService.gateUOpen` flag — this suite proves the pipeline correct *before* anyone
-/// ever flips it, not for the first time after (`UninstallServiceTests` covers the flag itself
-/// plus the end-to-end `UninstallService.runPipeline` shape).
+/// directly, against `AuthorizedUninstallPlan.authorize`, independent of the
+/// `UninstallService.gateUOpen` flag — this suite proved the pipeline correct *before* the gate
+/// opened, not for the first time after (`UninstallServiceTests` covers the flag itself plus
+/// the end-to-end `UninstallService.runPipeline` shape).
 final class UninstallAuthorizationTests: XCTestCase {
 
     // MARK: - Pure protection predicates (isolated from the filesystem entirely)

@@ -257,6 +257,10 @@ final class UninstallModel {
         leftoverGroups = []
         leftoverSelection = InventorySelection()
         previewSheetShown = false
+        // A snapshot never outlives the review it was captured for (Codex Gate-U adjudication:
+        // this used to survive here and in finishRemoval). Harmless mid-removal — executeRemoval
+        // copies the snapshot's values into the request at the click, before any await.
+        discardRemovalReview()
     }
 
     private func loadLeftovers(for app: InstalledApp) {
@@ -451,15 +455,27 @@ extension UninstallModel {
                 return
             }
 
-            let succeeded = outcomes.count { if case .succeeded = $0.status { true } else { false } }
-            removalReport = SweepUI.CleanReport(
-                freedBytes: finished?.freedBytesEstimate ?? 0,
-                succeededCount: succeeded,
-                outcomes: outcomes
-            )
+            removalReport = Self.makeRemovalReport(finished: finished, streamed: outcomes)
             isRemoving = false
             removalProgressCaption = nil
         }
+    }
+
+    /// The displayed report is built from the finished report's own outcome list, not the
+    /// streamed `itemCompleted` accumulation (Codex Gate-U adjudication: the interrupted-
+    /// leftover-phase path filed its "items may already be in the Trash" warning only in the
+    /// finished report, and a stream-built report silently dropped it). The stream stays as
+    /// the fallback for a run that never produced a finished report at all.
+    static func makeRemovalReport(
+        finished: SweepCore.CleanReport?, streamed: [SweepUI.CleanItemOutcome]
+    ) -> SweepUI.CleanReport {
+        let outcomes = finished.map { $0.outcomes.map(mapOutcome) } ?? streamed
+        let succeeded = outcomes.count { if case .succeeded = $0.status { true } else { false } }
+        return SweepUI.CleanReport(
+            freedBytes: finished?.freedBytesEstimate ?? 0,
+            succeededCount: succeeded,
+            outcomes: outcomes
+        )
     }
 
     /// Closes the report and reloads the world it changed: the app list (the bundle is gone),
@@ -467,6 +483,7 @@ extension UninstallModel {
     func finishRemoval() {
         removalReport = nil
         previewSheetShown = false
+        discardRemovalReview()
         clearSelection()
         // The bundle and its leftovers just left the disk: reload the app inventory from
         // scratch and rebuild the pre-walked root index + receipts cache against the new truth.

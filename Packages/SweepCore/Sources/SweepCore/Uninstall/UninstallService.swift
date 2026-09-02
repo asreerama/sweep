@@ -100,10 +100,9 @@ public struct UninstallRequest: Sendable {
 }
 
 public enum UninstallServiceError: Error, Equatable, CustomStringConvertible {
-    /// Gate U (PLAN §6) has not been opened in this build. Stays reachable for as long as
-    /// ``UninstallService/gateUOpen`` stays `false` — which, per the task this file was built
-    /// under, is for the entire lifetime of this change: Fable + Codex sign off before anyone
-    /// ever flips it, exactly like Gate 1's own `gate1Open`.
+    /// Gate U (PLAN §6) is closed. ``UninstallService/gateUOpen`` is `true` in this build
+    /// (opened 2026-09-01 after Fable + Codex sign-off, like Gate 1 before it), so this is now
+    /// reachable only through the runtime kill switch.
     case gateClosed
 
     public var description: String {
@@ -123,11 +122,15 @@ public enum UninstallServiceError: Error, Equatable, CustomStringConvertible {
 /// authorizes against a `RuleCatalog`. ``noCatalogDigestSentinel`` documents that explicitly
 /// rather than leaving the field looking like an omitted real value.
 public enum UninstallService {
-    /// Flipped only by Fable, only after Fable + Codex both sign off (task mandate: "it stays
-    /// gated closed like Gate 1 did until Fable + Codex sign off"). Nothing in this file, or
-    /// anywhere else in SweepCore, sets it — a source constant, not state, exactly like
-    /// `CleanService.gate1Open` before Gate 1 opened.
-    static let gateUOpen = false
+    /// OPEN as of 2026-09-01, per the same governance Gate 1 followed: three adversarial Codex
+    /// review rounds (identity-bound consent, per-item confirmation, deep staged-tree
+    /// validation, post-trash entry verification, honest interrupted-phase reporting), every
+    /// actionable finding fixed and regression-tested, and a final explicit SAFE adjudication
+    /// from Codex covering the platform-bounded residuals (Foundation's `trashItem` is
+    /// pathname-only, so a same-uid attacker able to win that race could equally delete the
+    /// files directly). A source constant, not state — only the runtime kill switch below can
+    /// narrow it back at run time.
+    static let gateUOpen = true
 
     /// Same two-factor shape as `CleanService.isEnabled`: the compile-time gate is necessary but
     /// not sufficient, and the runtime switch can only ever narrow it further, never widen a
@@ -295,7 +298,7 @@ public enum UninstallService {
                 // items may already be in the Trash, and the journal could not record which.
                 await journal.close()
                 var outcomes = settled
-                outcomes.append(CleanItemOutcome(
+                let interruption = CleanItemOutcome(
                     id: request.bundlePath.path, url: request.bundlePath, ruleID: nil,
                     detectorSource: "gateU.leftoverPhase", tier: nil, requestedAction: .trash,
                     outcome: .failed, failureReason: .journalUnavailable,
@@ -304,7 +307,12 @@ public enum UninstallService {
                         + "some selected leftovers may already be in the Trash, and the safety "
                         + "journal could not record which — nothing further was attempted, the "
                         + "app bundle was not touched"
-                ))
+                )
+                outcomes.append(interruption)
+                // Codex Gate-U adjudication: every outcome in the finished report must also have
+                // its own itemCompleted event — a consumer that renders from the item stream
+                // would otherwise never see this warning at all.
+                continuation.yield(.itemCompleted(interruption))
                 continuation.yield(.finished(CleanReport(
                     operationID: operationID, outcomes: outcomes, committed: false,
                     catalogDigest: noCatalogDigestSentinel, journalingDegraded: true,

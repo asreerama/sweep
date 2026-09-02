@@ -3,32 +3,17 @@ import XCTest
 import SweepUninstall
 
 /// `UninstallService` is Gate U's public entry point, mirroring `CleanServiceTests`' own split:
-/// the gate itself (closed, and staying closed until Fable + Codex sign off), and the real
-/// pipeline exercised through `runPipeline` — the internal seam that lets the whole thing be
-/// proven correct while `gateUOpen` stays `false`.
+/// the gate itself (open since 2026-09-01, after Fable + Codex sign-off), and the real pipeline
+/// exercised through `runPipeline` — the internal seam the suite was proven against while the
+/// gate was still closed, kept as the direct pipeline entry.
 final class UninstallServiceTests: XCTestCase {
 
     // MARK: - The gate itself
 
-    func testGateStaysClosedAndExecuteThrows() async throws {
-        XCTAssertFalse(UninstallService.gateUOpen, "Gate U must stay closed until Fable + Codex sign off")
+    func testGateIsOpenAndOnlyTheKillSwitchNarrowsIt() {
+        XCTAssertTrue(UninstallService.gateUOpen, "Gate U opened 2026-09-01 after Fable + Codex sign-off")
         XCTAssertTrue(UninstallService.isRuntimeDisabled(environment: ["SWEEP_UNINSTALL_SERVICE_DISABLED": "1"]))
         XCTAssertFalse(UninstallService.isRuntimeDisabled(environment: [:]))
-        XCTAssertFalse(UninstallService.isEnabled, "gateUOpen is false, so isEnabled must be false regardless of environment")
-
-        let home = try FixtureHome("gateU-closed")
-        let bundle = try home.makeAppBundle(bundleIdentifier: "com.example.Closed")
-        let request = UninstallRequest(
-            bundlePath: bundle, expectedBundleIdentifier: "com.example.Closed",
-            reviewedBundleIdentity: reviewed(bundle)
-        )
-
-        do {
-            _ = try await Self.collectEvents(UninstallService.execute(request))
-            XCTFail("execute must throw while the gate is closed")
-        } catch UninstallServiceError.gateClosed {
-            // expected
-        }
     }
 
     // MARK: - End to end: bundle-last ordering + WAL coverage

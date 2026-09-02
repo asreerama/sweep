@@ -445,7 +445,16 @@ private struct RemovalPreviewSheet: View {
         // Consent binds to what THIS sheet displays: identities snapshot on appear, die on
         // disappear (Codex Gate-U re-review #1/#4 — never captured at click time).
         .onAppear { model.prepareRemovalReview() }
-        .onDisappear { if model.removalReport == nil, !model.isRemoving { model.discardRemovalReview() } }
+        .onDisappear {
+            // Unconditional (Codex Gate-U adjudication): the snapshot is copied into the
+            // request at the Remove click itself, so a departed sheet can never authorize
+            // anything — no dismissal route may leave it alive.
+            model.discardRemovalReview()
+            // A standing report dismissed by any route (not just its Done button) still
+            // finalizes: the disk already changed, so the inventory reload must happen and
+            // the stale report must never greet the next review.
+            if model.removalReport != nil, !model.isRemoving { model.finishRemoval() }
+        }
     }
 
     private var sheetTitle: String {
