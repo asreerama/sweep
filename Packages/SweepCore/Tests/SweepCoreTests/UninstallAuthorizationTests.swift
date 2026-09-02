@@ -296,7 +296,10 @@ final class UninstallAuthorizationTests: XCTestCase {
 
         let request = UninstallRequest(
             bundlePath: bundle, expectedBundleIdentifier: "com.example.Incomplete",
-            selectedLeftoverPaths: [leftover.path], manualOverrideConfirmedPaths: [],
+            reviewedBundleIdentity: try FileIdentity.read(at: bundle),
+            selectedLeftoverPaths: [leftover.path],
+            reviewedLeftoverIdentityByPath: [leftover.path: try FileIdentity.read(at: leftover)],
+            manualOverrideConfirmedPaths: [],
             journalURL: home.url("unused-journal.jsonl"), home: home.root,
             applicationsDirectories: [home.applicationsDirectory, unreadableRoot],
             systemLaunchDaemonsDirectory: home.url("LaunchDaemons")
@@ -313,7 +316,10 @@ final class UninstallAuthorizationTests: XCTestCase {
         // With an explicit override, the same evidence is still admitted — capped, never refused.
         let overriddenRequest = UninstallRequest(
             bundlePath: bundle, expectedBundleIdentifier: "com.example.Incomplete",
-            selectedLeftoverPaths: [leftover.path], manualOverrideConfirmedPaths: [leftover.path],
+            reviewedBundleIdentity: try FileIdentity.read(at: bundle),
+            selectedLeftoverPaths: [leftover.path],
+            reviewedLeftoverIdentityByPath: [leftover.path: try FileIdentity.read(at: leftover)],
+            manualOverrideConfirmedPaths: [leftover.path],
             journalURL: home.url("unused-journal.jsonl"), home: home.root,
             applicationsDirectories: [home.applicationsDirectory, unreadableRoot],
             systemLaunchDaemonsDirectory: home.url("LaunchDaemons")
@@ -515,11 +521,34 @@ final class UninstallAuthorizationTests: XCTestCase {
         expectedBundleIdentifier: String,
         selectedLeftoverPaths: Set<String> = [],
         manualOverrideConfirmedPaths: Set<String> = [],
-        systemLaunchDaemonsDirectory: URL? = nil
+        systemLaunchDaemonsDirectory: URL? = nil,
+        reviewedBundleIdentityOverride: FileIdentity? = nil,
+        reviewedLeftoverIdentityByPathOverride: [String: FileIdentity]? = nil
     ) -> UninstallRequest {
-        UninstallRequest(
+        // Mirrors what the real review UI does at confirm time: lstat what it is showing and
+        // bind the selection to those objects. The overrides exist so mismatch tests can bind
+        // a WRONG identity deliberately.
+        // A bundle that does not exist (the bundleNotFound tests) cannot be lstat'd; the
+        // placeholder identity below never matches anything real, and those tests refuse on
+        // the earlier not-found read before the identity comparison is ever reached.
+        let reviewedBundle = reviewedBundleIdentityOverride
+            ?? (try? FileIdentity.read(at: bundlePath))
+            ?? FileIdentity(
+                deviceID: 0, inode: 0, volume: VolumeIdentity(deviceID: 0, uuid: nil),
+                kind: .directory, linkCount: 1, modification: .zero
+            )
+        let reviewedLeftovers = reviewedLeftoverIdentityByPathOverride ?? Dictionary(
+            uniqueKeysWithValues: selectedLeftoverPaths.compactMap { path -> (String, FileIdentity)? in
+                guard let identity = try? FileIdentity.read(at: URL(fileURLWithPath: path)) else { return nil }
+                return (path, identity)
+            }
+        )
+        return UninstallRequest(
             bundlePath: bundlePath, expectedBundleIdentifier: expectedBundleIdentifier,
-            selectedLeftoverPaths: selectedLeftoverPaths, manualOverrideConfirmedPaths: manualOverrideConfirmedPaths,
+            reviewedBundleIdentity: reviewedBundle,
+            selectedLeftoverPaths: selectedLeftoverPaths,
+            reviewedLeftoverIdentityByPath: reviewedLeftovers,
+            manualOverrideConfirmedPaths: manualOverrideConfirmedPaths,
             journalURL: home.url("unused-journal.jsonl"), home: home.root,
             applicationsDirectories: [home.applicationsDirectory],
             systemLaunchDaemonsDirectory: systemLaunchDaemonsDirectory ?? home.url("LaunchDaemons")
@@ -560,6 +589,73 @@ final class UninstallAuthorizationTests: XCTestCase {
         } catch {
             await journal.close()
             throw error
+        }
+    }
+}
+
+// MARK: - Reviewed-identity binding (Codex Gate-U re-review blocker #1)
+
+extension UninstallAuthorizationTests {
+    /// A different object renamed into the reviewed bundle path is refused wholesale — consent
+    /// bound the reviewed device+inode, not the path string.
+    func testBundleReplacedAfterReviewIsRefused() throws {
+        let home = try FixtureHome("gateU-bundle-swap")
+        let bundle = try home.makeAppBundle(bundleIdentifier: "com.example.Swap")
+        let reviewedIdentity = try FileIdentity.read(at: bundle)
+
+        // The review happened; then the bundle is replaced by an identical-looking imposter.
+        let stash = home.url("stash.app")
+        try FileManager.default.moveItem(at: bundle, to: stash)
+        _ = try home.makeAppBundle(bundleIdentifier: "com.example.Swap")
+
+        let request = Self.request(
+            home: home, bundlePath: bundle, expectedBundleIdentifier: "com.example.Swap",
+            reviewedBundleIdentityOverride: reviewedIdentity
+        )
+        XCTAssertThrowsError(try Self.authorize(request: request, isRunning: { _ in false })) { error in
+            guard case .bundleChangedSinceReview = error as? UninstallAuthorizationError else {
+                return XCTFail("expected bundleChangedSinceReview, got \(error)")
+            }
+        }
+    }
+
+    /// A leftover replaced after review is refused individually; its siblings are unaffected.
+    func testLeftoverReplacedAfterReviewIsRefusedIndividually() throws {
+        let home = try FixtureHome("gateU-leftover-swap")
+        let bundle = try home.makeAppBundle(bundleIdentifier: "com.example.LSwap")
+        let leftover = try home.makeLeftover(root: .caches, name: "com.example.LSwap")
+        let reviewedIdentity = try FileIdentity.read(at: leftover)
+
+        try FileManager.default.removeItem(at: leftover)
+        _ = try home.makeLeftover(root: .caches, name: "com.example.LSwap")
+
+        let request = Self.request(
+            home: home, bundlePath: bundle, expectedBundleIdentifier: "com.example.LSwap",
+            selectedLeftoverPaths: [leftover.path],
+            reviewedLeftoverIdentityByPathOverride: [leftover.path: reviewedIdentity]
+        )
+        let plan = try Self.authorize(request: request, isRunning: { _ in false })
+        XCTAssertTrue(plan.leftovers.isEmpty)
+        guard case .leftoverChangedSinceReview = plan.unresolvedLeftovers.first?.error else {
+            return XCTFail("expected leftoverChangedSinceReview, got \(String(describing: plan.unresolvedLeftovers.first?.error))")
+        }
+    }
+
+    /// Selection without any bound identity is not consent.
+    func testLeftoverSelectionWithoutReviewedIdentityIsRefused() throws {
+        let home = try FixtureHome("gateU-leftover-noid")
+        let bundle = try home.makeAppBundle(bundleIdentifier: "com.example.NoID")
+        let leftover = try home.makeLeftover(root: .caches, name: "com.example.NoID")
+
+        let request = Self.request(
+            home: home, bundlePath: bundle, expectedBundleIdentifier: "com.example.NoID",
+            selectedLeftoverPaths: [leftover.path],
+            reviewedLeftoverIdentityByPathOverride: [:]
+        )
+        let plan = try Self.authorize(request: request, isRunning: { _ in false })
+        XCTAssertTrue(plan.leftovers.isEmpty)
+        guard case .leftoverReviewedIdentityMissing = plan.unresolvedLeftovers.first?.error else {
+            return XCTFail("expected leftoverReviewedIdentityMissing, got \(String(describing: plan.unresolvedLeftovers.first?.error))")
         }
     }
 }

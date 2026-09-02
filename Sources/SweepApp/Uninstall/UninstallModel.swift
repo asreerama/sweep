@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import Observation
 import OSLog
+import SweepCore
 import SweepUI
 import SweepUninstall
 
@@ -60,6 +61,18 @@ final class UninstallModel {
     /// ~95% of the user-reported "Looking for leftovers…" stall.
     @ObservationIgnored private var receiptsCache: PrefetchedPkgutilReceipts?
     @ObservationIgnored private var receiptsTask: Task<Void, Never>?
+
+    // MARK: - Gate U execution state
+
+    /// True for the whole span of a live removal — the preview sheet shows progress in place.
+    private(set) var isRemoving = false
+    /// The finished removal's report, mapped to the shared report vocabulary; the sheet swaps to
+    /// `CleanReportState` while this is non-nil.
+    private(set) var removalReport: SweepUI.CleanReport?
+    private(set) var removalProgressCaption: String?
+
+    /// Whether this build can actually execute (Gate U open + runtime kill switch clear).
+    var canExecuteRemoval: Bool { SweepCore.UninstallService.isEnabled }
 
     init(home: URL = FileManager.default.homeDirectoryForCurrentUser) {
         self.home = home
@@ -328,6 +341,113 @@ final class UninstallModel {
             itemCount: bundleCount + selectedLeftoverCount,
             totalBytes: selectedAppTotalBytes + selectedLeftoverBytes,
             volumes: VolumeGrouping.volumes(for: selectedItems)
+        )
+    }
+}
+
+// MARK: - Gate U execution (the one place SweepApp calls SweepCore.UninstallService)
+
+extension UninstallModel {
+    /// Runs the removal the preview sheet just itemized. Captures reviewed identities HERE, at
+    /// confirm time, from exactly the objects the sheet displayed (Codex Gate-U re-review
+    /// blocker #1: consent binds device+inode, never path strings) — the service re-reads and
+    /// refuses anything that changed in between.
+    func executeRemoval() {
+        guard case .app(let app) = selection, !isRemoving, canExecuteRemoval else { return }
+        guard let bundleIdentifier = app.bundleIdentifier else { return }
+
+        let selectedPaths = Set(leftoverGroups.flatMap { group in
+            group.items.filter { leftoverSelection.contains($0.id) }.map(\.id)
+        })
+        guard let bundleIdentity = try? FileIdentity.read(at: app.bundlePath) else { return }
+        var reviewedByPath: [String: FileIdentity] = [:]
+        for path in selectedPaths {
+            if let identity = try? FileIdentity.read(at: URL(fileURLWithPath: path)) {
+                reviewedByPath[path] = identity
+            }
+        }
+
+        // Every selected path was individually rendered by the itemized preview sheet the user
+        // just confirmed (Codex Gate-U re-review finding #4), so each carries an explicit
+        // per-item confirmation — which the service only ever consults for paths whose
+        // recomputed evidence needs one.
+        let request = UninstallRequest(
+            bundlePath: app.bundlePath,
+            expectedBundleIdentifier: bundleIdentifier,
+            reviewedBundleIdentity: bundleIdentity,
+            selectedLeftoverPaths: selectedPaths,
+            reviewedLeftoverIdentityByPath: reviewedByPath,
+            manualOverrideConfirmedPaths: selectedPaths
+        )
+
+        isRemoving = true
+        removalProgressCaption = "Preparing\u{2026}"
+        Task {
+            var outcomes: [SweepUI.CleanItemOutcome] = []
+            var finished: SweepCore.CleanReport?
+            do {
+                for try await event in SweepCore.UninstallService.execute(request) {
+                    switch event {
+                    case .started(_, let itemCount):
+                        removalProgressCaption = "Removing \(SweepFormat.itemCount(itemCount))\u{2026}"
+                    case .itemCompleted(let outcome):
+                        outcomes.append(Self.mapOutcome(outcome))
+                        if let url = outcome.url {
+                            removalProgressCaption = url.lastPathComponent
+                        }
+                    case .progress:
+                        break
+                    case .finished(let report):
+                        finished = report
+                    }
+                }
+            } catch {
+                removalReport = SweepUI.CleanReport(
+                    freedBytes: 0, succeededCount: 0,
+                    outcomes: [SweepUI.CleanItemOutcome(
+                        id: app.bundlePath.path, title: app.name, byteCount: 0,
+                        status: .failed(reason: String(describing: error))
+                    )]
+                )
+                isRemoving = false
+                removalProgressCaption = nil
+                return
+            }
+
+            let succeeded = outcomes.count { if case .succeeded = $0.status { true } else { false } }
+            removalReport = SweepUI.CleanReport(
+                freedBytes: finished?.freedBytesEstimate ?? 0,
+                succeededCount: succeeded,
+                outcomes: outcomes
+            )
+            isRemoving = false
+            removalProgressCaption = nil
+        }
+    }
+
+    /// Closes the report and reloads the world it changed: the app list (the bundle is gone),
+    /// the leftover panel, and the pre-walked root index (those trees just changed).
+    func finishRemoval() {
+        removalReport = nil
+        previewSheetShown = false
+        clearSelection()
+        // The bundle and its leftovers just left the disk: reload the app inventory from
+        // scratch and rebuild the pre-walked root index + receipts cache against the new truth.
+        apps = []
+        loadApps()
+    }
+
+    private static func mapOutcome(_ outcome: SweepCore.CleanItemOutcome) -> SweepUI.CleanItemOutcome {
+        let title = outcome.url?.lastPathComponent ?? outcome.id
+        let status: SweepUI.CleanItemOutcome.Status
+        switch outcome.outcome {
+        case .succeeded:
+            status = .succeeded
+        default:
+            status = .failed(reason: outcome.detail ?? outcome.failureReason.map(String.init(describing:)) ?? "Did not complete.")
+        }
+        return SweepUI.CleanItemOutcome(
+            id: outcome.id, title: title, byteCount: outcome.allocatedSize, status: status
         )
     }
 }

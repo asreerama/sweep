@@ -275,6 +275,24 @@ enum TrashStaging {
                 throw FileDescriptorError.identityChanged(path: request.url.path)
             }
 
+            // Codex Gate-U finding #2: a directory is trashed whole, so what rides inside it
+            // matters. The staged tree — the object actually about to be trashed, post-rename,
+            // not the racy live path — is deep-walked here: every entry must live on the same
+            // device (a mount surfaced inside would drag another volume's content along), and no
+            // entry may carry the identity of a protected area (someone moving ~/Documents into
+            // a leftover directory after review must abort the trash, not enrich it). A refusal
+            // throws into the rollback path below, which renames the item back where it was.
+            if moved.kind == .directory {
+                let stagedPath = URL(fileURLWithPath: slot.path).appending(path: leaf).path
+                if let violation = DeepTreeValidator.firstViolation(
+                    inTreeAt: stagedPath, expectedDevice: moved.pathIdentity.deviceID
+                ) {
+                    throw FileDescriptorError.protectedContentInsideDirectory(
+                        path: request.url.path, detail: violation
+                    )
+                }
+            }
+
             // From this line on, `FileManager.trashItem` is a pathname API — the one hop in this
             // whole pipeline that cannot be made descriptor-relative, because Foundation's Trash
             // implementation only ever accepts a path. The window is narrowed as far as it can
@@ -354,6 +372,22 @@ enum TrashStaging {
                 rollbackReason: "rollback deliberately not attempted: trashItem's own success report "
                     + "makes the object's Trash bookkeeping state indeterminate"
             )
+        }
+
+        // Codex Gate-U finding #3: an empty slot proves the object LEFT, not where it WENT. When
+        // the system reported a resulting Trash URL, the object there must be the exact
+        // device+inode this process verified in the slot a moment ago — a same-uid substitution
+        // in `trashItem`'s one pathname hop would otherwise trash a different object and report
+        // success for the reviewed one. `lstat` of the Trash entry can only produce a false
+        // refusal (extra caution), never a false success.
+        if let trashResult {
+            var status = stat()
+            let matches = lstat(trashResult.path, &status) == 0
+                && UInt64(bitPattern: Int64(status.st_dev)) == actual.deviceID
+                && status.st_ino == actual.inode
+            guard matches else {
+                throw FileDescriptorError.trashedObjectMismatch(path: request.url.path, trashPath: trashResult.path)
+            }
         }
 
         try? operationQuarantine.removeChildDirectory(slotName)

@@ -58,6 +58,11 @@ enum UninstallAuthorizationError: Error, Equatable, CustomStringConvertible {
     /// specific "someone modified a sealed resource after we authorized this" case is
     /// unambiguous in the report.
     case bundleSignatureInvalidAtStaging(path: String)
+    /// Codex Gate-U re-review blocker #1: the object now at the bundle path is not the
+    /// device+inode the user reviewed. Consent binds to the reviewed object, never to whatever a
+    /// path string currently names — a replacement renamed into place after review is refused,
+    /// not adopted.
+    case bundleChangedSinceReview(path: String)
 
     // MARK: Leftover-level (settle just that one selection)
     /// The re-derived matcher output has nothing at this path at all, or only an excluded root
@@ -71,6 +76,12 @@ enum UninstallAuthorizationError: Error, Equatable, CustomStringConvertible {
     case leftoverManualConfirmationRequired(path: String)
     case leftoverIdentityUnreadable(path: String)
     case leftoverPolicyDenied(path: String, reason: SweepPolicy.DenialReason)
+    /// Codex Gate-U re-review blocker #1, leftover half: the object now at this path is not the
+    /// device+inode captured when the user reviewed it.
+    case leftoverChangedSinceReview(path: String)
+    /// The caller supplied no reviewed identity for this selected path at all — selection
+    /// without a bound identity is not consent this pipeline accepts.
+    case leftoverReviewedIdentityMissing(path: String)
 
     var description: String {
         switch self {
@@ -98,6 +109,12 @@ enum UninstallAuthorizationError: Error, Equatable, CustomStringConvertible {
             "refused: \(path) was not independently matched by the re-derived leftover evidence"
         case .leftoverManualConfirmationRequired(let path):
             "refused: \(path) needs an explicit per-item manual confirmation before it can be authorized"
+        case .bundleChangedSinceReview(let path):
+            "refused: the app bundle at \(path) is not the object that was reviewed; it changed or was replaced since"
+        case .leftoverChangedSinceReview(let path):
+            "refused: \(path) is not the object that was reviewed; it changed or was replaced since"
+        case .leftoverReviewedIdentityMissing(let path):
+            "refused: \(path) was selected without a reviewed identity bound to the selection"
         case .leftoverIdentityUnreadable(let path):
             "refused: \(path) could not be read live"
         case .leftoverPolicyDenied(let path, let reason):
@@ -394,6 +411,13 @@ struct AuthorizedUninstallPlan: Sendable {
             throw UninstallAuthorizationError.bundleNotFound(path: bundlePath.path)
         }
 
+        // 1b. Codex Gate-U re-review blocker #1: the live object must BE the reviewed object
+        // (device+inode), not merely occupy the reviewed path. Everything after this line
+        // authorizes the object the user actually looked at, or nothing.
+        guard bundleIdentity.isSameFile(as: request.reviewedBundleIdentity) else {
+            throw UninstallAuthorizationError.bundleChangedSinceReview(path: bundlePath.path)
+        }
+
         // 2. Info.plist bundle id, read fresh — never the caller's claim about it, only cross-
         // checked against the caller's claim.
         guard let liveBundleIdentifier = Bundle(url: bundlePath)?.bundleIdentifier, !liveBundleIdentifier.isEmpty else {
@@ -452,7 +476,12 @@ struct AuthorizedUninstallPlan: Sendable {
             )
             switch decision {
             case .allowed(let authorization):
-                let candidate = ScanCandidate(url: bundlePath, identity: bundleIdentity, allocatedSize: 0, ruleID: nil)
+                // Codex Gate-U re-review finding #6: report bytes are real, measured here once —
+                // never the zero placeholder that made every outcome claim nothing was removed.
+                let candidate = ScanCandidate(
+                    url: bundlePath, identity: bundleIdentity,
+                    allocatedSize: AllocatedTreeSize.bytes(atPath: bundlePath.path), ruleID: nil
+                )
                 return AuthorizedUninstallItem(
                     role: .bundle(wasVerified: wasVerified),
                     candidate: candidate,
@@ -652,6 +681,28 @@ struct AuthorizedUninstallPlan: Sendable {
                 ? .manualReview
                 : match.confidence
 
+            let leftoverIdentity: FileIdentity
+            do {
+                leftoverIdentity = try FileIdentity.read(at: match.url)
+            } catch {
+                unresolved.append(.init(path: path, error: .leftoverIdentityUnreadable(path: path)))
+                continue
+            }
+
+            // Codex Gate-U re-review blocker #1, leftover half — checked FIRST, before any
+            // confidence/override reasoning: selection binds to the reviewed object. No reviewed
+            // identity on record, or a live object that no longer matches it, refuses this one
+            // selection — never silently adopts the current occupant. A manual-confirmation
+            // refusal for an object that is not even the reviewed one would be the wrong story.
+            guard let reviewedIdentity = request.reviewedLeftoverIdentityByPath[path] else {
+                unresolved.append(.init(path: path, error: .leftoverReviewedIdentityMissing(path: path)))
+                continue
+            }
+            guard leftoverIdentity.isSameFile(as: reviewedIdentity) else {
+                unresolved.append(.init(path: path, error: .leftoverChangedSinceReview(path: path)))
+                continue
+            }
+
             switch effectiveConfidence {
             case .orphan:
                 // Unreachable in practice: `LeftoverMatcher.candidates(for:)` only ever emits
@@ -668,14 +719,6 @@ struct AuthorizedUninstallPlan: Sendable {
                 }
             case .autoSelectable:
                 break
-            }
-
-            let leftoverIdentity: FileIdentity
-            do {
-                leftoverIdentity = try FileIdentity.read(at: match.url)
-            } catch {
-                unresolved.append(.init(path: path, error: .leftoverIdentityUnreadable(path: path)))
-                continue
             }
 
             let rootURL = match.root.url(
@@ -699,7 +742,10 @@ struct AuthorizedUninstallPlan: Sendable {
                   )
                 : nil
 
-            let candidate = ScanCandidate(url: match.url, identity: leftoverIdentity, allocatedSize: 0, ruleID: nil)
+            let candidate = ScanCandidate(
+                url: match.url, identity: leftoverIdentity,
+                allocatedSize: AllocatedTreeSize.bytes(atPath: match.url.path), ruleID: nil
+            )
             admitted.append(AuthorizedUninstallItem(
                 role: .leftover(evidence: match.evidence, manualOverride: overrideToken),
                 candidate: candidate,

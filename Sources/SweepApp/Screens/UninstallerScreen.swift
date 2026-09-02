@@ -342,10 +342,21 @@ private struct RemovalPreviewSheet: View {
     @Bindable var model: UninstallModel
 
     var body: some View {
+        if let report = model.removalReport {
+            // The finished removal, in the same report vocabulary as every other clean.
+            CleanReportState(report: report, onDone: { model.finishRemoval() })
+                .frame(width: 500)
+                .fixedSize(horizontal: false, vertical: true)
+        } else {
+            previewBody
+        }
+    }
+
+    private var previewBody: some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: SweepTokens.s2) {
                 Text(sheetTitle)
-                    .font(SweepFont.screenTitle)
+                    .font(SweepFont.sectionTitle)
                     .foregroundStyle(.primary)
                 let summary = model.previewSummary()
                 HStack(spacing: SweepTokens.s2 - 2) {
@@ -374,6 +385,9 @@ private struct RemovalPreviewSheet: View {
                             )
                         }
                     }
+                    // Every selected path, individually, no cap (Codex Gate-U re-review
+                    // finding #4): what the user confirms here is exactly, itemized, what the
+                    // request will carry — never a count standing in for a list.
                     ForEach(selectedGroupSummaries) { row in
                         SectionCard {
                             InventoryRow(
@@ -381,28 +395,48 @@ private struct RemovalPreviewSheet: View {
                                 detailIsPath: false, sizeValue: row.sizeValue, sizeUnit: row.sizeUnit,
                                 tier: row.tier, emphasis: .summary
                             )
+                            ForEach(row.items) { item in
+                                Divider().padding(.horizontal, SweepTokens.s3)
+                                InventoryRow(
+                                    symbol: item.symbol, title: item.title, detail: item.detail,
+                                    sizeValue: item.sizeValue, sizeUnit: item.sizeUnit,
+                                    tier: item.tier, emphasis: .standard
+                                )
+                            }
                         }
                     }
                     if selectedGroupSummaries.isEmpty, case .app = model.selection {
-                        Footnote("No leftovers selected \u{2014} only the app itself would move to Trash.", symbol: "info.circle")
+                        Footnote("No leftovers selected \u{2014} only the app itself will move to Trash.", symbol: "info.circle")
                     }
-                    Footnote("Nothing is removed yet. This review is read-only until Gate U opens.", symbol: "lock")
+                    Footnote(
+                        "Everything above goes to the Trash \u{2014} nothing is deleted outright. Restore from the Trash to undo.",
+                        symbol: "arrow.uturn.backward"
+                    )
                 }
                 .padding(SweepTokens.s5)
             }
 
             Divider()
             HStack(spacing: SweepTokens.s3) {
-                GateNotice("App removal arrives at Gate U")
+                if model.isRemoving {
+                    ProgressView().controlSize(.small)
+                    Text(model.removalProgressCaption ?? "Removing\u{2026}")
+                        .font(SweepFont.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                } else if !model.canExecuteRemoval {
+                    GateNotice("App removal is disabled in this build")
+                }
                 Spacer(minLength: SweepTokens.s3)
                 Button("Cancel") { model.previewSheetShown = false }
                     .buttonStyle(.sweepQuiet)
                     .keyboardShortcut(.cancelAction)
-                Button("Remove") {}
+                    .disabled(model.isRemoving)
+                Button("Remove") { model.executeRemoval() }
                     .buttonStyle(.sweepDestructive())
-                    .disabled(true)
-                    .help("App removal arrives at Gate U")
-                    .accessibilityHint("Disabled. App removal arrives at Gate U.")
+                    .disabled(!model.canExecuteRemoval || model.isRemoving)
+                    .accessibilityHint("Moves the app and every item listed above to the Trash.")
             }
             .padding(SweepTokens.s5)
         }
@@ -426,6 +460,8 @@ private struct RemovalPreviewSheet: View {
         let sizeValue: String
         let sizeUnit: String
         let tier: SweepTier
+        /// Every selected item in the group — the itemized list the sheet renders in full.
+        let items: [InventoryItem]
     }
 
     private var selectedGroupSummaries: [GroupSummaryRow] {
@@ -436,7 +472,7 @@ private struct RemovalPreviewSheet: View {
             let parts = SweepFormat.split(bytes)
             return GroupSummaryRow(
                 id: group.id, title: group.title, symbol: group.symbol, count: selectedItems.count,
-                sizeValue: parts.value, sizeUnit: parts.unit, tier: group.tier
+                sizeValue: parts.value, sizeUnit: parts.unit, tier: group.tier, items: selectedItems
             )
         }
     }

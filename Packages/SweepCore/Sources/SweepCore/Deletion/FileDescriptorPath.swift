@@ -31,6 +31,16 @@ enum FileDescriptorError: Error, Equatable, CustomStringConvertible {
     /// The just-created, supposedly-exclusive quarantine slot did not come back with the
     /// identity/ownership this process expects immediately after creating it.
     case quarantineSlotIdentityUnexpected(String)
+    /// A directory staged for the Trash was found, on the pre-trash deep walk of its staged
+    /// tree, to contain something that must never ride along: an entry on a different device (a
+    /// mount surfaced inside it) or an object whose identity matches a protected area
+    /// (Documents, Desktop, Photos…, moved inside it since review). Staging is rolled back.
+    case protectedContentInsideDirectory(path: String, detail: String)
+    /// `trashItem` succeeded and the slot is verifiably empty, but the object at the reported
+    /// Trash location is not the object this process verified in the slot — a substitution in
+    /// the one unavoidable pathname hop. The reviewed object's whereabouts are indeterminate;
+    /// never reported as success.
+    case trashedObjectMismatch(path: String, trashPath: String)
 
     var code: Int32? {
         switch self {
@@ -49,7 +59,7 @@ enum FileDescriptorError: Error, Equatable, CustomStringConvertible {
     var isIdentityRefusal: Bool {
         switch self {
         case .symlinkComponent, .notADirectory, .componentIdentityChanged, .volumeBoundary,
-             .identityChanged, .descendantIdentityChanged:
+             .identityChanged, .descendantIdentityChanged, .protectedContentInsideDirectory:
             true
         default:
             false
@@ -92,6 +102,10 @@ enum FileDescriptorError: Error, Equatable, CustomStringConvertible {
             "moved to quarantine at \(path) but could not be trashed (\(underlying)) or rolled back (\(rollback)); recovery required"
         case .quarantineSlotIdentityUnexpected(let reason):
             "refused: freshly created quarantine slot did not verify: \(reason)"
+        case .protectedContentInsideDirectory(let path, let detail):
+            "refused: \(path) \(detail); staging rolled back, nothing was trashed"
+        case .trashedObjectMismatch(let path, let trashPath):
+            "trashItem reported success for \(path) but the object at \(trashPath) is not the reviewed one; treated as failed, never as success"
         }
     }
 }

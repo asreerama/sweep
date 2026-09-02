@@ -18,7 +18,10 @@ final class UninstallServiceTests: XCTestCase {
 
         let home = try FixtureHome("gateU-closed")
         let bundle = try home.makeAppBundle(bundleIdentifier: "com.example.Closed")
-        let request = UninstallRequest(bundlePath: bundle, expectedBundleIdentifier: "com.example.Closed")
+        let request = UninstallRequest(
+            bundlePath: bundle, expectedBundleIdentifier: "com.example.Closed",
+            reviewedBundleIdentity: reviewed(bundle)
+        )
 
         do {
             _ = try await Self.collectEvents(UninstallService.execute(request))
@@ -48,7 +51,9 @@ final class UninstallServiceTests: XCTestCase {
         let journalURL = home.url("uninstall-journal.jsonl")
         let request = UninstallRequest(
             bundlePath: bundle, expectedBundleIdentifier: "com.example.E2E",
+            reviewedBundleIdentity: reviewed(bundle),
             selectedLeftoverPaths: [leftoverA.path, leftoverB.path],
+            reviewedLeftoverIdentityByPath: reviewedMap([leftoverA, leftoverB]),
             manualOverrideConfirmedPaths: [],
             journalURL: journalURL, home: home.root,
             applicationsDirectories: [home.applicationsDirectory],
@@ -117,7 +122,10 @@ final class UninstallServiceTests: XCTestCase {
 
         let request = UninstallRequest(
             bundlePath: bundle, expectedBundleIdentifier: "com.example.manual.differentnamespace",
-            selectedLeftoverPaths: [leftover.path], manualOverrideConfirmedPaths: [leftover.path],
+            reviewedBundleIdentity: reviewed(bundle),
+            selectedLeftoverPaths: [leftover.path],
+            reviewedLeftoverIdentityByPath: reviewedMap([leftover]),
+            manualOverrideConfirmedPaths: [leftover.path],
             journalURL: home.url("uninstall-journal.jsonl"), home: home.root,
             applicationsDirectories: [home.applicationsDirectory],
             systemLaunchDaemonsDirectory: home.url("LaunchDaemons")
@@ -153,6 +161,7 @@ final class UninstallServiceTests: XCTestCase {
 
         let request = UninstallRequest(
             bundlePath: bundle, expectedBundleIdentifier: "com.example.ServiceForge",
+            reviewedBundleIdentity: reviewed(bundle),
             selectedLeftoverPaths: [forgedPath], manualOverrideConfirmedPaths: [],
             journalURL: home.url("uninstall-journal.jsonl"), home: home.root,
             applicationsDirectories: [home.applicationsDirectory],
@@ -178,7 +187,10 @@ final class UninstallServiceTests: XCTestCase {
     func testQuitVerificationPreflightRefusesAStillRunningAppAfterGrace() async throws {
         let home = try FixtureHome("gateU-quit-preflight")
         let bundle = try home.makeAppBundle(bundleIdentifier: "com.example.StillRunning")
-        let request = UninstallRequest(bundlePath: bundle, expectedBundleIdentifier: "com.example.StillRunning")
+        let request = UninstallRequest(
+            bundlePath: bundle, expectedBundleIdentifier: "com.example.StillRunning",
+            reviewedBundleIdentity: reviewed(bundle)
+        )
 
         // Deterministic, fast: the app never stops being "running," and the grace window is tiny
         // so this test costs milliseconds, not the real 5-second production default.
@@ -230,7 +242,10 @@ final class UninstallServiceTests: XCTestCase {
         let journalURL = home.url("uninstall-journal.jsonl")
         let request = UninstallRequest(
             bundlePath: bundle, expectedBundleIdentifier: "com.example.LateRefusal",
-            selectedLeftoverPaths: [leftover.path], manualOverrideConfirmedPaths: [],
+            reviewedBundleIdentity: reviewed(bundle),
+            selectedLeftoverPaths: [leftover.path],
+            reviewedLeftoverIdentityByPath: reviewedMap([leftover]),
+            manualOverrideConfirmedPaths: [],
             journalURL: journalURL, home: home.root,
             applicationsDirectories: [home.applicationsDirectory],
             systemLaunchDaemonsDirectory: home.url("LaunchDaemons")
@@ -300,7 +315,9 @@ final class UninstallServiceTests: XCTestCase {
         let journalURL = home.url("uninstall-journal.jsonl")
         let request = UninstallRequest(
             bundlePath: bundle, expectedBundleIdentifier: "com.example.provenance.distinctnamespace",
+            reviewedBundleIdentity: reviewed(bundle),
             selectedLeftoverPaths: [manualLeftover.path, autoLeftover.path],
+            reviewedLeftoverIdentityByPath: reviewedMap([manualLeftover, autoLeftover]),
             manualOverrideConfirmedPaths: [manualLeftover.path],
             journalURL: journalURL, home: home.root,
             applicationsDirectories: [home.applicationsDirectory],
@@ -368,4 +385,18 @@ final class CallCounter: @unchecked Sendable {
         count += 1
         return count
     }
+}
+
+
+// MARK: - Reviewed-identity capture (Codex Gate-U re-review blocker #1)
+
+/// What the real review UI does at confirm time: lstat the objects it is showing. Fixture
+/// paths always exist by the time a test builds its request, so `try!` is deliberate — a
+/// missing fixture is a broken test, not a scenario.
+private func reviewed(_ url: URL) -> FileIdentity {
+    try! FileIdentity.read(at: url)
+}
+
+private func reviewedMap(_ urls: [URL]) -> [String: FileIdentity] {
+    Dictionary(uniqueKeysWithValues: urls.map { ($0.path, reviewed($0)) })
 }

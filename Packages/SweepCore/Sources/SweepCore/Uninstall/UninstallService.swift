@@ -25,6 +25,17 @@ public struct UninstallRequest: Sendable {
     /// does not need it grants nothing.
     public let manualOverrideConfirmedPaths: Set<String>
 
+    /// Codex Gate-U re-review blocker #1: consent binds to OBJECTS, not path strings. The
+    /// device+inode of the bundle as the review UI last showed it; authorization refuses the
+    /// whole plan if the live bundle is no longer this exact object. Captured by the caller at
+    /// review time (an `lstat` of what it is rendering), so a replacement renamed into the path
+    /// between review and confirm is refused rather than adopted.
+    public let reviewedBundleIdentity: FileIdentity
+    /// Same binding per selected leftover, keyed by `selectedLeftoverPaths` entries. A selected
+    /// path with no entry here — or whose live object no longer matches — is refused
+    /// individually (`leftoverReviewedIdentityMissing` / `leftoverChangedSinceReview`).
+    public let reviewedLeftoverIdentityByPath: [String: FileIdentity]
+
     let journalURL: URL
     let home: URL
     let applicationsDirectories: [URL]
@@ -33,13 +44,17 @@ public struct UninstallRequest: Sendable {
     public init(
         bundlePath: URL,
         expectedBundleIdentifier: String,
+        reviewedBundleIdentity: FileIdentity,
         selectedLeftoverPaths: Set<String> = [],
+        reviewedLeftoverIdentityByPath: [String: FileIdentity] = [:],
         manualOverrideConfirmedPaths: Set<String> = []
     ) {
         self.init(
             bundlePath: bundlePath,
             expectedBundleIdentifier: expectedBundleIdentifier,
+            reviewedBundleIdentity: reviewedBundleIdentity,
             selectedLeftoverPaths: selectedLeftoverPaths,
+            reviewedLeftoverIdentityByPath: reviewedLeftoverIdentityByPath,
             manualOverrideConfirmedPaths: manualOverrideConfirmedPaths,
             journalURL: UninstallRequest.defaultJournalURL(),
             home: FileManager.default.homeDirectoryForCurrentUser,
@@ -53,7 +68,9 @@ public struct UninstallRequest: Sendable {
     init(
         bundlePath: URL,
         expectedBundleIdentifier: String,
+        reviewedBundleIdentity: FileIdentity,
         selectedLeftoverPaths: Set<String>,
+        reviewedLeftoverIdentityByPath: [String: FileIdentity] = [:],
         manualOverrideConfirmedPaths: Set<String>,
         journalURL: URL,
         home: URL,
@@ -62,7 +79,9 @@ public struct UninstallRequest: Sendable {
     ) {
         self.bundlePath = bundlePath
         self.expectedBundleIdentifier = expectedBundleIdentifier
+        self.reviewedBundleIdentity = reviewedBundleIdentity
         self.selectedLeftoverPaths = selectedLeftoverPaths
+        self.reviewedLeftoverIdentityByPath = reviewedLeftoverIdentityByPath
         self.manualOverrideConfirmedPaths = manualOverrideConfirmedPaths
         self.journalURL = journalURL
         self.home = home
@@ -219,6 +238,12 @@ public enum UninstallService {
         }
 
         let orderedItems = plan.orderedItems
+        // Codex Gate-U re-review finding #9: keyed by resolved path, not identity — two
+        // hard-linked leftovers share one inode but are distinct reviewed items, and an
+        // identity-keyed lookup bridged the second one with the first one's evidence, tier and
+        // consent provenance. Identity remains only as a fallback for a coordinator-normalized
+        // spelling of the same single item.
+        let itemsByPath = Dictionary(orderedItems.map { ($0.resolvedPath.path, $0) }, uniquingKeysWith: { first, _ in first })
         let itemsByIdentity = Dictionary(orderedItems.map { ($0.candidate.identity, $0) }, uniquingKeysWith: { first, _ in first })
         let anchors = plan.anchors
         let sampleVolumes = Set(anchors.map(\.url))
@@ -233,7 +258,9 @@ public enum UninstallService {
             throw error
         }
 
-        continuation.yield(.started(operationID: operationID, itemCount: orderedItems.count))
+        // Codex Gate-U re-review finding #10: the count matches the completion events actually
+        // emitted — refused selections (`settled`) get itemCompleted events below too.
+        continuation.yield(.started(operationID: operationID, itemCount: orderedItems.count + settled.count))
         for outcome in settled { continuation.yield(.itemCompleted(outcome)) }
 
         // Codex Gate-U finding #4 (bundle-last transactional safety): leftovers execute first,
@@ -267,6 +294,9 @@ public enum UninstallService {
 
         var allResults = leftoverResults
         let committed: Bool
+        // Codex Gate-U re-review finding #7: the bundle phase's own journal degradation must
+        // reach the final report — before, `journalingDegraded` reported only the leftover phase.
+        var bundleJournalingDegraded = false
 
         if leftoverJournalingDegraded {
             // Mirrors the pre-existing single-plan behavior exactly (Codex G1 finding #1): a
@@ -302,6 +332,7 @@ public enum UninstallService {
                 // truth for "did the bundle actually get removed" is the item's own outcome, not
                 // the report-level commit flag.
                 let bundleItemSucceeded = bundleReport.results.first?.outcome == .succeeded
+                bundleJournalingDegraded = bundleReport.journalingDegraded || !bundleReport.committed
                 if bundleItemSucceeded {
                     allResults.append(contentsOf: bundleReport.results)
                     committed = bundleReport.committed
@@ -332,7 +363,10 @@ public enum UninstallService {
         var allOutcomes = settled
         var bytesSoFar: Int64 = 0
         for result in allResults {
-            let outcome = CleanItemOutcome(uninstallResult: result, item: itemsByIdentity[result.item.identity])
+            let outcome = CleanItemOutcome(
+                uninstallResult: result,
+                item: itemsByPath[result.item.url.path] ?? itemsByIdentity[result.item.identity]
+            )
             allOutcomes.append(outcome)
             if result.outcome == .succeeded { bytesSoFar += result.item.allocatedSize }
             continuation.yield(.itemCompleted(outcome))
@@ -341,7 +375,8 @@ public enum UninstallService {
 
         continuation.yield(.finished(CleanReport(
             operationID: operationID, outcomes: allOutcomes, committed: committed,
-            catalogDigest: noCatalogDigestSentinel, journalingDegraded: leftoverJournalingDegraded,
+            catalogDigest: noCatalogDigestSentinel,
+            journalingDegraded: leftoverJournalingDegraded || bundleJournalingDegraded,
             freedBytesEstimate: freed
         )))
     }
@@ -548,9 +583,13 @@ extension CleanItemOutcome {
             if let override {
                 detectorSource = "gateU.leftover.manualOverride"
                 let mintedAtDescription = ISO8601DateFormatter().string(from: override.mintedAt)
-                detail = "manual override confirmed by caller for \(override.callerPath) "
+                // Codex Gate-U re-review finding #8: provenance rides WITH the executor's own
+                // account of what physically happened, never in place of it — a failed or
+                // compensated manual item keeps its real explanation.
+                let provenance = "manual override confirmed by caller for \(override.callerPath) "
                     + "(canonical: \(override.canonicalPath), nonce: \(override.nonce.uuidString)); "
                     + "evidence=\(evidence.journalTag); mintedAt=\(mintedAtDescription)"
+                detail = result.detail.map { "\($0) | \(provenance)" } ?? provenance
             } else {
                 detectorSource = "gateU.leftover.auto"
                 detail = result.detail ?? "evidence=\(evidence.journalTag)"
