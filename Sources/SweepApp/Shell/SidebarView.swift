@@ -156,26 +156,29 @@ private struct SidebarRailRow: View {
     var body: some View {
         Button(action: action) {
             glyph
-                .frame(width: 48, height: tier == .primary ? 38 : 34)
+                .frame(width: 56, height: tier == .primary ? 52 : 44)
                 .background {
                     RoundedRectangle(cornerRadius: SweepTokens.rowRadius, style: .continuous)
                         .fill(background)
                 }
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(SidebarPressStyle())
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 1)
+        .padding(.vertical, 3)
         .onHover { isHovering = $0 }
         .help(title)
         .accessibilityLabel(title)
         .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
     }
 
-    /// Same module-hue chip as the full-width rows (scale v3) — the rail keeps the tier contract
-    /// the same way the expanded sidebar does, through size alone.
+    /// The rail carries the whole module identity in the chip alone, so it runs a size UP from
+    /// the full-width rows (36 pt vs 32) with real air between slots — the accessible
+    /// "app launcher" read, not a cramped icon strip (user-directed).
     private var glyph: some View {
-        ModuleIcon(symbol: symbol, diameter: tier == .primary ? 26 : 22)
+        ModuleIcon(symbol: symbol, diameter: tier == .primary ? 36 : 30)
+            .scaleEffect(isHovering && !isSelected ? 1.07 : 1)
+            .animation(SweepMotion.row, value: isHovering)
     }
 
     private var background: AnyShapeStyle {

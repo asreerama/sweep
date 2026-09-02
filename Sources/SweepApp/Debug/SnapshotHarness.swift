@@ -33,6 +33,11 @@ enum SnapshotHarness {
             prefix = "light"
         }
 
+        // SWEEP_SNAPSHOT_RAIL=1 collapses the sidebar to the icon rail for the whole run
+        // (writes the same @AppStorage key the toggle flips; reset to expanded otherwise so a
+        // rail run never leaks into the next capture).
+        UserDefaults.standard.set(environment["SWEEP_SNAPSHOT_RAIL"] == "1", forKey: "sweep.sidebar.collapsed")
+
         let scanHold = Double(environment["SWEEP_SNAPSHOT_SCAN_WAIT"] ?? "") ?? 1.0
 
         await settle(seconds: 1.2)

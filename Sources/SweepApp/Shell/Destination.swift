@@ -37,16 +37,21 @@ enum Destination: String, Hashable, Identifiable, CaseIterable {
         }
     }
 
+    /// Glyph set v2 (user-directed: "think about modern icons for the same things" — the
+    /// literal-object symbols read as a boomer utility): each module keeps its meaning but
+    /// speaks the current SaaS register — cleaning is bubbles-and-sparkles rather than a trash
+    /// can, maintenance is tuning sliders rather than a wrench, uninstalling is the dashed app
+    /// frame rather than an x-marked bin, developer is code brackets rather than a hammer.
     var symbol: String {
         switch self {
         case .smartScan: "sparkles"
-        case .systemJunk: "trash"
-        case .largeFiles: "doc.zipper"
+        case .systemJunk: "bubbles.and.sparkles"
+        case .largeFiles: "archivebox"
         case .memory: "memorychip"
-        case .maintenance: "wrench.and.screwdriver"
-        case .startupItems: "power"
-        case .uninstaller: "xmark.bin"
-        case .developer: "hammer"
+        case .maintenance: "slider.horizontal.3"
+        case .startupItems: "bolt"
+        case .uninstaller: "app.dashed"
+        case .developer: "chevron.left.forwardslash.chevron.right"
         case .homebrew: "mug"
         case .listStress: "speedometer"
         case .cleanFlowPreview: "sparkle.magnifyingglass"

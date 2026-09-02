@@ -11,7 +11,9 @@ struct RootView: View {
     @AppStorage("sweep.sidebar.collapsed") private var sidebarCollapsed = false
 
     private static let sidebarWidth: CGFloat = 248
-    private static let railWidth: CGFloat = 72
+    // 80 pt clears the rail's 56 pt slots with real margin either side (scale v4: the rail is
+    // an app launcher, not a cramped icon strip).
+    private static let railWidth: CGFloat = 80
 
     var body: some View {
         // A hand-rolled split, not `NavigationSplitView`: on macOS 26 the system sidebar renders

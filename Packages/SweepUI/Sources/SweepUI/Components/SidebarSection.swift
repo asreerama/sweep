@@ -3,9 +3,10 @@ import SwiftUI
 /// The sidebar's two tiers, expressed as one enum so the difference is a data choice rather
 /// than duplicated view code.
 ///
-/// Scale v3: primary rows are 15 pt medium on a 38 pt row with a 26 pt module chip — the
-/// System Settings register, not an Xcode inspector. Toolbox rows sit one visible step down
-/// (14 pt regular, 34 pt row, 22 pt chip): advanced tools, quieter, out of the way, exactly
+/// Scale v4 (user-directed: "they are the main features of the app"): primary rows are 15 pt
+/// medium on a 44 pt row with a 32 pt module chip — the modules read as the app's marquee
+/// destinations, not an Xcode inspector's filter list. Toolbox rows sit one visible step down
+/// (14 pt regular, 38 pt row, 26 pt chip): advanced tools, quieter, out of the way, exactly
 /// the contract in PLAN §3 — Toolbox modules never auto-select and never feed Smart Scan, and
 /// the sidebar should say so before the user clicks anything.
 public enum SidebarTier: Sendable {
@@ -13,10 +14,23 @@ public enum SidebarTier: Sendable {
     case toolbox
 
     var font: Font { self == .primary ? SweepFont.sidebarPrimary : SweepFont.sidebarToolbox }
-    var rowHeight: CGFloat { self == .primary ? 38 : 34 }
+    var rowHeight: CGFloat { self == .primary ? 44 : 38 }
     var glyphSize: CGFloat { self == .primary ? 15 : 13.5 }
-    var glyphWidth: CGFloat { self == .primary ? 26 : 22 }
+    var glyphWidth: CGFloat { self == .primary ? 32 : 26 }
     var indent: CGFloat { self == .primary ? SweepTokens.s2 : SweepTokens.s2 }
+}
+
+/// Press feedback for the sidebar's module rows in both layouts (full-width and icon rail):
+/// a quick settle-down on press, released on the same spring. The punch that makes a row feel
+/// like a button rather than a list line.
+public struct SidebarPressStyle: ButtonStyle {
+    public init() {}
+
+    public func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.965 : 1)
+            .animation(.spring(response: 0.22, dampingFraction: 0.75), value: configuration.isPressed)
+    }
 }
 
 /// Uppercase group label. `CLEAN`, `SPEED`, `APPS`, `TOOLBOX`.
@@ -76,7 +90,7 @@ public struct SidebarRow: View {
 
     public var body: some View {
         Button(action: action) {
-            HStack(spacing: SweepTokens.s2) {
+            HStack(spacing: SweepTokens.s3) {
                 icon
                 Text(title)
                     .font(tier.font)
@@ -99,7 +113,7 @@ public struct SidebarRow: View {
             }
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(SidebarPressStyle())
         .padding(.horizontal, tier.indent)
         .onHover { isHovering = $0 }
         .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
@@ -107,11 +121,14 @@ public struct SidebarRow: View {
 
     /// Every row gets the colored "System Settings" chip (scale v3 — the whole sidebar carries
     /// the module-hue identity now, Toolbox included). The tier contract survives in metrics,
-    /// not icon treatment: Toolbox chips are 4 pt smaller on a shorter row in a lighter face.
+    /// not icon treatment: Toolbox chips are 6 pt smaller on a shorter row in a lighter face.
     /// `ModuleIcon` itself falls back to a plain hierarchical glyph for symbols with no assigned
-    /// hue, so an unrecognized row degrades to exactly the old look.
+    /// hue, so an unrecognized row degrades to exactly the old look. Hover pops the chip a step
+    /// forward — the "this is clickable" cue, on the icon rather than the whole row.
     private var icon: some View {
         ModuleIcon(symbol: symbol, diameter: tier.glyphWidth)
+            .scaleEffect(isHovering && !isSelected ? 1.07 : 1)
+            .animation(SweepMotion.row, value: isHovering)
     }
 
     private var background: AnyShapeStyle {

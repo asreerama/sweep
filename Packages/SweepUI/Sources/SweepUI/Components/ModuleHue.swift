@@ -18,17 +18,21 @@ import SwiftUI
 /// lightness — no single module badge should read as more "important" than another purely
 /// because its color happens to be punchier.
 public enum SweepModuleHue {
+    /// Keyed by both the current glyph set (v2, the modern-register symbols) and the v1
+    /// literal-object names: group headers and other identity call sites may still carry a v1
+    /// symbol, and a module's hue must never depend on which vintage of its glyph a call site
+    /// happens to hold.
     public static func color(forSymbol symbol: String) -> Color? {
         switch symbol {
-        case "sparkles": SweepTokens.accent                // Smart Scan
-        case "trash": Color(hex: 0x5B93D9)                 // System Junk — muted blue
-        case "doc.zipper": Color(hex: 0x4FB6A6)            // Large & Old Files — muted teal
-        case "memorychip": Color(hex: 0x5CB37B)            // Memory — muted green
-        case "wrench.and.screwdriver": Color(hex: 0x6C93A6) // Maintenance — muted slate
-        case "power": Color(hex: 0xA67CB5)                 // Startup Items — muted plum
-        case "xmark.bin": Color(hex: 0xD97BA0)             // Uninstaller — muted rose
-        case "hammer": Color(hex: 0x8B8FD6)                // Developer — muted lavender
-        case "mug": Color(hex: 0xB08968)                   // Homebrew — muted tan
+        case "sparkles": SweepTokens.accent                                        // Smart Scan
+        case "bubbles.and.sparkles", "trash": Color(hex: 0x5B93D9)                 // System Junk — muted blue
+        case "archivebox", "doc.zipper": Color(hex: 0x4FB6A6)                      // Large & Old Files — muted teal
+        case "memorychip": Color(hex: 0x5CB37B)                                    // Memory — muted green
+        case "slider.horizontal.3", "wrench.and.screwdriver": Color(hex: 0x6C93A6) // Maintenance — muted slate
+        case "bolt", "power": Color(hex: 0xA67CB5)                                 // Startup Items — muted plum
+        case "app.dashed", "xmark.bin": Color(hex: 0xD97BA0)                       // Uninstaller — muted rose
+        case "chevron.left.forwardslash.chevron.right", "hammer": Color(hex: 0x8B8FD6) // Developer — muted lavender
+        case "mug": Color(hex: 0xB08968)                                           // Homebrew — muted tan
         default: nil
         }
     }
@@ -65,15 +69,37 @@ public struct ModuleIcon: View {
 
     public var body: some View {
         if let hue = SweepModuleHue.color(forSymbol: symbol) {
+            // The "pressable app icon" treatment, not a flat color square: the hue's own
+            // gradient for the base, a top light-to-grounded-base wash and a hairline inner
+            // rim for glassy depth, and a shadow tinted in the chip's own hue so it lifts off
+            // the sidebar material. Everything scales off `diameter`, so the same identity
+            // holds from a 26 pt toolbox chip to a hub tile.
             RoundedRectangle(cornerRadius: diameter * 0.28, style: .continuous)
                 .fill(hue.gradient)
+                .overlay {
+                    RoundedRectangle(cornerRadius: diameter * 0.28, style: .continuous)
+                        .fill(LinearGradient(
+                            stops: [
+                                .init(color: .white.opacity(0.28), location: 0),
+                                .init(color: .white.opacity(0.02), location: 0.5),
+                                .init(color: .black.opacity(0.10), location: 1),
+                            ],
+                            startPoint: .top, endPoint: .bottom
+                        ))
+                }
+                .overlay {
+                    RoundedRectangle(cornerRadius: diameter * 0.28, style: .continuous)
+                        .strokeBorder(.white.opacity(0.20), lineWidth: 1)
+                }
                 .frame(width: diameter, height: diameter)
                 .overlay {
                     Image(systemName: symbol)
-                        .font(.system(size: diameter * 0.52, weight: .medium))
+                        .font(.system(size: diameter * 0.52, weight: .semibold))
                         .symbolRenderingMode(.hierarchical)
                         .foregroundStyle(.white)
+                        .shadow(color: .black.opacity(0.18), radius: 0.5, y: 0.5)
                 }
+                .shadow(color: hue.opacity(0.32), radius: diameter * 0.10, y: diameter * 0.05)
         } else {
             Image(systemName: symbol)
                 .font(.system(size: diameter * 0.52, weight: .regular))

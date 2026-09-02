@@ -226,11 +226,16 @@ struct MemoryScreen: View {
         ZStack {
             if let snapshot {
                 ScrollView {
+                    // Order is actionability (user-directed): the pressure gauge is the vital
+                    // sign, the quittable app list is the lever, and the breakdown/swap
+                    // bookkeeping shares one half-width band at the bottom.
                     VStack(alignment: .leading, spacing: SweepTokens.s5) {
                         pressureSection(snapshot)
-                        breakdownSection(snapshot)
-                        swapSection(snapshot)
                         processesSection(snapshot)
+                        HStack(alignment: .top, spacing: SweepTokens.s5) {
+                            breakdownSection(snapshot)
+                            swapSection(snapshot)
+                        }
                     }
                     .padding(SweepTokens.s5)
                 }
@@ -251,13 +256,11 @@ struct MemoryScreen: View {
 
     private func pressureSection(_ snapshot: SystemSnapshot) -> some View {
         SectionCard {
-            SweepStatRow(
-                symbol: "gauge.with.dots.needle.67percent",
-                title: "Memory Pressure",
-                valueText: MemoryScreenLogic.pressureLabel(snapshot.memoryPressure),
+            PressureMeter(
+                level: snapshot.memoryPressure,
                 fraction: usedFraction(snapshot),
-                tint: MemoryScreenLogic.pressureTint(snapshot.memoryPressure),
-                isBreathing: snapshot.memoryPressure != .normal
+                usedText: "\(MemoryScreenLogic.formatMemory(usedBytes(snapshot))) of "
+                    + "\(MemoryScreenLogic.formatMemory(snapshot.memory.totalBytes)) used"
             )
             .padding(SweepTokens.s4)
         }
@@ -510,9 +513,18 @@ struct MemoryScreen: View {
 
     // MARK: - Derived data
 
+    /// Activity Monitor's "Memory Used" composition (app + wired + compressed), not
+    /// `1 - free/total`: macOS keeps `free_count` near zero by design (file cache and inactive
+    /// pages are reclaimable but not "free"), so the free-based fraction pinned the gauge at
+    /// ~99% on a perfectly healthy machine — screenshot-verified before this change.
+    private func usedBytes(_ snapshot: SystemSnapshot) -> UInt64 {
+        let memory = snapshot.memory
+        return min(memory.appMemoryBytes + memory.wiredBytes + memory.compressedBytes, memory.totalBytes)
+    }
+
     private func usedFraction(_ snapshot: SystemSnapshot) -> Double {
         guard snapshot.memory.totalBytes > 0 else { return 0 }
-        return 1 - Double(snapshot.memory.freeBytes) / Double(snapshot.memory.totalBytes)
+        return Double(usedBytes(snapshot)) / Double(snapshot.memory.totalBytes)
     }
 
     private func processRows(_ snapshot: SystemSnapshot) -> [MemoryProcessRow] {
@@ -603,5 +615,108 @@ struct MemoryScreen: View {
     private static func displayName(forBundlePath bundlePath: String) -> String {
         let name = FileManager.default.displayName(atPath: bundlePath)
         return name.hasSuffix(".app") ? String(name.dropLast(4)) : name
+    }
+}
+
+/// The pressure gauge with an actual measure (user-directed: "not just a stupid bar which shows
+/// filled"): a scaled track with quarter ticks and 0/50/100% axis labels, the used fraction as
+/// the fill, the live percentage and kernel level up top, and the byte readout on the axis line.
+/// The fill's tint is the kernel's own pressure level — the one honest signal macOS exposes —
+/// and the fraction is physical RAM in use; the two together are the whole story, with nothing
+/// invented (the kernel publishes no numeric zone thresholds, so the scale draws none).
+private struct PressureMeter: View {
+    let level: MemoryPressureLevel
+    let fraction: Double
+    let usedText: String
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var breathPhase = false
+
+    private var tint: Color { MemoryScreenLogic.pressureTint(level) }
+    private var clamped: Double { min(max(fraction, 0), 1) }
+    private var shouldBreathe: Bool { level != .normal && !reduceMotion }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: SweepTokens.s2) {
+            HStack(spacing: SweepTokens.s2) {
+                Image(systemName: "gauge.with.dots.needle.67percent")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+                Text("Memory Pressure")
+                    .font(SweepFont.rowTitleEmphasis)
+                Spacer(minLength: SweepTokens.s2)
+                Text("\(Int((clamped * 100).rounded()))%")
+                    .font(SweepFont.mono)
+                    .monospacedDigit()
+                    .foregroundStyle(.primary)
+                levelChip
+            }
+            track
+            HStack {
+                axisLabel("0")
+                Spacer()
+                Text(usedText)
+                    .font(SweepFont.caption)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                Spacer()
+                axisLabel("100%")
+            }
+        }
+        .onAppear { syncBreath() }
+        .onChange(of: shouldBreathe) { _, _ in syncBreath() }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(
+            "Memory pressure \(MemoryScreenLogic.pressureLabel(level)), "
+                + "\(Int((clamped * 100).rounded())) percent of memory used, \(usedText)"
+        )
+    }
+
+    private var levelChip: some View {
+        Text(MemoryScreenLogic.pressureLabel(level))
+            .font(SweepFont.badge)
+            .fontWeight(.semibold)
+            .foregroundStyle(tint)
+            .padding(.horizontal, SweepTokens.s2)
+            .padding(.vertical, 3)
+            .background(Capsule(style: .continuous).fill(tint.opacity(0.14)))
+    }
+
+    private var track: some View {
+        GeometryReader { proxy in
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(.fill.tertiary)
+                // Quarter ticks: the measure the fill is read against.
+                ForEach([0.25, 0.5, 0.75], id: \.self) { stop in
+                    Rectangle()
+                        .fill(.separator)
+                        .frame(width: 1)
+                        .offset(x: proxy.size.width * stop)
+                }
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(tint.gradient)
+                    .frame(width: max(4, proxy.size.width * clamped))
+                    .opacity(shouldBreathe && breathPhase ? 0.55 : 1)
+            }
+        }
+        .frame(height: 10)
+        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+        .animation(SweepMotion.counter, value: clamped)
+    }
+
+    private func axisLabel(_ text: String) -> some View {
+        Text(text)
+            .font(SweepFont.badge)
+            .foregroundStyle(.tertiary)
+            .monospacedDigit()
+    }
+
+    private func syncBreath() {
+        if shouldBreathe {
+            withAnimation(SweepMotion.breathe) { breathPhase = true }
+        } else {
+            withAnimation(SweepMotion.crossfade) { breathPhase = false }
+        }
     }
 }
