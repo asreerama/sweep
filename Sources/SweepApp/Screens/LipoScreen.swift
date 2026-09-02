@@ -52,6 +52,20 @@ final class LipoModel {
     var thinAllRequested = false
     private(set) var thinAllNeedsAdmin = false
 
+    /// Raised whenever any thin outcome comes back TCC-blocked (`needsAppManagement`): drives
+    /// the guided dialog that opens System Settings at the exact pane, instead of leaving the
+    /// user to navigate Privacy & Security by prose directions (user-directed).
+    var appManagementPromptShown = false
+
+    /// The deep link straight to Privacy & Security → App Management — the pane where the Sweep
+    /// toggle lives.
+    static let appManagementSettingsURL =
+        URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AppBundles")!
+
+    func openAppManagementSettings() {
+        NSWorkspace.shared.open(Self.appManagementSettingsURL)
+    }
+
     private var scanTask: Task<Void, Never>?
 
     /// Sum of every listed row's estimated savings, excluding rows already successfully thinned
@@ -151,6 +165,7 @@ final class LipoModel {
             let outcome = await LipoThinningService.thin(appAt: row.bundlePath)
             thinningIDs.remove(row.id)
             outcomesByID[row.id] = outcome
+            if outcome.needsAppManagement { appManagementPromptShown = true }
         }
     }
 
@@ -192,6 +207,7 @@ final class LipoModel {
             let outcomes = await LipoThinningService.thinAll(appsAt: targets.map(\.bundlePath))
             for (id, outcome) in outcomes { outcomesByID[id] = outcome }
             for row in targets { thinningIDs.remove(row.id) }
+            if outcomes.values.contains(where: \.needsAppManagement) { appManagementPromptShown = true }
         }
     }
 }
@@ -245,6 +261,18 @@ struct LipoScreen: View {
         }
         .animation(SweepMotion.layout, value: model.phase)
         .task { model.scanIfNeeded() }
+        // The TCC failure gets a guided flow, not prose directions (user-directed): one button
+        // lands the user on the exact Settings pane, and the message says the one toggle to flip.
+        .alert("macOS blocked Sweep from changing apps", isPresented: Bindable(model).appManagementPromptShown) {
+            Button("Open Settings") { model.openAppManagementSettings() }
+            Button("Not Now", role: .cancel) {}
+        } message: {
+            Text(
+                "Thinning system-installed apps needs the \u{201C}App Management\u{201D} permission. "
+                    + "Settings will open on Privacy & Security \u{2192} App Management \u{2014} turn on Sweep "
+                    + "there, then thin again. If it still fails, quit and reopen Sweep first."
+            )
+        }
         .confirmationDialog(
             confirmTitle,
             isPresented: Binding(
@@ -418,12 +446,13 @@ private struct LipoAppRowView: View {
                     .truncationMode(.tail)
                 // A failure's reason lives in the row itself, not only behind the chip's hover
                 // tooltip — "Thin failed" alone is exactly the opaque dead-end the first
-                // real-world run of this screen produced.
+                // real-world run of this screen produced. ONE line, truncated: a long reason
+                // must never stretch the row (the full text stays on the chip's tooltip).
                 if let outcome, !outcome.succeeded {
                     Text(outcome.message)
                         .font(SweepFont.caption)
                         .foregroundStyle(SweepTokens.tierExpert)
-                        .lineLimit(2)
+                        .lineLimit(1)
                         .truncationMode(.tail)
                 }
             }

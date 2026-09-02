@@ -609,6 +609,10 @@ struct LipoThinOutcome: Sendable, Equatable {
     /// Always populated: the success caption ("Freed 412 MB") or an honest failure reason,
     /// surfaced in the row's state chip / tooltip either way.
     let message: String
+    /// True when macOS's TCC "App Management" protection refused the write — the one failure the
+    /// user fixes in System Settings, not by retrying, so the screen raises a guided
+    /// open-Settings dialog for it instead of leaving a bare failure row.
+    var needsAppManagement = false
 }
 
 /// Runs the one destructive action this module offers: thin every fat Mach-O in one app bundle
@@ -622,7 +626,7 @@ struct LipoThinOutcome: Sendable, Equatable {
 enum LipoThinningService {
     static func thin(appAt bundlePath: URL, fileManager: FileManager = .default) async -> LipoThinOutcome {
         guard let bundle = Bundle(url: bundlePath), let executableURL = bundle.executableURL else {
-            return LipoThinOutcome(succeeded: false, freedBytes: 0, message: "Could not read this app's executable.")
+            return LipoThinOutcome(succeeded: false, freedBytes: 0, message: "Could not read this app\u{2019}s executable.")
         }
 
         let candidates = LipoBundleWalker.machOCandidates(
@@ -742,7 +746,7 @@ enum LipoThinningService {
         for bundlePath in bundlePaths {
             guard let bundle = Bundle(url: bundlePath), let executableURL = bundle.executableURL else {
                 outcomes[bundlePath.path] = LipoThinOutcome(
-                    succeeded: false, freedBytes: 0, message: "Could not read this app's executable."
+                    succeeded: false, freedBytes: 0, message: "Could not read this app\u{2019}s executable."
                 )
                 continue
             }
@@ -865,8 +869,8 @@ enum LipoThinningService {
                 for plan in bundlePlans {
                     outcomes[plan.bundlePath] = LipoThinOutcome(
                         succeeded: false, freedBytes: 0,
-                        message: "macOS blocked the change. Grant Sweep \u{201C}App Management\u{201D} in "
-                            + "System Settings \u{2192} Privacy & Security, then try again."
+                        message: "Blocked by macOS \u{2014} App Management permission needed.",
+                        needsAppManagement: true
                     )
                 }
                 return outcomes
