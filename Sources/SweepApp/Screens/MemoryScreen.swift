@@ -77,6 +77,42 @@ enum MemoryScreenLogic {
     static func quittablePIDs(processFootprints: [Int32], regularAppPIDs: Set<Int32>) -> [Int32] {
         processFootprints.filter { regularAppPIDs.contains($0) }
     }
+
+    /// One app's aggregated memory: every process whose executable lives inside the app's
+    /// outermost bundle, summed. This is what a person means by "how much memory is Notion
+    /// using" — the Electron/browser helper split (user-reported: a page of anonymous
+    /// "Helper (Renderer)" rows where only one row had a Quit button) is process bookkeeping
+    /// they never chose and can't act on.
+    struct AppMemoryAggregate: Identifiable, Equatable {
+        let bundlePath: String
+        let totalBytes: UInt64
+        let processCount: Int
+        var id: String { bundlePath }
+    }
+
+    /// Pure fold, injected resolver — unit-testable without Darwin. Processes that resolve to
+    /// no app bundle (true daemons) fold into one "system & background" bucket.
+    static func aggregateByApp(
+        processes: [(pid: Int32, bytes: UInt64)],
+        bundlePathForPID: (Int32) -> String?
+    ) -> (apps: [AppMemoryAggregate], otherBytes: UInt64, otherCount: Int) {
+        var byApp: [String: (bytes: UInt64, count: Int)] = [:]
+        var otherBytes: UInt64 = 0
+        var otherCount = 0
+        for process in processes {
+            if let bundle = bundlePathForPID(process.pid) {
+                let prior = byApp[bundle] ?? (0, 0)
+                byApp[bundle] = (prior.bytes + process.bytes, prior.count + 1)
+            } else {
+                otherBytes += process.bytes
+                otherCount += 1
+            }
+        }
+        let apps = byApp
+            .map { AppMemoryAggregate(bundlePath: $0.key, totalBytes: $0.value.bytes, processCount: $0.value.count) }
+            .sorted { $0.totalBytes > $1.totalBytes }
+        return (apps, otherBytes, otherCount)
+    }
 }
 
 /// One row of the top-processes table. `runningApp` is looked up once per snapshot tick and
@@ -102,7 +138,22 @@ struct MemoryScreen: View {
     /// decode a bare process name. Resolved from the process's own bundle; a bundleless system
     /// process resolves to `nil` and the row falls back to a tasteful Apple mark.
     @State private var iconsByPID: [Int32: NSImage] = [:]
-    @State private var pendingForceQuit: MemoryProcessRow?
+    /// Outermost app bundle per pid (`.some(nil)` = resolved as a non-app daemon), cached across
+    /// ticks the same way `iconsByPID` is — `proc_pidpath` per pid per tick would be waste.
+    @State private var bundlePathByPID: [Int32: String?] = [:]
+    @State private var appIconsByPath: [String: NSImage] = [:]
+    @State private var appAggregates: [MemoryScreenLogic.AppMemoryAggregate] = []
+    @State private var otherProcessesBytes: UInt64 = 0
+    @State private var showAllProcesses = false
+    @State private var pendingForceQuit: QuitTarget?
+
+    /// One quit request, whichever row shape asked for it — an aggregated app row or a raw
+    /// process row from the disclosure list.
+    private struct QuitTarget: Identifiable {
+        let name: String
+        let app: NSRunningApplication
+        var id: Int32 { app.processIdentifier }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -121,11 +172,31 @@ struct MemoryScreen: View {
             // Own sampler instance: this screen is not the menubar, and `StatsSampler` is cheap
             // and stateless between callers (see its own doc comment). Cancelled automatically
             // when the view goes away, same as `MenuBarStats`'s identical `.task`.
-            let sampler = StatsSampler(configuration: .init(interval: .seconds(2), topProcessCount: 12))
+            // 200, not a screenful: the sampler reads every process each tick anyway (the limit
+            // is a post-sort truncation), and the per-APP totals below are only honest if the
+            // window catches an app's long tail of small helpers, not just its top few.
+            let sampler = StatsSampler(configuration: .init(interval: .seconds(2), topProcessCount: 200))
             for await value in await sampler.snapshots() {
                 snapshot = value
                 runningAppsByPID = Self.regularRunningApps()
-                iconsByPID = Self.resolveIcons(for: value.topProcesses.map(\.pid), cache: iconsByPID)
+                let pids = value.topProcesses.map(\.pid)
+                iconsByPID = Self.resolveIcons(for: Array(pids.prefix(Self.allProcessesRowCap)), cache: iconsByPID)
+                var pathCache = bundlePathByPID
+                for pid in pids where pathCache[pid] == nil {
+                    pathCache[pid] = .some(Self.outermostAppBundlePath(forPID: pid))
+                }
+                bundlePathByPID = pathCache.filter { pids.contains($0.key) }
+                let aggregated = MemoryScreenLogic.aggregateByApp(
+                    processes: value.topProcesses.map { ($0.pid, $0.physicalFootprintBytes) },
+                    bundlePathForPID: { pathCache[$0] ?? nil }
+                )
+                appAggregates = aggregated.apps
+                otherProcessesBytes = aggregated.otherBytes
+                var icons = appIconsByPath
+                for app in aggregated.apps where icons[app.bundlePath] == nil {
+                    icons[app.bundlePath] = NSWorkspace.shared.icon(forFile: app.bundlePath)
+                }
+                appIconsByPath = icons.filter { path, _ in aggregated.apps.contains { $0.bundlePath == path } }
             }
         }
         .confirmationDialog(
@@ -249,12 +320,18 @@ struct MemoryScreen: View {
         }
     }
 
+    /// How many raw process rows the "All processes" disclosure shows — the old Top Processes
+    /// list, demoted to an advanced view (user-directed: apps with quit buttons are the point,
+    /// per-process bookkeeping is not).
+    private static let allProcessesRowCap = 12
+    /// How many aggregated app rows show before the list stops earning its scroll.
+    private static let appRowCap = 10
+
     private func processesSection(_ snapshot: SystemSnapshot) -> some View {
-        let rows = processRows(snapshot)
-        return SectionCard {
+        SectionCard {
             VStack(spacing: 0) {
                 HStack {
-                    Text("Top Processes")
+                    Text("Apps Using Memory")
                         .font(SweepFont.sectionTitle)
                         .foregroundStyle(.secondary)
                     Spacer()
@@ -263,22 +340,112 @@ struct MemoryScreen: View {
                 .padding(.top, SweepTokens.s4)
                 .padding(.bottom, SweepTokens.s2)
 
-                if rows.isEmpty {
+                if appAggregates.isEmpty {
                     Text("No process data yet.")
                         .font(SweepFont.caption)
                         .foregroundStyle(.tertiary)
                         .padding(.horizontal, SweepTokens.s4)
                         .padding(.bottom, SweepTokens.s4)
                 } else {
-                    ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
+                    ForEach(Array(appAggregates.prefix(Self.appRowCap).enumerated()), id: \.element.id) { index, app in
                         if index > 0 { Divider().padding(.horizontal, SweepTokens.s3) }
-                        processRow(row)
+                        appMemoryRow(app)
                             .padding(.horizontal, SweepTokens.s3 - 2)
                     }
-                    .padding(.bottom, SweepTokens.s2)
+                    Divider().padding(.horizontal, SweepTokens.s3)
+                    otherProcessesRow
+                        .padding(.horizontal, SweepTokens.s3 - 2)
+                    Divider().padding(.horizontal, SweepTokens.s3)
+                    allProcessesDisclosure(snapshot)
+                        .padding(.horizontal, SweepTokens.s4)
+                        .padding(.vertical, SweepTokens.s2)
                 }
             }
         }
+    }
+
+    /// One app, one number, one Quit — the row the user asked for. Quitting the app takes its
+    /// whole helper tree with it, which is exactly why the aggregate is the actionable unit.
+    private func appMemoryRow(_ app: MemoryScreenLogic.AppMemoryAggregate) -> some View {
+        let running = runningRegularApp(forBundlePath: app.bundlePath)
+        let name = Self.displayName(forBundlePath: app.bundlePath)
+        return HStack(spacing: SweepTokens.s3 - 2) {
+            Group {
+                if let icon = appIconsByPath[app.bundlePath] {
+                    Image(nsImage: icon).resizable().interpolation(.high)
+                } else {
+                    Image(systemName: "app.dashed").foregroundStyle(.secondary)
+                }
+            }
+            .frame(width: 26, height: 26)
+            VStack(alignment: .leading, spacing: 0) {
+                Text(name)
+                    .font(SweepFont.rowTitle)
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                Text(app.processCount == 1 ? "1 process" : "\(app.processCount) processes")
+                    .font(SweepFont.caption)
+                    .foregroundStyle(.tertiary)
+            }
+            Spacer(minLength: SweepTokens.s3)
+            Text(MemoryScreenLogic.formatMemory(app.totalBytes))
+                .font(SweepFont.mono)
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .frame(width: 104, alignment: .trailing)
+            if let running {
+                Button("Quit") { quit(QuitTarget(name: name, app: running)) }
+                    .buttonStyle(.sweepQuiet)
+            } else {
+                Color.clear.frame(width: 1, height: 1)
+            }
+        }
+        .frame(height: SweepTokens.inventoryRowHeight + 4)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(name), \(MemoryScreenLogic.formatMemory(app.totalBytes))\(running != nil ? ", can quit" : "")")
+    }
+
+    private var otherProcessesRow: some View {
+        HStack(spacing: SweepTokens.s3 - 2) {
+            Image(systemName: "apple.logo")
+                .font(.system(size: 14.5, weight: .regular))
+                .foregroundStyle(.secondary)
+                .frame(width: 26, height: 26)
+            Text("macOS system & background processes")
+                .font(SweepFont.rowTitle)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: SweepTokens.s3)
+            Text(MemoryScreenLogic.formatMemory(otherProcessesBytes))
+                .font(SweepFont.mono)
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .frame(width: 104, alignment: .trailing)
+            Color.clear.frame(width: 1, height: 1)
+        }
+        .frame(height: SweepTokens.inventoryRowHeight)
+    }
+
+    /// The old per-process table, kept for the advanced look under a quiet disclosure.
+    private func allProcessesDisclosure(_ snapshot: SystemSnapshot) -> some View {
+        DisclosureGroup(isExpanded: $showAllProcesses) {
+            let rows = Array(processRows(snapshot).prefix(Self.allProcessesRowCap))
+            VStack(spacing: 0) {
+                ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
+                    if index > 0 { Divider().padding(.horizontal, SweepTokens.s3) }
+                    processRow(row)
+                }
+            }
+            .padding(.top, SweepTokens.s1)
+        } label: {
+            Text("All processes")
+                .font(SweepFont.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func quitTarget(for row: MemoryProcessRow) -> QuitTarget? {
+        guard let app = runningAppsByPID[row.pid] else { return nil }
+        return QuitTarget(name: row.name, app: app)
     }
 
     private func processRow(_ row: MemoryProcessRow) -> some View {
@@ -301,7 +468,7 @@ struct MemoryScreen: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 104, alignment: .trailing)
             if row.canQuit {
-                Button("Quit") { quit(row) }
+                Button("Quit") { if let target = quitTarget(for: row) { quit(target) } }
                     .buttonStyle(.sweepQuiet)
             } else {
                 Color.clear.frame(width: 1, height: 1)
@@ -411,21 +578,30 @@ struct MemoryScreen: View {
 
     // MARK: - Actions
 
-    /// Never called for a pid with no resolved running app: `runningAppsByPID` only ever holds
-    /// `.regular`-policy apps, and `row.canQuit` (hence this button's visibility) is derived from
-    /// membership in exactly that map.
-    private func quit(_ row: MemoryProcessRow) {
-        guard let app = runningAppsByPID[row.pid] else { return }
-        // `terminate()`'s return value reports whether the request was delivered, not whether
-        // the app actually exits — an unresponsive app can still return `true` here. This module
-        // treats a `false` return as the (conservative) non-responding signal PLAN asks for; a
-        // sturdier detector (e.g. a short timeout before offering force-quit) is future scope.
-        if MemoryScreenLogic.afterTerminateAttempt(succeeded: app.terminate()) == .offerForceQuit {
-            pendingForceQuit = row
+    /// One quit path for both row shapes. `terminate()`'s return value reports whether the
+    /// request was delivered, not whether the app actually exits — an unresponsive app can still
+    /// return `true` here. This module treats a `false` return as the (conservative)
+    /// non-responding signal PLAN asks for; a sturdier detector (e.g. a short timeout before
+    /// offering force-quit) is future scope.
+    private func quit(_ target: QuitTarget) {
+        if MemoryScreenLogic.afterTerminateAttempt(succeeded: target.app.terminate()) == .offerForceQuit {
+            pendingForceQuit = target
         }
     }
 
-    private func forceQuit(_ row: MemoryProcessRow) {
-        runningAppsByPID[row.pid]?.forceTerminate()
+    private func forceQuit(_ target: QuitTarget) {
+        target.app.forceTerminate()
+    }
+
+    /// The registered `.regular` running app whose bundle is exactly `bundlePath` — the handle
+    /// an aggregated app row quits through. Helpers exit with their parent, which is the whole
+    /// point of quitting at the app level.
+    private func runningRegularApp(forBundlePath bundlePath: String) -> NSRunningApplication? {
+        runningAppsByPID.values.first { $0.bundleURL?.standardizedFileURL.path == bundlePath }
+    }
+
+    private static func displayName(forBundlePath bundlePath: String) -> String {
+        let name = FileManager.default.displayName(atPath: bundlePath)
+        return name.hasSuffix(".app") ? String(name.dropLast(4)) : name
     }
 }

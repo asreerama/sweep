@@ -338,9 +338,24 @@ struct HomebrewScreen: View {
                     .foregroundStyle(SweepTokens.accent)
             }
         } else if package.isOutdated {
-            Button("Upgrade") { model.requestUpgrade(package) }
+            HStack(spacing: SweepTokens.s1 + 2) {
+                if model.failedUpgradeIDs.contains(package.id) {
+                    // The failure lives on the row, not only in the console disclosure
+                    // (user-reported: a killed upgrade looked like it silently didn't happen).
+                    Label {
+                        Text("Failed").font(SweepFont.caption)
+                    } icon: {
+                        Image(systemName: "exclamationmark.triangle").font(.system(size: 12))
+                    }
+                    .foregroundStyle(SweepTokens.tierCaution)
+                    .help("The last upgrade attempt failed — details in Command Output below.")
+                }
+                Button(model.failedUpgradeIDs.contains(package.id) ? "Retry" : "Upgrade") {
+                    model.requestUpgrade(package)
+                }
                 .buttonStyle(.sweepQuiet)
                 .disabled(model.isRunningAction)
+            }
         }
     }
 

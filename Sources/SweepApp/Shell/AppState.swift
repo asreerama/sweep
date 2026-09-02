@@ -46,6 +46,12 @@ final class AppState {
     func openUninstaller(forDroppedAppAt url: URL) {
         destination = .uninstaller
         uninstall.selectDroppedApp(at: url)
+        // Headless verification seam (same rationale as `SnapshotHarness`): the unified log is
+        // not readable from every automation context this project verifies in, so a probe run
+        // can ask for file evidence that the Dock-drop route actually fired and with what.
+        if let probePath = ProcessInfo.processInfo.environment["SWEEP_DROPLET_PROBE"] {
+            try? "routed:\(url.path)\n".write(toFile: probePath, atomically: true, encoding: .utf8)
+        }
     }
 
     /// `.onOpenURL`'s handler. Currently just the SmartDelete watcher's own
@@ -53,6 +59,21 @@ final class AppState {
     /// as a real URL scheme rather than a direct model call so a future out-of-process Sentinel —
     /// or any other `sweep://` deep link — has exactly one place to route through.
     func handleOpenURL(_ url: URL) {
+        // Dock-drop route, as actually delivered on macOS 26: SwiftUI's scene machinery consumes
+        // the odoc Apple Event and republishes document opens through `.onOpenURL` as `file://`
+        // URLs — the AppKit delegate's `application(_:open:)` fires with an EMPTY array and the
+        // legacy `openFiles` not at all (probed empirically 2026-09-02; the delegate paths remain
+        // as belt-and-braces for OS versions that do route there).
+        if url.isFileURL {
+            if let probePath = ProcessInfo.processInfo.environment["SWEEP_DROPLET_PROBE"] {
+                let existing = (try? String(contentsOfFile: probePath, encoding: .utf8)) ?? ""
+                try? (existing + "onOpenURL-file:\(url.path)\n").write(toFile: probePath, atomically: true, encoding: .utf8)
+            }
+            if url.pathExtension == "app" {
+                openUninstaller(forDroppedAppAt: url)
+            }
+            return
+        }
         guard url.scheme == "sweep" else { return }
         let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
         switch url.host {

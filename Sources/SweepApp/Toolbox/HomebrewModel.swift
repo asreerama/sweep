@@ -68,6 +68,12 @@ final class HomebrewModel {
     /// upgrades safe — the worst case is one process briefly waiting on brew's internal lock.
     private(set) var upgradingPackageIDs: Set<String> = []
 
+    /// Packages whose last upgrade attempt failed, by `BrewPackage.id` — the row wears the
+    /// failure (user-reported: a failed upgrade only ever spoke in the console disclosure, so it
+    /// looked like the upgrade silently didn't happen). Cleared when the user retries, and by
+    /// the post-mutation refresh for any package `brew outdated` no longer lists.
+    private(set) var failedUpgradeIDs: Set<String> = []
+
     struct UpgradeAllProgress: Equatable {
         var total: Int
         var completed: Int
@@ -187,6 +193,9 @@ final class HomebrewModel {
             let check = try await pendingCheck
             if mutationGeneration == generationAtStart {
                 snapshot = Self.applying(check: check, to: snapshot)
+                // A package brew no longer lists as outdated has no failed upgrade to wear.
+                let outdatedIDs = Set(snapshot.outdated.map(\.id))
+                failedUpgradeIDs = failedUpgradeIDs.intersection(outdatedIDs)
             } else {
                 // Born before a mutation that has since landed: applying it would resurrect
                 // pre-mutation state (the classic "my upgrade undid itself"). Discard and let
@@ -383,11 +392,13 @@ final class HomebrewModel {
     private func runItemUpgrade(_ package: BrewPackage) {
         guard !upgradingPackageIDs.contains(package.id) else { return }
         upgradingPackageIDs.insert(package.id)
+        failedUpgradeIDs.remove(package.id)
         Task {
             do {
                 let output = try await gateway.upgrade(package)
                 appendConsole("$ brew upgrade \(package.name)\n\(output.isEmpty ? "(no output)" : output)")
             } catch {
+                failedUpgradeIDs.insert(package.id)
                 appendConsole("$ brew upgrade \(package.name)\n\(String(describing: error))")
             }
             upgradingPackageIDs.remove(package.id)

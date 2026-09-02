@@ -114,6 +114,7 @@ final class SweepAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
+        probe("open-urls:\(urls.count)")
         dockDropLog.notice("application(_:open:) received \(urls.count) URL(s): \(urls.map(\.path).joined(separator: ", "), privacy: .public)")
         for url in urls { route(url) }
     }
@@ -127,16 +128,27 @@ final class SweepAppDelegate: NSObject, NSApplicationDelegate {
     /// (toOpenOrPrint:)` is required here so LaunchServices does not treat the request as having
     /// silently failed.
     func application(_ sender: NSApplication, openFiles filenames: [String]) {
+        probe("open-files:\(filenames.count)")
         dockDropLog.notice("application(_:openFiles:) received \(filenames.count) path(s): \(filenames.joined(separator: ", "), privacy: .public)")
         for path in filenames { route(URL(fileURLWithPath: path)) }
         sender.reply(toOpenOrPrint: filenames.isEmpty ? .failure : .success)
     }
 
     private func route(_ url: URL) {
+        probe("route:\(url.path)")
         guard let appState else {
             pendingURLs.append(url)
             return
         }
         appState.openUninstaller(forDroppedAppAt: url)
+    }
+
+    /// Appends one line of evidence to `SWEEP_DROPLET_PROBE` — the same headless-verification
+    /// seam `AppState.openUninstaller` writes to, here at the event entry points so a probe run
+    /// can tell "AppKit never delivered the open event" apart from "routing dropped it".
+    func probe(_ line: String) {
+        guard let path = ProcessInfo.processInfo.environment["SWEEP_DROPLET_PROBE"] else { return }
+        let existing = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+        try? (existing + line + "\n").write(toFile: path, atomically: true, encoding: .utf8)
     }
 }

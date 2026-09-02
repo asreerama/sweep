@@ -220,23 +220,44 @@ struct RealBrewGateway: BrewGateway {
         }.value
     }
 
+    /// Mutations get their own clock and output budget (user-reported: "I confirm the upgrade,
+    /// the loader goes around for a minute, but the upgrade doesn't happen"): a real
+    /// `brew upgrade` downloads and installs for MINUTES, and the default 30 s read timeout was
+    /// killing every one of them mid-download — the failure landed in the console disclosure
+    /// while the package, honestly, stayed outdated. 30 minutes is generous headroom for a big
+    /// bottle on a slow connection while still being a real hang ceiling; 32 MB likewise for a
+    /// chatty install log, where overflowing the cap would kill a live install.
+    private static let mutationTimeout: TimeInterval = 30 * 60
+    private static let mutationOutputByteLimit = 32 * 1024 * 1024
+
     func cleanupPreview() async throws -> String { try await run(["cleanup", "--prune=all", "--dry-run"]) }
-    func cleanup() async throws -> String { try await run(["cleanup", "--prune=all"]) }
+    func cleanup() async throws -> String { try await mutate(["cleanup", "--prune=all"]) }
     func autoremovePreview() async throws -> String { try await run(["autoremove", "--dry-run"]) }
-    func autoremove() async throws -> String { try await run(["autoremove"]) }
+    func autoremove() async throws -> String { try await mutate(["autoremove"]) }
 
     func upgrade(_ package: BrewPackage) async throws -> String {
-        try await run(package.isCask ? ["upgrade", "--cask", package.name] : ["upgrade", package.name])
+        try await mutate(package.isCask ? ["upgrade", "--cask", package.name] : ["upgrade", package.name])
     }
 
     func uninstall(_ package: BrewPackage) async throws -> String {
-        try await run(package.isCask ? ["uninstall", "--cask", package.name] : ["uninstall", package.name])
+        try await mutate(package.isCask ? ["uninstall", "--cask", package.name] : ["uninstall", package.name])
     }
 
+    /// Reads: fast commands on the default 30 s clock.
     private func run(_ arguments: [String]) async throws -> String {
         guard let brewPath else { throw BrewGatewayError.brewNotFound }
         return try await Task.detached(priority: .userInitiated) {
             try BrewProcessRunner.run(brewPath: brewPath, arguments)
+        }.value
+    }
+
+    private func mutate(_ arguments: [String]) async throws -> String {
+        guard let brewPath else { throw BrewGatewayError.brewNotFound }
+        return try await Task.detached(priority: .userInitiated) {
+            try BrewProcessRunner.run(
+                brewPath: brewPath, arguments,
+                timeout: Self.mutationTimeout, outputByteLimit: Self.mutationOutputByteLimit
+            )
         }.value
     }
 
