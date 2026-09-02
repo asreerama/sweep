@@ -261,9 +261,13 @@ struct HomebrewScreen: View {
                     Image(systemName: "trash")
                         .font(.system(size: 13.5, weight: .regular))
                         .foregroundStyle(.secondary)
+                        // A comfortable 30 pt hit target with air on both sides — the bare glyph
+                        // sat cramped against the Upgrade button and the row's trailing edge.
+                        .frame(width: 30, height: 30)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .padding(.leading, SweepTokens.s1)
                 .help("Uninstall \(package.name)")
                 .disabled(model.isRunningAction)
                 .accessibilityLabel("Uninstall \(package.name)")

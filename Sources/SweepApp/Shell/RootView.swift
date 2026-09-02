@@ -28,16 +28,18 @@ struct RootView: View {
             .frame(width: sidebarCollapsed ? Self.railWidth : Self.sidebarWidth)
             .frame(maxHeight: .infinity, alignment: .top)
             // Behind-window sidebar material (user-directed: the solid `sidebarGround` read as
-            // flat grey). The system blur brings the desktop's color through; the faint accent
-            // wash on top keeps the pane in the app's indigo family rather than neutral vibrancy
-            // grey. `sidebarGround` remains underneath as the fallback ground the material
-            // composites over — and the whole stack stays a plane of the window, not macOS 26's
-            // floating glass overlay.
+            // flat grey). The material IS the ground — no opaque token color in the stack, or
+            // the translucency reads as barely different from the old flat fill; the material
+            // supplies its own opaque backing automatically when Reduce Transparency is on.
+            // The faint accent wash keeps the pane in the app's indigo family rather than
+            // neutral vibrancy grey — and the whole stack stays a plane of the window, not
+            // macOS 26's floating glass overlay. The offscreen snapshot harness has no window
+            // server behind it, so THERE the material renders flat: judge this surface on a
+            // real desktop, not in a capture.
             .background {
                 ZStack {
-                    SweepTokens.sidebarGround
                     SidebarMaterial()
-                    SweepTokens.accent.opacity(0.045)
+                    SweepTokens.accent.opacity(0.05)
                 }
                 .ignoresSafeArea()
             }
