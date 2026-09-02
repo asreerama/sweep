@@ -427,7 +427,17 @@ enum ScanService {
         // Empty nodes are directories a rule claimed that turned out to hold nothing. They are
         // true, and they are noise; a scan result listing 400 zero-byte caches buries the four
         // that matter.
-        let populated = nodes.filter { $0.bytes > 0 }
+        var populated = nodes.filter { $0.bytes > 0 }
+
+        // A claimed directory the walk never emitted as its own candidate (its rule matched only
+        // descendants) reached here with no identity — and a Clean request for it then failed
+        // closed with a message blaming a missing rule (user-reported: DiagnosticReports/Notion
+        // rows "could not be cleaned", with a Try again that could never succeed). The reviewed
+        // identity is the node as it stands at scan completion, which is exactly what one direct
+        // read here captures; a node that STILL cannot be read stays excluded and fails closed.
+        for index in populated.indices where populated[index].identity == nil {
+            populated[index].identity = try? FileIdentity.read(at: URL(fileURLWithPath: populated[index].path))
+        }
 
         var itemsByRule: [String: [InventoryItem]] = [:]
         var ruleByID: [String: Rule] = [:]

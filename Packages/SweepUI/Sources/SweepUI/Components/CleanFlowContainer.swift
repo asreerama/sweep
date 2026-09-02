@@ -9,11 +9,19 @@ import SwiftUI
 public struct CleanFlowContainer: View {
     private let model: CleanFlowModel
     private let onDismiss: () -> Void
+    /// Screen-supplied fresh-scan action for rescan-class failures; dismisses the flow first so
+    /// the new scan runs on the screen itself, not under a dead sheet.
+    let onRescan: (() -> Void)?
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    public init(model: CleanFlowModel, onDismiss: @escaping () -> Void) {
+    public init(
+        model: CleanFlowModel,
+        onRescan: (() -> Void)? = nil,
+        onDismiss: @escaping () -> Void
+    ) {
         self.model = model
+        self.onRescan = onRescan
         self.onDismiss = onDismiss
     }
 
@@ -38,7 +46,8 @@ public struct CleanFlowContainer: View {
                     report: report,
                     onDone: onDismiss,
                     canRetry: model.isBackendEnabled,
-                    onRetry: { model.retryFailed() }
+                    onRetry: { model.retryFailed() },
+                    onRescan: onRescan.map { rescan in { onDismiss(); rescan() } }
                 )
                 .frame(width: 460)
                 .fixedSize(horizontal: false, vertical: true)

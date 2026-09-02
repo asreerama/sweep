@@ -380,14 +380,19 @@ enum TrashStaging {
         // in `trashItem`'s one pathname hop would otherwise trash a different object and report
         // success for the reviewed one. `lstat` of the Trash entry can only produce a false
         // refusal (extra caution), never a false success.
-        if let trashResult {
-            var status = stat()
-            let matches = lstat(trashResult.path, &status) == 0
-                && UInt64(bitPattern: Int64(status.st_dev)) == actual.deviceID
-                && status.st_ino == actual.inode
-            guard matches else {
-                throw FileDescriptorError.trashedObjectMismatch(path: request.url.path, trashPath: trashResult.path)
-            }
+        // Codex Gate-U re-review #3: a nil resulting URL is not a pass — with nothing to verify,
+        // the outcome is exactly as indeterminate as a mismatch, and is refused the same way.
+        guard let trashResult else {
+            throw FileDescriptorError.trashedObjectMismatch(
+                path: request.url.path, trashPath: "(trashItem reported no resulting URL to verify)"
+            )
+        }
+        var trashStatus = stat()
+        let trashEntryMatches = lstat(trashResult.path, &trashStatus) == 0
+            && UInt64(bitPattern: Int64(trashStatus.st_dev)) == actual.deviceID
+            && trashStatus.st_ino == actual.inode
+        guard trashEntryMatches else {
+            throw FileDescriptorError.trashedObjectMismatch(path: request.url.path, trashPath: trashResult.path)
         }
 
         try? operationQuarantine.removeChildDirectory(slotName)

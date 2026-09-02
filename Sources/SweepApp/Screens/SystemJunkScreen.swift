@@ -131,7 +131,7 @@ struct SystemJunkScreen: View {
         .background(.bar)
         .sheet(isPresented: Binding(get: { cleanFlow != nil }, set: { if !$0 { cleanFlow = nil } })) {
             if let cleanFlow {
-                CleanFlowContainer(model: cleanFlow) { self.cleanFlow = nil }
+                CleanFlowContainer(model: cleanFlow, onRescan: { scan.rescan() }) { self.cleanFlow = nil }
             }
         }
     }

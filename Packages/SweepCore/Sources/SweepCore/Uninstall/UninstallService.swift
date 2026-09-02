@@ -287,8 +287,30 @@ public enum UninstallService {
                 leftoverResults = leftoverReport.results
                 leftoverJournalingDegraded = leftoverReport.journalingDegraded || !leftoverReport.committed
             } catch {
+                // Codex Gate-U re-review (new blocker): a throw here can postdate real
+                // mutations (the coordinator mutates, then throws if the WAL append fails), and
+                // the per-item truth is not recoverable from the error. Rethrowing let the UI
+                // fabricate a tidy zero-byte failure; instead this finishes with an honest,
+                // uncommitted, journal-degraded report that says exactly that: some selected
+                // items may already be in the Trash, and the journal could not record which.
                 await journal.close()
-                throw error
+                var outcomes = settled
+                outcomes.append(CleanItemOutcome(
+                    id: request.bundlePath.path, url: request.bundlePath, ruleID: nil,
+                    detectorSource: "gateU.leftoverPhase", tier: nil, requestedAction: .trash,
+                    outcome: .failed, failureReason: .journalUnavailable,
+                    trashURL: nil, quarantineLocation: nil, allocatedSize: 0,
+                    detail: "the leftover phase was interrupted (\(String(describing: error))); "
+                        + "some selected leftovers may already be in the Trash, and the safety "
+                        + "journal could not record which — nothing further was attempted, the "
+                        + "app bundle was not touched"
+                ))
+                continuation.yield(.finished(CleanReport(
+                    operationID: operationID, outcomes: outcomes, committed: false,
+                    catalogDigest: noCatalogDigestSentinel, journalingDegraded: true,
+                    freedBytesEstimate: 0
+                )))
+                return
             }
         }
 
@@ -485,7 +507,8 @@ public enum UninstallService {
             outcome: SweepCore.outcome(for: reason), failureReason: reason, trashURL: nil,
             allocatedSize: 0, detail: detail
         )
-        continuation.yield(.started(operationID: operationID, itemCount: 0))
+        // Codex Gate-U re-review finding #10: one completion event follows, so say so.
+        continuation.yield(.started(operationID: operationID, itemCount: 1))
         continuation.yield(.itemCompleted(outcome))
         continuation.yield(.finished(CleanReport(
             operationID: operationID, outcomes: [outcome], committed: true,

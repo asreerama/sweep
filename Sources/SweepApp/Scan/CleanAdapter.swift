@@ -143,15 +143,19 @@ struct CleanAdapter: CleanBackend {
         id: String, item: InventoryItem, freedBytes: inout Int64
     ) async -> SweepUI.CleanItemOutcome {
         guard let ruleID = context.ruleIDByItemID[id] else {
+            // Internal bookkeeping gap, not a filesystem condition — retrying can never fix it.
             return SweepUI.CleanItemOutcome(
                 id: id, title: item.title, byteCount: item.byteCount,
-                status: .failed(reason: "No rule on record for this item; re-run the scan and try again.")
+                status: .failed(reason: "This item isn\u{2019}t in the last scan\u{2019}s records. Rescan to clean it.")
             )
         }
         guard let reviewedIdentity = context.reviewedIdentityByItemID[id] else {
+            // Distinct from the missing-rule case (they shared one misleading message,
+            // user-reported): the scan couldn't pin this exact object's identity, so cleaning
+            // it would mean trusting a pathname. Only a rescan can re-establish that binding.
             return SweepUI.CleanItemOutcome(
                 id: id, title: item.title, byteCount: item.byteCount,
-                status: .failed(reason: "No rule on record for this item; re-run the scan and try again.")
+                status: .failed(reason: "Sweep couldn\u{2019}t pin this item\u{2019}s identity during the scan. Rescan to clean it.")
             )
         }
 
@@ -167,7 +171,8 @@ struct CleanAdapter: CleanBackend {
             }) else {
                 return SweepUI.CleanItemOutcome(
                     id: id, title: item.title, byteCount: item.byteCount,
-                    status: .failed(reason: "No longer exists or no longer matches its rule; skipped for safety.")
+                    status: .failed(reason: "It changed or disappeared since the scan \u{2014} an app is "
+                        + "likely still writing here. Quit that app, or rescan.")
                 )
             }
             // The binding itself: device+inode equality with the identity captured at review

@@ -54,7 +54,7 @@ final class UninstallServiceTests: XCTestCase {
             reviewedBundleIdentity: reviewed(bundle),
             selectedLeftoverPaths: [leftoverA.path, leftoverB.path],
             reviewedLeftoverIdentityByPath: reviewedMap([leftoverA, leftoverB]),
-            manualOverrideConfirmedPaths: [],
+            manualOverrideConfirmedPaths: [leftoverA.path, leftoverB.path],
             journalURL: journalURL, home: home.root,
             applicationsDirectories: [home.applicationsDirectory],
             systemLaunchDaemonsDirectory: home.url("LaunchDaemons")
@@ -245,7 +245,7 @@ final class UninstallServiceTests: XCTestCase {
             reviewedBundleIdentity: reviewed(bundle),
             selectedLeftoverPaths: [leftover.path],
             reviewedLeftoverIdentityByPath: reviewedMap([leftover]),
-            manualOverrideConfirmedPaths: [],
+            manualOverrideConfirmedPaths: [leftover.path],
             journalURL: journalURL, home: home.root,
             applicationsDirectories: [home.applicationsDirectory],
             systemLaunchDaemonsDirectory: home.url("LaunchDaemons")
@@ -318,7 +318,7 @@ final class UninstallServiceTests: XCTestCase {
             reviewedBundleIdentity: reviewed(bundle),
             selectedLeftoverPaths: [manualLeftover.path, autoLeftover.path],
             reviewedLeftoverIdentityByPath: reviewedMap([manualLeftover, autoLeftover]),
-            manualOverrideConfirmedPaths: [manualLeftover.path],
+            manualOverrideConfirmedPaths: [manualLeftover.path, autoLeftover.path],
             journalURL: journalURL, home: home.root,
             applicationsDirectories: [home.applicationsDirectory],
             systemLaunchDaemonsDirectory: home.url("LaunchDaemons")
@@ -352,10 +352,13 @@ final class UninstallServiceTests: XCTestCase {
         XCTAssertEqual(provenance.identity, manualPlannedItem.identity)
         XCTAssertEqual(provenance.authorizationVersion, ManualConsentProvenance.currentVersion)
 
-        // The auto-admitted leftover (exact bundle id, verified bundle, no manual step involved)
-        // must carry no manual-consent provenance at all — it never needed one.
+        // Codex Gate-U re-review finding #5 retired unattended auto-admission: even the
+        // exact-bundle-id leftover now rides an explicit per-item confirmation, and its planned
+        // WAL record carries that provenance like any other.
         let autoPlannedItem = try XCTUnwrap(plannedItems.first { $0.path.hasSuffix("/Library/Caches/com.example.provenance.distinctnamespace") })
-        XCTAssertNil(autoPlannedItem.manualConsentProvenance)
+        let autoProvenance = try XCTUnwrap(autoPlannedItem.manualConsentProvenance)
+        XCTAssertTrue(autoProvenance.manualConfirmed)
+        XCTAssertEqual(autoProvenance.evidenceTag, "exactBundleID")
 
         // The bundle item itself never carries manual-consent provenance either.
         let bundlePlannedItem = try XCTUnwrap(plannedItems.first { $0.path == bundle.path || $0.path.hasSuffix("/Applications/ProvenanceApp.app") })

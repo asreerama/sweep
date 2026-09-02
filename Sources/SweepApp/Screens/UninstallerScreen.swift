@@ -442,6 +442,10 @@ private struct RemovalPreviewSheet: View {
         }
         .frame(width: 500)
         .fixedSize(horizontal: false, vertical: true)
+        // Consent binds to what THIS sheet displays: identities snapshot on appear, die on
+        // disappear (Codex Gate-U re-review #1/#4 — never captured at click time).
+        .onAppear { model.prepareRemovalReview() }
+        .onDisappear { if model.removalReport == nil, !model.isRemoving { model.discardRemovalReview() } }
     }
 
     private var sheetTitle: String {

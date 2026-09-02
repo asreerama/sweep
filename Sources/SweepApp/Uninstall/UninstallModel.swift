@@ -21,9 +21,11 @@ enum UninstallSelectionMode: Equatable {
     case orphan(bundleIdentifier: String)
 }
 
-/// Drives the Uninstaller screen (PLAN §3 module 5, AppCleaner parity). Everything here is
-/// read-only: `AppInventory`/`LeftoverMatcher` never write, and this model never calls
-/// `SweepCore` — Gate U (a dedicated uninstall execution path) is next wave.
+/// Drives the Uninstaller screen (PLAN §3 module 5, AppCleaner parity). Discovery
+/// (`AppInventory`/`LeftoverMatcher`) never writes; execution goes through exactly one path —
+/// `executeRemoval()` at the bottom of this file, the uninstall counterpart of `CleanAdapter` —
+/// into `SweepCore.UninstallService`, which stays inert while Gate U is closed
+/// (`canExecuteRemoval` is what the Remove button keys off).
 @MainActor
 @Observable
 final class UninstallModel {
@@ -73,6 +75,40 @@ final class UninstallModel {
 
     /// Whether this build can actually execute (Gate U open + runtime kill switch clear).
     var canExecuteRemoval: Bool { SweepCore.UninstallService.isEnabled }
+
+    /// Identities captured the moment the preview sheet RENDERS (Codex Gate-U re-review: the
+    /// reviewed object is the one the sheet displayed, so a same-path replacement made while
+    /// the sheet is open must mismatch at execute). `executeRemoval()` refuses to run without
+    /// this snapshot; it dies with the sheet.
+    struct ReviewSnapshot {
+        let bundleIdentity: FileIdentity
+        let leftoverIdentityByPath: [String: FileIdentity]
+        let selectedPaths: Set<String>
+    }
+    @ObservationIgnored private(set) var reviewSnapshot: ReviewSnapshot?
+
+    /// Called when the preview sheet appears — binds consent to exactly what it renders.
+    func prepareRemovalReview() {
+        reviewSnapshot = nil
+        guard case .app(let app) = selection else { return }
+        guard let bundleIdentity = try? FileIdentity.read(at: app.bundlePath) else { return }
+        let selectedPaths = Set(leftoverGroups.flatMap { group in
+            group.items.filter { leftoverSelection.contains($0.id) }.map(\.id)
+        })
+        var byPath: [String: FileIdentity] = [:]
+        for path in selectedPaths {
+            if let identity = try? FileIdentity.read(at: URL(fileURLWithPath: path)) {
+                byPath[path] = identity
+            }
+        }
+        reviewSnapshot = ReviewSnapshot(
+            bundleIdentity: bundleIdentity, leftoverIdentityByPath: byPath, selectedPaths: selectedPaths
+        )
+    }
+
+    func discardRemovalReview() {
+        reviewSnapshot = nil
+    }
 
     init(home: URL = FileManager.default.homeDirectoryForCurrentUser) {
         self.home = home
@@ -356,16 +392,13 @@ extension UninstallModel {
         guard case .app(let app) = selection, !isRemoving, canExecuteRemoval else { return }
         guard let bundleIdentifier = app.bundleIdentifier else { return }
 
-        let selectedPaths = Set(leftoverGroups.flatMap { group in
-            group.items.filter { leftoverSelection.contains($0.id) }.map(\.id)
-        })
-        guard let bundleIdentity = try? FileIdentity.read(at: app.bundlePath) else { return }
-        var reviewedByPath: [String: FileIdentity] = [:]
-        for path in selectedPaths {
-            if let identity = try? FileIdentity.read(at: URL(fileURLWithPath: path)) {
-                reviewedByPath[path] = identity
-            }
-        }
+        // The identities captured when the sheet APPEARED — never re-read here: re-reading at
+        // click time would bless whatever occupies the paths now, which is exactly the timing
+        // hole the re-review called out. The service re-verifies these against the live disk.
+        guard let snapshot = reviewSnapshot else { return }
+        let selectedPaths = snapshot.selectedPaths
+        let bundleIdentity = snapshot.bundleIdentity
+        let reviewedByPath = snapshot.leftoverIdentityByPath
 
         // Every selected path was individually rendered by the itemized preview sheet the user
         // just confirmed (Codex Gate-U re-review finding #4), so each carries an explicit
@@ -402,11 +435,15 @@ extension UninstallModel {
                     }
                 }
             } catch {
+                // A thrown stream is pre-mutation by contract now (post-mutation interruptions
+                // finish with an uncommitted report instead of throwing) — but the copy still
+                // refuses to claim knowledge it lacks.
                 removalReport = SweepUI.CleanReport(
                     freedBytes: 0, succeededCount: 0,
-                    outcomes: [SweepUI.CleanItemOutcome(
+                    outcomes: outcomes + [SweepUI.CleanItemOutcome(
                         id: app.bundlePath.path, title: app.name, byteCount: 0,
-                        status: .failed(reason: String(describing: error))
+                        status: .failed(reason: "The removal did not complete: \(String(describing: error)). "
+                            + "Check the Trash before retrying.")
                     )]
                 )
                 isRemoving = false

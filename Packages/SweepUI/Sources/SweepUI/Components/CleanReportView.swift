@@ -9,6 +9,12 @@ public struct CleanReportState: View {
     /// explain themselves and offer Reveal / fix-permission, but no dead "Try again" button.
     private let canRetry: Bool
     private let onRetry: (() -> Void)?
+    /// Rescan-class failures ("…Rescan to clean it", "…changed since the scan") can never be
+    /// fixed by re-running the same failed items — only by a fresh scan. When any failure is
+    /// rescan-class and this is wired, the report offers Rescan; Try again stays only for
+    /// failures a plain re-run could actually cure (user-reported: a dead Try again on
+    /// rescan-class failures "doesn't really work").
+    private let onRescan: (() -> Void)?
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var appeared = false
@@ -17,12 +23,14 @@ public struct CleanReportState: View {
         report: CleanReport,
         onDone: @escaping () -> Void,
         canRetry: Bool = false,
-        onRetry: (() -> Void)? = nil
+        onRetry: (() -> Void)? = nil,
+        onRescan: (() -> Void)? = nil
     ) {
         self.report = report
         self.onDone = onDone
         self.canRetry = canRetry
         self.onRetry = onRetry
+        self.onRescan = onRescan
     }
 
     /// Cap on the failure list's `ScrollView` when a report has failures — the one part of this
@@ -160,7 +168,12 @@ public struct CleanReportState: View {
                     Button("Open Full Disk Access") { Self.openFullDiskAccessSettings() }
                         .buttonStyle(.sweepQuiet)
                 }
-                if canRetry, let onRetry {
+                if let onRescan, report.failures.contains(where: { Self.needsRescan($0.failureReason) }) {
+                    Button("Rescan", action: onRescan)
+                        .buttonStyle(.sweepQuiet)
+                }
+                if canRetry, let onRetry,
+                   report.failures.contains(where: { !Self.needsRescan($0.failureReason) }) {
                     Button("Try again", action: onRetry)
                         .buttonStyle(.sweepQuiet)
                 }
@@ -214,6 +227,14 @@ public struct CleanReportState: View {
         // lines, so this is a floor, not a fixed height — breathing room without clipping a
         // longer reason.
         .frame(minHeight: SweepTokens.inventoryRowHeight)
+    }
+
+    /// Failure classes whose only cure is a fresh scan: the item's scan-time binding is gone
+    /// (identity unpinned, missing from the records) or the object itself moved on. Matched on
+    /// the reason text the adapter writes — same pragmatic approach as ``isPermissionFailure``.
+    static func needsRescan(_ reason: String?) -> Bool {
+        guard let reason = reason?.lowercased() else { return false }
+        return reason.contains("rescan") || reason.contains("changed or disappeared since the scan")
     }
 
     /// Heuristic: does this failure reason describe a permission/access block the user can fix by

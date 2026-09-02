@@ -673,14 +673,6 @@ struct AuthorizedUninstallPlan: Sendable {
                 continue
             }
 
-            // Codex Gate-U finding #1: strong evidence (`exactBundleID`/`receiptListed`, which is
-            // what actually derives `.autoSelectable`) is downgraded to `.manualReview` whenever
-            // the bundle could not be cryptographically verified or the inventory scan was
-            // incomplete — regardless of how strong the matcher's own confidence looks.
-            let effectiveConfidence: MatchConfidence = (capReason != nil && match.confidence == .autoSelectable)
-                ? .manualReview
-                : match.confidence
-
             let leftoverIdentity: FileIdentity
             do {
                 leftoverIdentity = try FileIdentity.read(at: match.url)
@@ -702,6 +694,20 @@ struct AuthorizedUninstallPlan: Sendable {
                 unresolved.append(.init(path: path, error: .leftoverChangedSinceReview(path: path)))
                 continue
             }
+
+            // Codex Gate-U re-review finding #5: no unattended auto-admission, ever. The
+            // installed-app inventory can prove it READ its roots, never that those roots are
+            // exhaustive (a consumer app more than one vendor level deep, or outside the two
+            // conventional directories, is invisible to it) — so "no sibling consumer exists"
+            // is not provable, and every admitted leftover requires the caller's explicit
+            // per-item confirmation. The itemized review sheet supplies exactly that for every
+            // selected path, so the UX cost is zero; what dies is silent auto-privilege.
+            // (`capReason` still sharpens the refusal message when the bundle is unverified or
+            // the scan was outright incomplete.)
+            let effectiveConfidence: MatchConfidence = match.confidence == .autoSelectable
+                ? .manualReview
+                : match.confidence
+            _ = capReason
 
             switch effectiveConfidence {
             case .orphan:

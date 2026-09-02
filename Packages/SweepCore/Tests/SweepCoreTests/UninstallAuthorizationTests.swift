@@ -177,24 +177,38 @@ final class UninstallAuthorizationTests: XCTestCase {
 
     /// Codex Gate-U finding #1: exact-bundle-id admission now requires a `VerifiedBundle` — an
     /// ad-hoc-signed fixture whose signing identifier agrees with its own bundle id.
-    func testExactBundleIDLeftoverIsAdmittedWithoutAnOverrideToken() throws {
+    /// Codex Gate-U re-review finding #5 inverted this test's original premise: exact-bundle-id
+    /// evidence no longer buys unattended auto-admission, because no inventory scan can prove
+    /// itself exhaustive enough to rule out a sibling consumer. Even the strongest evidence now
+    /// requires the caller's explicit per-item confirmation (which the itemized review sheet
+    /// supplies for every selected path) — and is then admitted WITH a minted override token.
+    func testExactBundleIDLeftoverStillRequiresExplicitPerItemConfirmation() throws {
         let home = try FixtureHome("gateU-exact-bundle-id")
         let bundle = try home.makeAppBundle(bundleIdentifier: "com.example.Exact", codeSign: true)
         let leftover = try home.makeLeftover(root: .applicationSupport, name: "com.example.Exact")
 
-        let request = Self.request(
+        let unconfirmed = Self.request(
             home: home, bundlePath: bundle, expectedBundleIdentifier: "com.example.Exact",
             selectedLeftoverPaths: [leftover.path]
         )
-        let plan = try Self.authorize(request: request, isRunning: { _ in false })
+        let refusedPlan = try Self.authorize(request: unconfirmed, isRunning: { _ in false })
+        XCTAssertTrue(refusedPlan.leftovers.isEmpty)
+        guard case .leftoverManualConfirmationRequired = refusedPlan.unresolvedLeftovers.first?.error else {
+            return XCTFail("expected leftoverManualConfirmationRequired, got \(String(describing: refusedPlan.unresolvedLeftovers.first?.error))")
+        }
 
+        let confirmed = Self.request(
+            home: home, bundlePath: bundle, expectedBundleIdentifier: "com.example.Exact",
+            selectedLeftoverPaths: [leftover.path], manualOverrideConfirmedPaths: [leftover.path]
+        )
+        let plan = try Self.authorize(request: confirmed, isRunning: { _ in false })
         XCTAssertTrue(plan.unresolvedLeftovers.isEmpty, "\(plan.unresolvedLeftovers)")
         let admitted = try XCTUnwrap(plan.leftovers.first)
         guard case .leftover(let evidence, let override) = admitted.role else {
             return XCTFail("expected a leftover role, got \(admitted.role)")
         }
         XCTAssertTrue(evidence.contains(.exactBundleID))
-        XCTAssertNil(override, "an autoSelectable match never mints an override token")
+        XCTAssertNotNil(override, "every admission now carries the explicit per-item consent token")
     }
 
     /// Codex Gate-U finding #1: the SAME exact-bundle-id evidence, for an UNSIGNED bundle, must
@@ -448,7 +462,7 @@ final class UninstallAuthorizationTests: XCTestCase {
         // admitted normally — the fix only closes the alias, never the legitimate direct match.
         let directRequest = Self.request(
             home: home, bundlePath: bundle, expectedBundleIdentifier: "com.example.Alias",
-            selectedLeftoverPaths: [realLeftover.path]
+            selectedLeftoverPaths: [realLeftover.path], manualOverrideConfirmedPaths: [realLeftover.path]
         )
         let directPlan = try Self.authorize(request: directRequest, isRunning: { _ in false })
         XCTAssertEqual(directPlan.leftovers.count, 1)
@@ -464,7 +478,7 @@ final class UninstallAuthorizationTests: XCTestCase {
 
         let request = Self.request(
             home: home, bundlePath: bundle, expectedBundleIdentifier: "com.example.Swap",
-            selectedLeftoverPaths: [leftover.path]
+            selectedLeftoverPaths: [leftover.path], manualOverrideConfirmedPaths: [leftover.path]
         )
         let plan = try Self.authorize(request: request, isRunning: { _ in false })
         XCTAssertEqual(plan.leftovers.count, 1)
