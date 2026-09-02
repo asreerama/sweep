@@ -20,10 +20,14 @@ struct UninstallerScreen: View {
             Divider()
             HStack(spacing: 0) {
                 appList
-                    .frame(minWidth: 340, idealWidth: 400, maxWidth: 460)
+                    .frame(minWidth: 300, idealWidth: 380, maxWidth: 460)
                 Divider()
+                // Layout contract: the detail panel owns a real floor. Without one, a narrow
+                // window starved it to ~300 pt and every leftover row crushed into vertical
+                // letter soup (user-reported); the window's own minWidth covers
+                // sidebar + list floor + this floor.
                 detailPanel
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .onAppear { model.loadApps() }
@@ -272,6 +276,10 @@ private struct RunningChip: View {
             .font(SweepFont.badge)
             .tracking(0.5)
             .foregroundStyle(SweepTokens.tierCaution)
+            .lineLimit(1)
+            // Layout contract: chips are atoms — never wrap ("RUNNIN / G", user-reported); the
+            // app name beside it truncates instead.
+            .fixedSize()
             .padding(.horizontal, 5)
             .padding(.vertical, 2)
             .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(SweepTokens.tierCaution.opacity(0.12)))
@@ -293,11 +301,17 @@ private struct AppSummaryCard: View {
                 HStack(spacing: SweepTokens.s4) {
                     Image(nsImage: icon).resizable().frame(width: 48, height: 48)
                     VStack(alignment: .leading, spacing: 2) {
+                        // Layout contract: one line each, truncated — never the char-per-line
+                        // vertical wrap a starved column produces (user-reported "Go og le").
                         Text(app.name)
                             .font(SweepFont.sectionTitle)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
                         Text(subtitle)
                             .font(SweepFont.caption)
                             .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
                         Text(app.bundlePath.path)
                             .font(SweepFont.monoSmall)
                             .foregroundStyle(.tertiary)

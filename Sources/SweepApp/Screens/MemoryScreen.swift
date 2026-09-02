@@ -676,6 +676,8 @@ private struct PressureMeter: View {
         Text(MemoryScreenLogic.pressureLabel(level))
             .font(SweepFont.badge)
             .fontWeight(.semibold)
+            .lineLimit(1)
+            .fixedSize()
             .foregroundStyle(tint)
             .padding(.horizontal, SweepTokens.s2)
             .padding(.vertical, 3)

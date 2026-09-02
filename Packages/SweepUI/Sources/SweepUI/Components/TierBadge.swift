@@ -23,6 +23,11 @@ public struct TierBadge: View {
                 .font(SweepFont.badge)
                 .tracking(0.5)
                 .foregroundStyle(tint)
+                .lineLimit(1)
+                // Layout contract: a badge is an atom — under width pressure it must never
+                // wrap ("SA" stacked vertically, user-reported) or truncate; the flexible text
+                // beside it gives way instead.
+                .fixedSize()
                 .padding(.horizontal, 6)
                 .padding(.vertical, 3)
                 .background(

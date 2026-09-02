@@ -32,7 +32,10 @@ struct SweepApp: App {
     var body: some Scene {
         Window("Sweep", id: "main") {
             RootView(state: state)
-                .frame(minWidth: 900, minHeight: 600)
+                // 980 = expanded sidebar (248) + Uninstaller's two pane floors (300 + 420),
+                // with margin: the narrowest window must still hold the widest screen's layout
+                // contract without crushing any pane.
+                .frame(minWidth: 980, minHeight: 600)
                 .task { await SnapshotHarness.runIfRequested(state: state) }
                 .task { await UninstallerSnapshotHarness.runIfRequested(state: state) }
                 .task { await OnboardingSnapshotHarness.runIfRequested() }

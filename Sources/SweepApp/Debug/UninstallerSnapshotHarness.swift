@@ -46,7 +46,10 @@ enum UninstallerSnapshotHarness {
             FileHandle.standardError.write(Data("uninstaller snapshot harness: no window\n".utf8))
             return
         }
-        window.setContentSize(NSSize(width: 1060, height: 700))
+        // SWEEP_SNAPSHOT_WIDTH lets a run capture at the window's minimum (the layout-contract
+        // crush case) instead of the comfortable default.
+        let width = Double(environment["SWEEP_SNAPSHOT_WIDTH"] ?? "") ?? 1060
+        window.setContentSize(NSSize(width: width, height: 700))
         state.destination = .uninstaller
         state.uninstall.loadApps()
         await waitFor(timeout: 30) { !state.uninstall.isLoadingApps }

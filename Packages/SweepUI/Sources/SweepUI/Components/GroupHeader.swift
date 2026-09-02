@@ -103,6 +103,8 @@ public struct GroupHeader: View {
                 .monospacedDigit()
                 .foregroundStyle(.tertiary)
                 .lineLimit(1)
+                // Layout contract: the count is an atom; the title truncates, the count never.
+                .fixedSize()
 
             Spacer(minLength: SweepTokens.s3)
 

@@ -21,6 +21,8 @@ struct CapabilityStatusChip: View {
             Text(label)
                 .font(SweepFont.badge)
                 .tracking(0.3)
+                .lineLimit(1)
+                .fixedSize()
         }
         .foregroundStyle(tint)
         .padding(.horizontal, SweepTokens.s3)

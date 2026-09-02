@@ -396,6 +396,8 @@ private struct BrokenBadge: View {
         Text("BROKEN")
             .font(SweepFont.badge)
             .tracking(0.5)
+            .lineLimit(1)
+            .fixedSize()
             .foregroundStyle(SweepTokens.tierExpert)
             .padding(.horizontal, 5)
             .padding(.vertical, 2)

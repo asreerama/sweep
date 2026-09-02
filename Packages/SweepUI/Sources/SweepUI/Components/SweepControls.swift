@@ -101,14 +101,19 @@ public struct ScreenHeader<Trailing: View>: View {
                 Text(title)
                     .font(SweepFont.screenTitle)
                     .foregroundStyle(.primary)
+                    .lineLimit(1)
                 if let subtitle {
                     Text(subtitle)
                         .font(SweepFont.screenSubtitle)
                         .foregroundStyle(.secondary)
+                        .lineLimit(2)
                 }
             }
             Spacer(minLength: SweepTokens.s4)
+            // Layout contract: header controls (Refresh, search, sort…) never collapse or lose
+            // their labels under width pressure — the title/subtitle column truncates instead.
             trailing
+                .fixedSize(horizontal: true, vertical: false)
         }
         .padding(.horizontal, SweepTokens.s5)
         .padding(.top, SweepTokens.s5)

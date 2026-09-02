@@ -129,6 +129,7 @@ struct HomebrewScreen: View {
             Text(title.uppercased())
                 .font(SweepFont.badge)
                 .tracking(0.5)
+                .lineLimit(1)
                 .foregroundStyle(.tertiary)
         }
         .frame(maxWidth: .infinity)
@@ -343,7 +344,7 @@ struct HomebrewScreen: View {
                     // The failure lives on the row, not only in the console disclosure
                     // (user-reported: a killed upgrade looked like it silently didn't happen).
                     Label {
-                        Text("Failed").font(SweepFont.caption)
+                        Text("Failed").font(SweepFont.caption).lineLimit(1).fixedSize()
                     } icon: {
                         Image(systemName: "exclamationmark.triangle").font(.system(size: 12))
                     }
@@ -430,6 +431,8 @@ private struct BrewUpdateBadge: View {
         Text("UPDATE")
             .font(SweepFont.badge)
             .tracking(0.5)
+            .lineLimit(1)
+            .fixedSize()
             .foregroundStyle(SweepTokens.accent)
             .padding(.horizontal, 5)
             .padding(.vertical, 2)
