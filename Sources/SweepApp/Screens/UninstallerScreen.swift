@@ -7,7 +7,7 @@ import SwiftUI
 ///
 /// App inventory (icons, sizes, last-used, search + sort) on the left; selecting a row runs
 /// `SweepUninstall.LeftoverMatcher` (read-only) and shows the leftover panel on the right, grouped
-/// by evidence tier. "Preview Removal" opens the itemized consent sheet; Remove executes through
+/// by evidence tier. "Remove…" opens the itemized consent sheet; Remove executes through
 /// `UninstallService` (Gate U, open since 2026-09-01) — everything moves to the Trash.
 struct UninstallerScreen: View {
     @Bindable var model: UninstallModel
@@ -174,7 +174,9 @@ struct UninstallerScreen: View {
         VStack(spacing: 0) {
             Divider()
             HStack(spacing: SweepTokens.s3) {
-                Button("Preview Removal") { model.previewSheetShown = true }
+                // "Remove…" with the ellipsis (a dialog follows), never "Preview Removal": the
+                // old gate-closed-era label made a live, working removal read as a mock.
+                Button("Remove\u{2026}") { model.previewSheetShown = true }
                     .buttonStyle(.sweepPrimary(minWidth: 148))
                     .disabled(model.leftoverGroups.isEmpty && model.selectedAppTotalBytes == 0)
                 Spacer(minLength: SweepTokens.s3)

@@ -68,6 +68,21 @@ public enum EmptyTrashService {
         review(trashDirectory: defaultTrashDirectory())
     }
 
+    /// The fast snapshot: entries and identities only, every `allocatedSize` zero. Identity
+    /// capture is one `lstat` per entry; tree sizing is the expensive part (a full Trash can
+    /// hold hundreds of app-sized trees), and the consent `execute(review:)` binds to is the
+    /// identity set, never the sizes — so the UI opens on this immediately and streams sizes in
+    /// afterward via ``allocatedSize(of:)``.
+    public static func snapshot() -> Review {
+        review(trashDirectory: defaultTrashDirectory(), includeSizes: false)
+    }
+
+    /// One reviewed entry's on-disk tree size, measured on demand — the streaming half of
+    /// ``snapshot()``.
+    public static func allocatedSize(of item: ReviewedItem) -> Int64 {
+        AllocatedTreeSize.bytes(atPath: item.url.path)
+    }
+
     /// Execute against a prior review. Only ever deletes objects whose live identity matches
     /// what the review captured.
     public static func execute(review: Review) -> Report {
@@ -81,7 +96,7 @@ public enum EmptyTrashService {
     /// Internal seam so tests exercise the full snapshot/verify/delete logic against a fixture
     /// directory. Not reachable from outside the package: the public entry points above are the
     /// only ones an external caller can name, and they always mean the real `~/.Trash`.
-    static func review(trashDirectory: URL) -> Review {
+    static func review(trashDirectory: URL, includeSizes: Bool = true) -> Review {
         // The Trash itself must be a real directory (lstat — a symlinked `.Trash` is refused
         // wholesale rather than followed somewhere else).
         guard let trashIdentity = try? FileIdentity.read(at: trashDirectory), trashIdentity.kind == .directory else {
@@ -98,11 +113,13 @@ public enum EmptyTrashService {
             // Trash achieves nothing and it regenerates immediately.
             if entry.lastPathComponent == ".DS_Store" { continue }
             guard let identity = try? FileIdentity.read(at: entry) else { continue }
-            let size = AllocatedTreeSize.bytes(atPath: entry.path)
+            let size = includeSizes ? AllocatedTreeSize.bytes(atPath: entry.path) : 0
             items.append(ReviewedItem(url: entry, identity: identity, allocatedSize: size))
             total += size
         }
-        items.sort { $0.allocatedSize > $1.allocatedSize }
+        if includeSizes {
+            items.sort { $0.allocatedSize > $1.allocatedSize }
+        }
         return Review(items: items, totalBytes: total, capturedAt: Date())
     }
 

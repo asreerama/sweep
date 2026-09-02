@@ -359,4 +359,31 @@ final class LipoLogicTests: XCTestCase {
         )
         XCTAssertTrue(script.contains("/bin/chmod 4755 "))
     }
+
+    func testMultiBundleScriptSignsEachBundleAfterItsOwnFiles() {
+        let script = LipoPrivilegedScript.build(bundles: [
+            LipoPrivilegedScript.BundlePlan(
+                bundlePath: "/Applications/First.app",
+                files: [makePlan(
+                    path: "/Applications/First.app/Contents/MacOS/First",
+                    tempPath: "/Applications/First.app/Contents/MacOS/.First.sweeplipo-a"
+                )]
+            ),
+            LipoPrivilegedScript.BundlePlan(
+                bundlePath: "/Applications/Second.app",
+                files: [makePlan(
+                    path: "/Applications/Second.app/Contents/MacOS/Second",
+                    tempPath: "/Applications/Second.app/Contents/MacOS/.Second.sweeplipo-b"
+                )]
+            ),
+        ])
+        // Each bundle re-signs immediately after its own files, so a failure in the second
+        // bundle's files can never leave the first bundle unsigned; exit appears once, last.
+        let firstThin = script.range(of: "MacOS/First'")!.lowerBound
+        let firstSign = script.range(of: "codesign --force --deep --sign - '/Applications/First.app'")!.lowerBound
+        let secondThin = script.range(of: "MacOS/Second'")!.lowerBound
+        let secondSign = script.range(of: "codesign --force --deep --sign - '/Applications/Second.app'")!.lowerBound
+        XCTAssertTrue(firstThin < firstSign && firstSign < secondThin && secondThin < secondSign)
+        XCTAssertTrue(script.hasSuffix("exit $fail\n"))
+    }
 }

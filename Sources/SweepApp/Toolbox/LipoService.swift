@@ -375,13 +375,17 @@ enum LipoBundleWalker {
         var seenPaths = Set<String>()
 
         func add(_ url: URL) {
-            let standardized = url.standardizedFileURL.path
-            guard seenPaths.insert(standardized).inserted else { return }
+            // Resolved BEFORE deduplication: a framework's `Versions/Current` is a symlink to
+            // `Versions/A`, so the un-resolved paths differ while naming the same physical file.
+            // The first real-world UTM thin planned that file twice — the second `lipo -thin`
+            // then failed on the (already thin) result and sank the whole run's exit status.
+            let resolved = url.resolvingSymlinksInPath().standardizedFileURL
+            guard seenPaths.insert(resolved.path).inserted else { return }
             var isDirectory: ObjCBool = false
-            guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory), !isDirectory.boolValue else {
+            guard fileManager.fileExists(atPath: resolved.path, isDirectory: &isDirectory), !isDirectory.boolValue else {
                 return
             }
-            candidates.append(url.standardizedFileURL)
+            candidates.append(resolved)
         }
 
         if let mainExecutable { add(mainExecutable) }
@@ -556,22 +560,39 @@ enum LipoPrivilegedScript {
         "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
+    /// One bundle's worth of work inside a (possibly multi-bundle) script: its files, then its
+    /// own re-sign — every bundle is signed immediately after its files regardless of their
+    /// individual failures, so no ordering of failures across bundles can leave any one of them
+    /// thinned-but-unsigned.
+    struct BundlePlan: Sendable, Equatable {
+        let bundlePath: String
+        let files: [FilePlan]
+    }
+
     static func build(files: [FilePlan], bundlePath: String) -> String {
+        build(bundles: [BundlePlan(bundlePath: bundlePath, files: files)])
+    }
+
+    /// The multi-bundle form Thin All uses: one script, one password prompt, however many
+    /// system-owned apps are in the batch.
+    static func build(bundles: [BundlePlan]) -> String {
         var lines = ["#!/bin/sh", "fail=0"]
-        for file in files {
-            let source = shellQuoted(file.path)
-            let temp = shellQuoted(file.tempPath)
-            lines.append(
-                "{ /usr/bin/lipo -thin arm64 \(source) -output \(temp)"
-                    + " && /bin/chmod \(file.permissionsOctal) \(temp)"
-                    + " && /usr/sbin/chown \(file.ownerAccountID):\(file.groupAccountID) \(temp)"
-                    + " && /bin/mv -f \(temp) \(source); }"
-                    + " || { fail=1; /bin/rm -f \(temp); }"
-            )
+        for bundle in bundles {
+            for file in bundle.files {
+                let source = shellQuoted(file.path)
+                let temp = shellQuoted(file.tempPath)
+                lines.append(
+                    "{ /usr/bin/lipo -thin arm64 \(source) -output \(temp)"
+                        + " && /bin/chmod \(file.permissionsOctal) \(temp)"
+                        + " && /usr/sbin/chown \(file.ownerAccountID):\(file.groupAccountID) \(temp)"
+                        + " && /bin/mv -f \(temp) \(source); }"
+                        + " || { fail=1; /bin/rm -f \(temp); }"
+                )
+            }
+            let quotedBundle = shellQuoted(bundle.bundlePath)
+            lines.append("/usr/bin/codesign --force --deep --sign - \(quotedBundle) || fail=1")
+            lines.append("/usr/bin/codesign --verify \(quotedBundle) || fail=1")
         }
-        let bundle = shellQuoted(bundlePath)
-        lines.append("/usr/bin/codesign --force --deep --sign - \(bundle) || fail=1")
-        lines.append("/usr/bin/codesign --verify \(bundle) || fail=1")
         lines.append("exit $fail")
         return lines.joined(separator: "\n") + "\n"
     }
@@ -708,6 +729,39 @@ enum LipoThinningService {
         _ = try fileManager.replaceItemAt(url, withItemAt: tempURL)
     }
 
+    /// Thin All: every bundle in one pass, keyed by bundle path. Writable bundles run the
+    /// in-process path one at a time; every non-writable bundle is batched into ONE privileged
+    /// script behind ONE password prompt — twenty system-installed apps never mean twenty
+    /// dialogs.
+    static func thinAll(
+        appsAt bundlePaths: [URL], fileManager: FileManager = .default
+    ) async -> [String: LipoThinOutcome] {
+        var outcomes: [String: LipoThinOutcome] = [:]
+        var privileged: [(bundlePath: URL, candidates: [URL])] = []
+
+        for bundlePath in bundlePaths {
+            guard let bundle = Bundle(url: bundlePath), let executableURL = bundle.executableURL else {
+                outcomes[bundlePath.path] = LipoThinOutcome(
+                    succeeded: false, freedBytes: 0, message: "Could not read this app's executable."
+                )
+                continue
+            }
+            if LipoWriteAccess.canWriteAlongside(executableURL: executableURL, fileManager: fileManager) {
+                outcomes[bundlePath.path] = await thin(appAt: bundlePath, fileManager: fileManager)
+            } else {
+                privileged.append((bundlePath, LipoBundleWalker.machOCandidates(
+                    bundlePath: bundlePath, mainExecutable: executableURL, fileManager: fileManager
+                )))
+            }
+        }
+
+        if !privileged.isEmpty {
+            let batch = await thinPrivilegedBatch(bundles: privileged, fileManager: fileManager)
+            outcomes.merge(batch) { _, new in new }
+        }
+        return outcomes
+    }
+
     /// The administrator-privileged thin: same candidates, same fat-with-arm64 re-check, but the
     /// mutation runs as root through one `osascript … with administrator privileges` call — the
     /// standard GUI password prompt, the same mechanism every Mac utility that repairs root-owned
@@ -717,52 +771,77 @@ enum LipoThinningService {
     private static func thinPrivileged(
         bundlePath: URL, candidates: [URL], fileManager: FileManager
     ) async -> LipoThinOutcome {
-        var plans: [LipoPrivilegedScript.FilePlan] = []
-        var beforeSizes: [String: Int64] = [:]
+        let outcomes = await thinPrivilegedBatch(
+            bundles: [(bundlePath, candidates)], fileManager: fileManager
+        )
+        return outcomes[bundlePath.path]
+            ?? LipoThinOutcome(succeeded: false, freedBytes: 0, message: "Nothing here needed thinning.")
+    }
 
-        for file in candidates {
-            // Same freshness rule as the in-process path: only files that are fat WITH an arm64
-            // slice right now, re-parsed here rather than trusted from the scan.
-            guard case .fat(let slices) = LipoFileReader.machOKind(at: file),
-                  slices.contains(where: { $0.cpuType == LipoArch.arm64 })
-            else { continue }
+    private static func thinPrivilegedBatch(
+        bundles: [(bundlePath: URL, candidates: [URL])], fileManager: FileManager
+    ) async -> [String: LipoThinOutcome] {
+        var outcomes: [String: LipoThinOutcome] = [:]
+        var bundlePlans: [LipoPrivilegedScript.BundlePlan] = []
+        var beforeSizesByBundle: [String: [String: Int64]] = [:]
 
-            guard let attributes = try? fileManager.attributesOfItem(atPath: file.path),
-                  let permissions = attributes[.posixPermissions] as? NSNumber,
-                  let owner = attributes[.ownerAccountID] as? NSNumber,
-                  let group = attributes[.groupOwnerAccountID] as? NSNumber
-            else { continue }
+        for (bundlePath, candidates) in bundles {
+            var plans: [LipoPrivilegedScript.FilePlan] = []
+            var beforeSizes: [String: Int64] = [:]
 
-            beforeSizes[file.path] = LipoFileReader.allocatedSize(at: file)
-            let tempPath = file.deletingLastPathComponent()
-                .appending(path: ".\(file.lastPathComponent).sweeplipo-\(UUID().uuidString.prefix(8))").path
-            plans.append(LipoPrivilegedScript.FilePlan(
-                path: file.path,
-                tempPath: tempPath,
-                ownerAccountID: owner.uint32Value,
-                groupAccountID: group.uint32Value,
-                permissionsOctal: String(permissions.uint16Value, radix: 8)
-            ))
+            for file in candidates {
+                // Same freshness rule as the in-process path: only files that are fat WITH an
+                // arm64 slice right now, re-parsed here rather than trusted from the scan.
+                guard case .fat(let slices) = LipoFileReader.machOKind(at: file),
+                      slices.contains(where: { $0.cpuType == LipoArch.arm64 })
+                else { continue }
+
+                guard let attributes = try? fileManager.attributesOfItem(atPath: file.path),
+                      let permissions = attributes[.posixPermissions] as? NSNumber,
+                      let owner = attributes[.ownerAccountID] as? NSNumber,
+                      let group = attributes[.groupOwnerAccountID] as? NSNumber
+                else { continue }
+
+                beforeSizes[file.path] = LipoFileReader.allocatedSize(at: file)
+                let tempPath = file.deletingLastPathComponent()
+                    .appending(path: ".\(file.lastPathComponent).sweeplipo-\(UUID().uuidString.prefix(8))").path
+                plans.append(LipoPrivilegedScript.FilePlan(
+                    path: file.path,
+                    tempPath: tempPath,
+                    ownerAccountID: owner.uint32Value,
+                    groupAccountID: group.uint32Value,
+                    permissionsOctal: String(permissions.uint16Value, radix: 8)
+                ))
+            }
+
+            if plans.isEmpty {
+                outcomes[bundlePath.path] = LipoThinOutcome(
+                    succeeded: false, freedBytes: 0, message: "Nothing here needed thinning."
+                )
+            } else {
+                bundlePlans.append(LipoPrivilegedScript.BundlePlan(bundlePath: bundlePath.path, files: plans))
+                beforeSizesByBundle[bundlePath.path] = beforeSizes
+            }
         }
 
-        guard !plans.isEmpty else {
-            return LipoThinOutcome(succeeded: false, freedBytes: 0, message: "Nothing here needed thinning.")
-        }
+        guard !bundlePlans.isEmpty else { return outcomes }
 
         let scriptURL = fileManager.temporaryDirectory
             .appending(path: "sweep-lipo-\(UUID().uuidString).sh")
         defer { try? fileManager.removeItem(at: scriptURL) }
         do {
-            let script = LipoPrivilegedScript.build(files: plans, bundlePath: bundlePath.path)
+            let script = LipoPrivilegedScript.build(bundles: bundlePlans)
             try script.write(to: scriptURL, atomically: true, encoding: .utf8)
             try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: scriptURL.path)
         } catch {
-            return LipoThinOutcome(
-                succeeded: false, freedBytes: 0,
-                message: "Could not prepare the privileged thin (\((error as NSError).localizedDescription))."
-            )
+            let message = "Could not prepare the privileged thin (\((error as NSError).localizedDescription))."
+            for plan in bundlePlans {
+                outcomes[plan.bundlePath] = LipoThinOutcome(succeeded: false, freedBytes: 0, message: message)
+            }
+            return outcomes
         }
 
+        var runFailureText: String?
         do {
             // The generous timeout is for the password dialog itself, not the tools: the user may
             // reasonably leave it up for a while before typing.
@@ -774,40 +853,63 @@ enum LipoThinningService {
         } catch {
             let text = String(describing: error)
             if text.contains("-128") {
-                return LipoThinOutcome(
-                    succeeded: false, freedBytes: 0,
-                    message: "The password prompt was canceled \u{2014} nothing was changed."
-                )
+                for plan in bundlePlans {
+                    outcomes[plan.bundlePath] = LipoThinOutcome(
+                        succeeded: false, freedBytes: 0,
+                        message: "The password prompt was canceled \u{2014} nothing was changed."
+                    )
+                }
+                return outcomes
             }
             if text.contains("Operation not permitted") {
-                return LipoThinOutcome(
-                    succeeded: false, freedBytes: 0,
-                    message: "macOS blocked the change. Grant Sweep \u{201C}App Management\u{201D} in "
-                        + "System Settings \u{2192} Privacy & Security, then try again."
-                )
+                for plan in bundlePlans {
+                    outcomes[plan.bundlePath] = LipoThinOutcome(
+                        succeeded: false, freedBytes: 0,
+                        message: "macOS blocked the change. Grant Sweep \u{201C}App Management\u{201D} in "
+                            + "System Settings \u{2192} Privacy & Security, then try again."
+                    )
+                }
+                return outcomes
             }
-            return LipoThinOutcome(
-                succeeded: false, freedBytes: freedBytesMeasured(beforeSizes: beforeSizes),
-                message: "Thinning as administrator failed (\(text))."
+            // Any other nonzero exit is judged per bundle below: the script tolerates per-file
+            // failures and re-signs every bundle regardless, so some bundles in the batch may
+            // still have finished cleanly.
+            runFailureText = text
+        }
+
+        for plan in bundlePlans {
+            let bundlePath = plan.bundlePath
+            let beforeSizes = beforeSizesByBundle[bundlePath] ?? [:]
+            let freed = freedBytesMeasured(beforeSizes: beforeSizes)
+
+            if let stillFat = plan.files.first(where: { file in
+                if case .fat = LipoFileReader.machOKind(at: URL(fileURLWithPath: file.path)) { return true }
+                return false
+            }) {
+                let detail = runFailureText.map { " (\($0))" } ?? ""
+                outcomes[bundlePath] = LipoThinOutcome(
+                    succeeded: false, freedBytes: freed,
+                    message: "\(URL(fileURLWithPath: stillFat.path).lastPathComponent) is still a fat binary after thinning\(detail)."
+                )
+                continue
+            }
+
+            // The script already verified each bundle's fresh signature as root; re-checked here
+            // from the app's side so a signing failure can never be reported as success.
+            if (try? LipoProcessRunner.run("/usr/bin/codesign", ["--verify", bundlePath])) == nil {
+                outcomes[bundlePath] = LipoThinOutcome(
+                    succeeded: false, freedBytes: freed,
+                    message: "Thinned, but re-signing failed. The app may refuse to launch until reinstalled."
+                )
+                continue
+            }
+
+            outcomes[bundlePath] = LipoThinOutcome(
+                succeeded: true, freedBytes: freed,
+                message: "Freed \(ByteCountFormatter.lipoDecimalString(freed))"
             )
         }
-
-        // Ground truth, exactly as the in-process path insists on it: every plan's file must
-        // honestly parse as single-architecture now.
-        for plan in plans {
-            if case .fat = LipoFileReader.machOKind(at: URL(fileURLWithPath: plan.path)) {
-                return LipoThinOutcome(
-                    succeeded: false, freedBytes: freedBytesMeasured(beforeSizes: beforeSizes),
-                    message: "\(URL(fileURLWithPath: plan.path).lastPathComponent) is still a fat binary after thinning."
-                )
-            }
-        }
-
-        let freed = freedBytesMeasured(beforeSizes: beforeSizes)
-        return LipoThinOutcome(
-            succeeded: true, freedBytes: freed,
-            message: "Freed \(ByteCountFormatter.lipoDecimalString(freed))"
-        )
+        return outcomes
     }
 
     private static func freedBytesMeasured(beforeSizes: [String: Int64]) -> Int64 {

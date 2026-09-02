@@ -14,10 +14,27 @@ final class EmptyTrashModel {
     private(set) var isReviewing = false
     private(set) var isExecuting = false
     private(set) var report: EmptyTrashService.Report?
+    /// Sizes streamed in AFTER the sheet is already up (user-directed: the sheet must never sit
+    /// on a spinner while hundreds of trashed trees are measured). Keyed by entry name; an entry
+    /// with no value yet renders a placeholder. The consent `execute` binds to is the identity
+    /// snapshot, which is complete the moment `review` is set — sizes are informational.
+    private(set) var sizeByName: [String: Int64] = [:]
+    private(set) var isSizing = false
     var sheetShown = false
     var confirmShown = false
 
     private var task: Task<Void, Never>?
+
+    var totalKnownBytes: Int64 {
+        sizeByName.values.reduce(0, +)
+    }
+
+    /// Largest-first once sizes are known; still-unsized entries sink below sized ones in their
+    /// original (directory) order, so the list settles from the top down as measuring proceeds.
+    var displayItems: [EmptyTrashService.ReviewedItem] {
+        guard let review else { return [] }
+        return review.items.sorted { (sizeByName[$0.name] ?? -1) > (sizeByName[$1.name] ?? -1) }
+    }
 
     func openReview() {
         sheetShown = true
@@ -29,11 +46,23 @@ final class EmptyTrashModel {
         isReviewing = true
         review = nil
         report = nil
+        sizeByName = [:]
         task = Task {
-            let captured = await Task.detached(priority: .userInitiated) { EmptyTrashService.review() }.value
+            // The identity snapshot is one lstat per entry — effectively instant even for a
+            // heaving Trash — so the sheet renders its rows in the same beat it opens.
+            let captured = await Task.detached(priority: .userInitiated) { EmptyTrashService.snapshot() }.value
             guard !Task.isCancelled else { return }
             review = captured
             isReviewing = false
+
+            isSizing = true
+            defer { isSizing = false }
+            for item in captured.items {
+                guard !Task.isCancelled else { return }
+                let size = await Task.detached(priority: .utility) { EmptyTrashService.allocatedSize(of: item) }.value
+                guard !Task.isCancelled else { return }
+                sizeByName[item.name] = size
+            }
         }
     }
 
@@ -50,10 +79,13 @@ final class EmptyTrashModel {
     }
 
     func finish() {
+        task?.cancel()
         sheetShown = false
         confirmShown = false
         review = nil
         report = nil
+        sizeByName = [:]
+        isSizing = false
     }
 }
 
@@ -104,7 +136,7 @@ struct EmptyTrashSheet: View {
                 .padding(SweepTokens.s5)
             } else if let review = model.review, !review.isEmpty {
                 VStack(alignment: .leading, spacing: SweepTokens.s1) {
-                    ForEach(review.items.prefix(Self.previewRowCap), id: \.url) { item in
+                    ForEach(model.displayItems.prefix(Self.previewRowCap), id: \.url) { item in
                         HStack(spacing: SweepTokens.s2) {
                             Image(systemName: "doc")
                                 .font(.system(size: 12))
@@ -115,11 +147,18 @@ struct EmptyTrashSheet: View {
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                             Spacer(minLength: SweepTokens.s2)
-                            Text(SweepFormat.bytes(item.allocatedSize))
-                                .font(SweepFont.monoSmall)
-                                .monospacedDigit()
-                                .foregroundStyle(.secondary)
-                                .fixedSize()
+                            if let size = model.sizeByName[item.name] {
+                                Text(SweepFormat.bytes(size))
+                                    .font(SweepFont.monoSmall)
+                                    .monospacedDigit()
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize()
+                            } else {
+                                Text("\u{2026}")
+                                    .font(SweepFont.monoSmall)
+                                    .foregroundStyle(.tertiary)
+                                    .fixedSize()
+                            }
                         }
                         .frame(height: 26)
                     }
@@ -140,27 +179,33 @@ struct EmptyTrashSheet: View {
         Divider()
 
         HStack(spacing: SweepTokens.s3) {
+            // Layout contract: the two buttons are atoms and never compress — the count text is
+            // the flexible run that truncates instead. (The first cut had this exactly backwards
+            // and the Cancel button rendered as "C…".)
             if let review = model.review, !review.isEmpty {
-                Text("\(SweepFormat.itemCount(review.itemCount)) \u{00B7} \(SweepFormat.bytes(review.totalBytes))")
+                Text(footerSummary(review))
                     .font(SweepFont.mono)
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
-                    .fixedSize()
+                    .lineLimit(1)
+                    .truncationMode(.tail)
             }
             Spacer(minLength: SweepTokens.s3)
             Button("Cancel") { model.sheetShown = false }
                 .buttonStyle(.sweepQuiet)
                 .keyboardShortcut(.cancelAction)
                 .disabled(model.isExecuting)
+                .fixedSize()
             Button(model.isExecuting ? "Deleting\u{2026}" : "Empty Trash") { model.confirmShown = true }
                 .buttonStyle(.sweepDestructive())
                 .disabled(model.isExecuting || model.isReviewing || (model.review?.isEmpty ?? true))
+                .fixedSize()
         }
         .padding(SweepTokens.s5)
         // The PLAN-mandated second confirmation: the exact count and bytes, restated, with the
         // irreversibility in the message — never a single-click destructive action.
         .confirmationDialog(
-            "Permanently delete \(SweepFormat.itemCount(model.review?.itemCount ?? 0)) (\(SweepFormat.bytes(model.review?.totalBytes ?? 0)))?",
+            "Permanently delete \(SweepFormat.itemCount(model.review?.itemCount ?? 0)) (\(confirmBytesText))?",
             isPresented: $model.confirmShown, titleVisibility: .visible
         ) {
             Button("Delete Forever", role: .destructive) { model.execute() }
@@ -168,6 +213,20 @@ struct EmptyTrashSheet: View {
         } message: {
             Text("Anything moved to the Trash after this review stays untouched. This cannot be undone.")
         }
+    }
+
+    /// "988 items · 16.2 GB", with a trailing ellipsis while sizes are still streaming in — the
+    /// number only ever grows, so showing the running total beats hiding it behind a spinner.
+    private func footerSummary(_ review: EmptyTrashService.Review) -> String {
+        var text = "\(SweepFormat.itemCount(review.itemCount)) \u{00B7} \(SweepFormat.bytes(model.totalKnownBytes))"
+        if model.isSizing { text += "\u{2026}" }
+        return text
+    }
+
+    private var confirmBytesText: String {
+        model.isSizing
+            ? "at least \(SweepFormat.bytes(model.totalKnownBytes))"
+            : SweepFormat.bytes(model.totalKnownBytes)
     }
 
     // MARK: - Report

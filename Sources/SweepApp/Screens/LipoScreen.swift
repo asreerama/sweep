@@ -47,6 +47,11 @@ final class LipoModel {
     /// unannounced.
     private(set) var pendingThinNeedsAdmin = false
 
+    /// Drives the Thin All confirm dialog, same never-set-anywhere-else discipline as
+    /// `pendingThinTarget`.
+    var thinAllRequested = false
+    private(set) var thinAllNeedsAdmin = false
+
     private var scanTask: Task<Void, Never>?
 
     /// Sum of every listed row's estimated savings, excluding rows already successfully thinned
@@ -92,6 +97,15 @@ final class LipoModel {
         outcomesByID[row.id]
     }
 
+    /// Idempotent auto-scan entry point: the screen calls this from `.task` on every appearance
+    /// (user-directed: no Scan button — discovery is read-only and fast, so it just happens).
+    /// Guarded to the idle phase so SwiftUI re-evaluating the view can never restart a scan
+    /// that is already running or throw away results mid-look.
+    func scanIfNeeded() {
+        guard phase == .idle else { return }
+        scan()
+    }
+
     func scan() {
         guard scanTask == nil else { return }
         phase = .scanning
@@ -107,12 +121,6 @@ final class LipoModel {
             phase = .results
             scanTask = nil
         }
-    }
-
-    func rescan() {
-        scanTask?.cancel()
-        scanTask = nil
-        scan()
     }
 
     /// Refuses outright for a protected or currently-running app — mirrors the Uninstaller's
@@ -145,6 +153,47 @@ final class LipoModel {
             outcomesByID[row.id] = outcome
         }
     }
+
+    // MARK: Thin All
+
+    /// Every row a Thin All would act on right now: not protected, not running, not already
+    /// successfully thinned. Running apps are simply left out — their RUNNING chip already says
+    /// why — rather than failing the whole batch over one open app.
+    var thinAllEligibleRows: [LipoAppRow] {
+        rows.filter { row in
+            !row.isProtected && !(outcomesByID[row.id]?.succeeded ?? false) && !isRunning(row)
+        }
+    }
+
+    var thinAllEligibleSavings: Int64 {
+        thinAllEligibleRows.reduce(0) { $0 + $1.savingsBytes }
+    }
+
+    var isThinningAny: Bool { !thinningIDs.isEmpty }
+
+    func requestThinAll() {
+        let eligible = thinAllEligibleRows
+        guard !eligible.isEmpty, !isThinningAny else { return }
+        thinAllNeedsAdmin = eligible.contains { row in
+            guard let executableURL = Bundle(url: row.bundlePath)?.executableURL else { return false }
+            return !LipoWriteAccess.canWriteAlongside(executableURL: executableURL)
+        }
+        thinAllRequested = true
+    }
+
+    func confirmThinAll() {
+        thinAllRequested = false
+        // Eligibility re-derived at confirm time — an app launched while the dialog sat open
+        // drops out here, same last-moment discipline as the single-row path.
+        let targets = thinAllEligibleRows
+        guard !targets.isEmpty, !isThinningAny else { return }
+        for row in targets { thinningIDs.insert(row.id) }
+        Task {
+            let outcomes = await LipoThinningService.thinAll(appsAt: targets.map(\.bundlePath))
+            for (id, outcome) in outcomes { outcomesByID[id] = outcome }
+            for row in targets { thinningIDs.remove(row.id) }
+        }
+    }
 }
 
 // MARK: - Screen
@@ -165,11 +214,28 @@ struct LipoScreen: View {
                 title: "App Lipo",
                 subtitle: "Trim Intel-only code from universal apps. Apple-signed apps are never touched."
             ) {
+                // No Scan button (user-directed): discovery is read-only header parsing, fast
+                // enough to just run on every visit — the spinner is the only scan UI there is.
                 if model.phase == .scanning {
                     ProgressView().controlSize(.small)
-                } else {
-                    Button(model.phase == .idle ? "Scan" : "Rescan") { model.rescan() }
-                        .buttonStyle(.sweepQuiet)
+                } else if model.phase == .results, !model.thinAllEligibleRows.isEmpty {
+                    Button("Thin All") { model.requestThinAll() }
+                        .buttonStyle(.sweepDestructive(minWidth: 84))
+                        .disabled(model.isThinningAny)
+                        .fixedSize()
+                        .confirmationDialog(
+                            thinAllTitle,
+                            isPresented: Binding(
+                                get: { model.thinAllRequested },
+                                set: { if !$0 { model.thinAllRequested = false } }
+                            ),
+                            titleVisibility: .visible
+                        ) {
+                            Button("Thin All", role: .destructive) { model.confirmThinAll() }
+                            Button("Cancel", role: .cancel) { model.thinAllRequested = false }
+                        } message: {
+                            Text(thinAllMessage)
+                        }
                 }
             }
             Divider()
@@ -178,6 +244,7 @@ struct LipoScreen: View {
             footer
         }
         .animation(SweepMotion.layout, value: model.phase)
+        .task { model.scanIfNeeded() }
         .confirmationDialog(
             confirmTitle,
             isPresented: Binding(
@@ -197,6 +264,21 @@ struct LipoScreen: View {
         "Thin \u{201C}\(model.pendingThinTarget?.name ?? "this app")\u{201D}?"
     }
 
+    private var thinAllTitle: String {
+        let count = model.thinAllEligibleRows.count
+        return "Thin \(count == 1 ? "1 app" : "\(count) apps")?"
+    }
+
+    private var thinAllMessage: String {
+        var message = "Removes the Intel portion from every listed app that isn\u{2019}t running. "
+            + "Frees ~\(SweepFormat.bytes(model.thinAllEligibleSavings)). "
+            + "Cannot be undone; each app is re-signed locally afterward."
+        if model.thinAllNeedsAdmin {
+            message += " One administrator password approves all system-installed apps together."
+        }
+        return message
+    }
+
     private var confirmMessage: String {
         let savings = SweepFormat.bytes(model.pendingThinTarget?.savingsBytes ?? 0)
         var message = "Removes the Intel portion of its code. Frees ~\(savings). "
@@ -210,14 +292,9 @@ struct LipoScreen: View {
     @ViewBuilder
     private var content: some View {
         switch model.phase {
-        case .idle:
-            InventoryEmptyState(
-                symbol: "square.stack.3d.up.slash",
-                title: "No scan yet",
-                message: "Looks for universal apps in /Applications and ~/Applications, and estimates "
-                    + "how much disk their Intel-only code is wasting on this Mac."
-            )
-        case .scanning:
+        case .idle, .scanning:
+            // `.idle` lasts only until the `.task` below fires, so both phases read as the scan
+            // already being underway — there is no "No scan yet" state a user can reach.
             InventoryEmptyState(symbol: "square.stack.3d.up", title: "Scanning installed apps\u{2026}")
         case .results:
             if model.rows.isEmpty {
