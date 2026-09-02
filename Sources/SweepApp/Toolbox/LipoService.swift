@@ -690,10 +690,10 @@ enum LipoProcessRunner {
         // never reads a still-growing pipe as if it were already complete.
         let reader = outputPipe.fileHandleForReading
         let group = DispatchGroup()
-        var collected = Data()
+        let collectedBox = OutputBox()
         group.enter()
         DispatchQueue.global(qos: .utility).async {
-            collected = reader.readDataToEndOfFile()
+            collectedBox.data = reader.readDataToEndOfFile()
             group.leave()
         }
 
@@ -703,11 +703,20 @@ enum LipoProcessRunner {
         }
         process.waitUntilExit()
 
-        let output = String(data: collected, encoding: .utf8) ?? ""
+        let output = String(data: collectedBox.data, encoding: .utf8) ?? ""
         guard process.terminationStatus == 0 else {
             throw RunError.nonZeroExit(process.terminationStatus, output: output)
         }
         return output
+    }
+
+    /// Plain single-write-then-single-read box for handing the drained pipe bytes back across the
+    /// `DispatchQueue.global` closure above: `run(_:_:)` never reads `data` until after
+    /// `group.wait` has already observed the writer's `group.leave()`, so the two accesses are
+    /// strictly ordered by that synchronization and never actually race — `@unchecked Sendable`
+    /// records that ordering argument rather than papering over a real data race.
+    private final class OutputBox: @unchecked Sendable {
+        var data = Data()
     }
 }
 

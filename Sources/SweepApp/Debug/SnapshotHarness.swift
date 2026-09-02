@@ -63,6 +63,16 @@ enum SnapshotHarness {
             return
         }
 
+        // Generic fast path: SWEEP_SNAPSHOT_DEST=<Destination rawValue> captures any one screen
+        // (settle long enough for its own async loads) — the per-screen *_ONLY flags predate it.
+        if let raw = environment["SWEEP_SNAPSHOT_DEST"], let destination = Destination(rawValue: raw) {
+            state.destination = destination
+            await settle(seconds: 4.0)
+            await capture(window, to: output, "\(prefix)-dest-\(raw)", state: state)
+            if environment["SWEEP_SNAPSHOT_EXIT"] == "1" { await settle(seconds: 0.3); await MainActor.run { NSApp.terminate(nil) } }
+            return
+        }
+
         // Same fast-iteration shape as MEMORY_ONLY, for the Maintenance screen.
         if environment["SWEEP_SNAPSHOT_MAINTENANCE_ONLY"] == "1" {
             state.destination = .maintenance

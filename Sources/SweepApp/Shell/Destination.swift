@@ -16,6 +16,8 @@ enum Destination: String, Hashable, Identifiable, CaseIterable {
     case uninstaller
     case developer
     case homebrew
+    case appLipo
+    case plugins
     case listStress
     case cleanFlowPreview
 
@@ -32,6 +34,8 @@ enum Destination: String, Hashable, Identifiable, CaseIterable {
         case .uninstaller: "Uninstaller"
         case .developer: "Developer"
         case .homebrew: "Homebrew"
+        case .appLipo: "App Lipo"
+        case .plugins: "Plugins"
         case .listStress: "List Stress"
         case .cleanFlowPreview: "Clean Flow Preview"
         }
@@ -53,6 +57,8 @@ enum Destination: String, Hashable, Identifiable, CaseIterable {
         case .uninstaller: "app.dashed"
         case .developer: "chevron.left.forwardslash.chevron.right"
         case .homebrew: "mug"
+        case .appLipo: "scissors"
+        case .plugins: "puzzlepiece.extension"
         case .listStress: "speedometer"
         case .cleanFlowPreview: "sparkle.magnifyingglass"
         }
@@ -60,7 +66,7 @@ enum Destination: String, Hashable, Identifiable, CaseIterable {
 
     var tier: SidebarTier {
         switch self {
-        case .developer, .homebrew, .listStress, .cleanFlowPreview: .toolbox
+        case .developer, .homebrew, .appLipo, .plugins, .listStress, .cleanFlowPreview: .toolbox
         default: .primary
         }
     }
@@ -77,6 +83,8 @@ enum Destination: String, Hashable, Identifiable, CaseIterable {
         case .uninstaller: "Full app removal with auditable ownership evidence per leftover."
         case .developer: "Per-environment caches with live sizes. Nothing is ever auto-selected."
         case .homebrew: "Formulae, casks, outdated packages and cache, previewed before anything runs."
+        case .appLipo: "Trim Intel-only code from universal apps. Apple-signed apps are never touched."
+        case .plugins: "Spotlight importers, Quick Look, audio units and app extensions \u{2014} and what installed them."
         case .listStress: "Debug harness: 10,000 synthetic rows through the shipping inventory list."
         case .cleanFlowPreview: "Debug harness: confirm / progress / report states, ahead of the Gate 1 flip."
         }
@@ -103,7 +111,7 @@ struct SidebarGroup: Identifiable {
         SidebarGroup(
             id: "toolbox",
             title: "Toolbox",
-            destinations: [.developer, .homebrew]
+            destinations: [.developer, .homebrew, .appLipo, .plugins]
                 + (includingStressHarness ? [.listStress, .cleanFlowPreview] : [])
         )
     }

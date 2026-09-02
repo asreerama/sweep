@@ -127,6 +127,10 @@ struct RootView: View {
             DeveloperScreen()
         case .homebrew:
             HomebrewScreen()
+        case .appLipo:
+            LipoScreen()
+        case .plugins:
+            PluginsScreen()
         }
     }
 }

@@ -37,6 +37,7 @@ struct SmartScanScreen: View {
     /// request to a flow already in flight.
     @State private var cleanFlow: CleanFlowModel?
     @State private var orphanFind = OrphanFindModel()
+    @State private var emptyTrash = EmptyTrashModel()
 
     /// What this screen is actually showing — see the type doc for why this is not just
     /// `scan.phase` re-read.
@@ -88,9 +89,15 @@ struct SmartScanScreen: View {
                 title: Destination.smartScan.title,
                 subtitle: Destination.smartScan.subtitle
             ) {
-                if displayPhase == .results {
-                    Button("Rescan") { scan.rescan() }
+                HStack(spacing: SweepTokens.s2) {
+                    // PLAN §3 module 1: Empty Trash is its own explicitly irreversible flow —
+                    // never part of the scan's clean, reachable regardless of scan phase.
+                    Button("Empty Trash\u{2026}") { emptyTrash.openReview() }
                         .buttonStyle(.sweepQuiet)
+                    if displayPhase == .results {
+                        Button("Rescan") { scan.rescan() }
+                            .buttonStyle(.sweepQuiet)
+                    }
                 }
             }
 
@@ -110,6 +117,9 @@ struct SmartScanScreen: View {
         .onChange(of: scan.phase) { _, newPhase in
             syncDisplayPhase()
             if newPhase == .results { orphanFind.refresh() }
+        }
+        .sheet(isPresented: Bindable(emptyTrash).sheetShown) {
+            EmptyTrashSheet(model: emptyTrash)
         }
     }
 

@@ -33,6 +33,8 @@ public enum SweepModuleHue {
         case "app.dashed", "xmark.bin": Color(hex: 0xD97BA0)                       // Uninstaller — muted rose
         case "chevron.left.forwardslash.chevron.right", "hammer": Color(hex: 0x8B8FD6) // Developer — muted lavender
         case "mug": Color(hex: 0xB08968)                                           // Homebrew — muted tan
+        case "scissors": Color(hex: 0x4F9DB6)                                      // App Lipo — muted petrol
+        case "puzzlepiece.extension": Color(hex: 0x9AA25C)                         // Plugins — muted olive
         default: nil
         }
     }
