@@ -23,6 +23,10 @@ public struct SweepPrimaryButtonStyle: ButtonStyle {
         configuration.label
             .font(.system(size: 15, weight: .semibold))
             .foregroundStyle(isEnabled ? .white : Color.secondary)
+            // Real side padding of its own — `minWidth` is a floor, not the source of the
+            // label's air. Without this, a long label (or any `minWidth: 0` call site) rendered
+            // text touching both capsule edges (user-reported on Maintenance's banner button).
+            .padding(.horizontal, SweepTokens.s4)
             .frame(minWidth: minWidth)
             .frame(height: 36)
             .background {

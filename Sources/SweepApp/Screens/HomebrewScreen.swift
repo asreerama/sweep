@@ -436,12 +436,14 @@ private struct BrewCommandPreviewSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: SweepTokens.s2) {
+            VStack(alignment: .leading, spacing: SweepTokens.s1 + 2) {
+                // Dialog register (scale v3): sheets speak `sectionTitle`, never the 28 pt
+                // screen title — same decision as `CleanConfirmSheet`/`MaintenancePreviewSheet`.
                 Text(action.title)
-                    .font(SweepFont.screenTitle)
+                    .font(SweepFont.sectionTitle)
                     .foregroundStyle(.primary)
                 Text("Preview \u{2014} nothing runs until you confirm.")
-                    .font(SweepFont.screenSubtitle)
+                    .font(SweepFont.caption)
                     .foregroundStyle(.secondary)
             }
             .padding(.horizontal, SweepTokens.s5)

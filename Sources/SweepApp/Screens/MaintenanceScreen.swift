@@ -50,12 +50,12 @@ struct MaintenanceScreen: View {
     private var helperStatusSection: some View {
         SectionCard {
             VStack(alignment: .leading, spacing: SweepTokens.s3) {
-                HStack(spacing: SweepTokens.s2) {
+                HStack(spacing: SweepTokens.s2 + 2) {
                     Image(systemName: helperStatusSymbol)
-                        .font(.system(size: 14.5, weight: .medium))
+                        .font(.system(size: 16, weight: .medium))
                         .foregroundStyle(helperStatusIsBusy ? .secondary : SweepTokens.tierCaution)
                     Text(MaintenanceHelperPresentation.statusLine(for: model.helper.state))
-                        .font(SweepFont.rowTitle)
+                        .font(SweepFont.rowTitleEmphasis)
                         .foregroundStyle(.primary)
                     if helperStatusIsBusy {
                         ProgressView().controlSize(.small)
@@ -103,12 +103,19 @@ struct MaintenanceScreen: View {
         SectionCard {
             VStack(alignment: .leading, spacing: SweepTokens.s3) {
                 HStack(alignment: .top, spacing: SweepTokens.s3) {
-                    Image(systemName: kind.symbol)
-                        .font(.system(size: 18, weight: .medium))
-                        .symbolRenderingMode(.hierarchical)
-                        .foregroundStyle(SweepTokens.accent)
-                        .frame(width: 24)
-                    VStack(alignment: .leading, spacing: 2) {
+                    // Same icon-chip register as the Homebrew rows (scale v3): a bare 18 pt glyph
+                    // next to a 16 pt title read as an afterthought; the chip gives each card the
+                    // same visual anchor every other card surface in the app carries.
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(SweepTokens.accent.opacity(0.12))
+                        .frame(width: 38, height: 38)
+                        .overlay {
+                            Image(systemName: kind.symbol)
+                                .font(.system(size: 17, weight: .medium))
+                                .symbolRenderingMode(.hierarchical)
+                                .foregroundStyle(SweepTokens.accent)
+                        }
+                    VStack(alignment: .leading, spacing: 3) {
                         Text(kind.title)
                             .font(SweepFont.sectionTitle)
                             .foregroundStyle(.primary)
@@ -195,7 +202,7 @@ struct MaintenanceScreen: View {
             Label {
                 Text(firstLine(of: reason)).font(SweepFont.caption)
             } icon: {
-                Image(systemName: "exclamationmark.triangle").font(.system(size: 11.5))
+                Image(systemName: "exclamationmark.triangle").font(.system(size: 13))
             }
             .foregroundStyle(SweepTokens.tierExpert)
         }
@@ -218,12 +225,14 @@ private struct MaintenancePreviewSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: SweepTokens.s2) {
+            VStack(alignment: .leading, spacing: SweepTokens.s1 + 2) {
+                // Dialog register (scale v3): sheets speak `sectionTitle`, never the 28 pt
+                // screen title — same decision as `CleanConfirmSheet`.
                 Text(title)
-                    .font(SweepFont.screenTitle)
+                    .font(SweepFont.sectionTitle)
                     .foregroundStyle(.primary)
                 Text("Preview \u{2014} nothing runs until you confirm.")
-                    .font(SweepFont.screenSubtitle)
+                    .font(SweepFont.caption)
                     .foregroundStyle(.secondary)
             }
             .padding(.horizontal, SweepTokens.s5)

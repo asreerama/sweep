@@ -58,6 +58,15 @@ enum SnapshotHarness {
             return
         }
 
+        // Same fast-iteration shape as MEMORY_ONLY, for the Maintenance screen.
+        if environment["SWEEP_SNAPSHOT_MAINTENANCE_ONLY"] == "1" {
+            state.destination = .maintenance
+            await settle(seconds: 3.0)
+            await capture(window, to: output, "\(prefix)-06d-maintenance", state: state)
+            if environment["SWEEP_SNAPSHOT_EXIT"] == "1" { await settle(seconds: 0.3); await MainActor.run { NSApp.terminate(nil) } }
+            return
+        }
+
         state.scan.start()
         await settle(seconds: scanHold)
         await capture(window, to: output, "\(prefix)-02-smart-scan-scanning", state: state)
