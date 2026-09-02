@@ -186,7 +186,10 @@ final class DeveloperScanModel {
     func cleanExecutionContext() -> CleanExecutionContext? {
         guard let catalog else { return nil }
         return CleanExecutionContext(
-            catalog: catalog, ruleIDByItemID: ruleIDByItemID, reviewedIdentityByItemID: reviewedIdentityByItemID
+            catalog: catalog, ruleIDByItemID: ruleIDByItemID,
+            reviewedIdentityByItemID: reviewedIdentityByItemID,
+            // The Developer lens is catalog-rule-only; clones belong to System Junk (PLAN §3).
+            codeSignClonesByItemID: [:]
         )
     }
 }

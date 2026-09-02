@@ -46,6 +46,9 @@ final class ScanModel {
     // the selection, never a catalog re-read from disk. `CleanAdapter.swift` is the only other
     // file that reads this — see `cleanExecutionContext()`.
     private var catalog: RuleCatalog?
+    /// Clone candidates from the last finished scan, keyed into `cleanExecutionContext()` —
+    /// same retention rationale as `catalog`.
+    @ObservationIgnored private var codeSignClones: [CodeSignCloneCandidate] = []
     /// Codex G1 finding #6 (NOT-CLOSED): the identity `ScanService` captured for each reviewed
     /// node's own path (never a descendant's), keyed by `InventoryItem.id`. Threaded into
     /// `CleanExecutionContext` so `CleanAdapter` can bind its depth-1 rescan candidate to the
@@ -122,6 +125,7 @@ final class ScanModel {
         lastSequence = 0
         selection = InventorySelection()
         catalog = nil
+        codeSignClones = []
         reviewedIdentityByItemID = [:]
 
         let environment = self.environment
@@ -205,6 +209,7 @@ final class ScanModel {
         }
         selection = .safeDefaults(in: outcome.ruleGroups)
         catalog = outcome.catalog
+        codeSignClones = outcome.codeSignClones
         reviewedIdentityByItemID = outcome.reviewedIdentityByItemID
         phase = .results
     }
@@ -246,10 +251,22 @@ final class ScanModel {
         request(for: safeSummaryGroups.flatMap(\.items))
     }
 
+    /// Rule-level groups minus the Developer category (user-directed: System Junk and Smart
+    /// Scan were showing identical content). The Developer screen owns that lens with its own
+    /// scan; System Junk keeps everything else, code-sign clones included. Smart Scan stays the
+    /// umbrella over all categories.
+    var systemJunkRuleGroups: [InventoryGroup] {
+        guard let catalog else { return ruleGroups }
+        let developerRuleIDs = Set(catalog.rules.filter { $0.group == .developer }.map(\.id))
+        return ruleGroups.filter { !developerRuleIDs.contains($0.id) }
+    }
+
     /// System Junk's clean request: whatever the user currently has checked, tier-agnostic —
-    /// safe rows are preselected, caution rows only appear here if the user opted in.
+    /// safe rows are preselected, caution rows only appear here if the user opted in. Scoped to
+    /// the groups the System Junk screen actually shows, so a selection made there can never
+    /// reach into the Developer lens's items.
     func systemJunkCleanRequest() -> (summary: CleanRequestSummary, items: [InventoryItem]) {
-        request(for: ruleGroups.flatMap(\.items).filter { selection.contains($0.id) })
+        request(for: systemJunkRuleGroups.flatMap(\.items).filter { selection.contains($0.id) })
     }
 
     private func request(for items: [InventoryItem]) -> (summary: CleanRequestSummary, items: [InventoryItem]) {
@@ -278,7 +295,10 @@ final class ScanModel {
             for item in group.items { ruleIDByItemID[item.id] = group.id }
         }
         return CleanExecutionContext(
-            catalog: catalog, ruleIDByItemID: ruleIDByItemID, reviewedIdentityByItemID: reviewedIdentityByItemID
+            catalog: catalog,
+            ruleIDByItemID: ruleIDByItemID,
+            reviewedIdentityByItemID: reviewedIdentityByItemID,
+            codeSignClonesByItemID: Dictionary(codeSignClones.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         )
     }
 }
@@ -294,4 +314,9 @@ struct CleanExecutionContext {
     /// this by device+inode, never by pathname alone, so a decoy occupying the reviewed path can
     /// never be laundered through as if it were the reviewed item.
     let reviewedIdentityByItemID: [String: FileIdentity]
+    /// Detector-sourced code-sign clones by item id (PLAN §3 module 2): these have no rule in
+    /// `ruleIDByItemID`, and `CleanAdapter` routes them through `CleanService`'s parallel clone
+    /// path, which re-validates every predicate (age, not-running, direct child of the real
+    /// clone root) fresh at execute time.
+    let codeSignClonesByItemID: [String: CodeSignCloneCandidate]
 }

@@ -103,7 +103,10 @@ struct RootView: View {
     private var detail: some View {
         switch state.destination {
         case .smartScan:
-            SmartScanScreen { state.destination = .systemJunk }
+            SmartScanScreen(
+                onReviewItems: { state.destination = .systemJunk },
+                onReviewOrphans: { state.destination = .uninstaller }
+            )
         case .systemJunk:
             SystemJunkScreen()
         case .listStress:

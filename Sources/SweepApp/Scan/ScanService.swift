@@ -57,6 +57,10 @@ struct ScanOutcome: Sendable {
     /// re-authorized by `CleanAdapter.swift` against the exact rules that produced these items,
     /// never a catalog re-read from disk that might have changed underneath the scan.
     let catalog: RuleCatalog
+    /// Code-sign-clone candidates from the detector pass (PLAN §3 module 2) — retained whole
+    /// because `CleanService` authorizes them through its parallel clone path, which takes the
+    /// original `CodeSignCloneCandidate`, never a receipt.
+    let codeSignClones: [CodeSignCloneCandidate]
     /// `InventoryItem.id` → the identity captured for that exact node, never a descendant's
     /// (Codex G1 finding #6, NOT-CLOSED). Threaded through `ScanModel.cleanExecutionContext()` so
     /// `CleanAdapter` can bind its depth-1 rescan candidate to the reviewed object by device+inode
@@ -67,6 +71,7 @@ struct ScanOutcome: Sendable {
         summaryGroups: [], ruleGroups: [], claimedBytes: 0, claimedFiles: 0,
         filesExamined: 0, skipped: [], duration: 0, cancelled: false,
         catalog: RuleCatalog(schemaVersion: RuleCatalog.supportedSchemaVersion, rules: []),
+        codeSignClones: [],
         reviewedIdentityByItemID: [:]
     )
 }
@@ -275,9 +280,66 @@ enum ScanService {
         // operation roots come from `FileManager` rather than the home argument, so a fixture
         // run still surfaces some real paths and both spellings should read as `~/…`.
         let built = buildGroups(nodes: Array(nodes.values), homes: [home.path, displayHome])
+        var summary = built.summary
+        var byRule = built.byRule
+        var identities = built.identityByItemID
+
+        // Code-sign clones (PLAN §3 module 2, Appendix A): a code-driven detector pass, not a
+        // catalog rule — the predicates are per-item and dynamic (bundle id recovered from the
+        // directory name, owning app must not be running, minimum age), which the frozen glob
+        // schema cannot express. One `readdir` of the Darwin user temp `X` directory; the walk
+        // above never visits it. Runs only against the real home: a fixture scan (`home` is not
+        // the account home) must not mix this account's real clones into fixture results.
+        var clones: [CodeSignCloneCandidate] = []
+        if home.path == displayHome, !cancelled {
+            clones = (try? CodeSignCloneDetector().scan()) ?? []
+        }
+        if !clones.isEmpty {
+            let cloneItems = clones.map { clone in
+                InventoryItem(
+                    id: clone.id,
+                    title: clone.bundleIdentifier,
+                    // The CoW honesty caption `CodeSignCloneCandidate.sizeIsCoWApparent`
+                    // requires: apparent bytes, not guaranteed reclaim.
+                    detail: "apparent size (shares blocks with the app) \u{00B7} regenerates on next launch",
+                    symbol: "doc.on.doc",
+                    byteCount: clone.candidate.allocatedSize,
+                    tier: tier(clone.tier)
+                )
+            }
+            let cloneBytes = cloneItems.reduce(Int64(0)) { $0 + $1.byteCount }
+            byRule.append(InventoryGroup(
+                id: CodeSignCloneCandidate.detectorSource,
+                title: "App Launch Clones",
+                symbol: "doc.on.doc",
+                items: cloneItems
+            ))
+            // Smart Scan's category summary files them under System Junk, where PLAN puts them.
+            if let index = summary.firstIndex(where: { $0.id == RuleGroup.systemJunk.rawValue }) {
+                let existing = summary[index]
+                summary[index] = InventoryGroup(
+                    id: existing.id, title: existing.title, symbol: existing.symbol,
+                    items: existing.items + cloneItems
+                )
+            } else {
+                summary.append(InventoryGroup(
+                    id: RuleGroup.systemJunk.rawValue,
+                    title: displayName(.systemJunk),
+                    symbol: symbol(for: .systemJunk),
+                    items: cloneItems
+                ))
+                summary.sort { $0.byteCount > $1.byteCount }
+            }
+            for clone in clones {
+                identities[clone.id] = clone.candidate.identity
+            }
+            claimedBytes += cloneBytes
+            claimedFiles += clones.count
+        }
+
         return ScanOutcome(
-            summaryGroups: built.summary,
-            ruleGroups: built.byRule,
+            summaryGroups: summary,
+            ruleGroups: byRule,
             claimedBytes: claimedBytes,
             claimedFiles: claimedFiles,
             filesExamined: filesExamined,
@@ -285,7 +347,8 @@ enum ScanService {
             duration: Date().timeIntervalSince(started),
             cancelled: cancelled,
             catalog: catalog,
-            reviewedIdentityByItemID: built.identityByItemID
+            codeSignClones: clones,
+            reviewedIdentityByItemID: identities
         )
     }
 
@@ -532,14 +595,16 @@ enum ScanService {
         RuleGroup(rawValue: id).map(friendlySubtitle(for:))
     }
 
+    /// Glyph set v2 — must stay in lockstep with `Destination.symbol` so a Smart Scan summary
+    /// row and the sidebar entry for the same module read as the same object.
     static func symbol(for group: RuleGroup) -> String {
         switch group {
-        case .systemJunk: "trash"
-        case .developer: "hammer"
+        case .systemJunk: "bubbles.and.sparkles"
+        case .developer: "chevron.left.forwardslash.chevron.right"
         case .homebrew: "mug"
-        case .largeFiles: "doc.zipper"
-        case .uninstall: "xmark.bin"
-        case .maintenance: "wrench.and.screwdriver"
+        case .largeFiles: "archivebox"
+        case .uninstall: "app.dashed"
+        case .maintenance: "slider.horizontal.3"
         }
     }
 

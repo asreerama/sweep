@@ -55,6 +55,20 @@ struct LargeFileEntry: Sendable, Equatable {
     let path: String
     let bytes: Int64
     let modified: Date
+    /// Device+inode captured at scan time. The trash path re-reads the live file and refuses
+    /// one that changed or vanished since the scan — the same identity discipline every other
+    /// mutation in this app follows. `nil` only in unit-test fixtures, where no real file backs
+    /// the entry.
+    let identity: FileIdentity?
+
+    init(id: String, name: String, path: String, bytes: Int64, modified: Date, identity: FileIdentity? = nil) {
+        self.id = id
+        self.name = name
+        self.path = path
+        self.bytes = bytes
+        self.modified = modified
+        self.identity = identity
+    }
 }
 
 enum LargeFilesLogic {
@@ -145,6 +159,10 @@ enum LargeFilesScanService {
         let filesExamined: Int
         let claimedBytes: Int64
         let currentPath: String?
+        /// Entries found since the previous tick (user-directed: results stream into the list
+        /// as the walk runs instead of hiding behind the ring for minutes). Hits at or above
+        /// the floor are rare relative to files examined, so a tick's batch is small.
+        let newEntries: [LargeFileEntry]
     }
 
     struct Outcome: Sendable {
@@ -178,6 +196,7 @@ enum LargeFilesScanService {
         )
 
         var entries: [LargeFileEntry] = []
+        var pendingEntries: [LargeFileEntry] = []
         var seenInodes = Set<InodeKey>()
         var policyDenied = Set<String>()
         var filesExamined = 0
@@ -203,8 +222,10 @@ enum LargeFilesScanService {
                             sequence: sequence,
                             filesExamined: filesExamined,
                             claimedBytes: claimedBytes,
-                            currentPath: progress.currentPath.map { SweepFormat.abbreviatingHome($0, home: displayHome) }
+                            currentPath: progress.currentPath.map { SweepFormat.abbreviatingHome($0, home: displayHome) },
+                            newEntries: pendingEntries
                         ))
+                        pendingEntries = []
                     }
 
                 case .candidate(let candidate):
@@ -212,13 +233,16 @@ enum LargeFilesScanService {
                     let inode = InodeKey(device: candidate.identity.deviceID, inode: candidate.identity.inode)
                     guard seenInodes.insert(inode).inserted else { continue }
                     claimedBytes += candidate.allocatedSize
-                    entries.append(LargeFileEntry(
+                    let entry = LargeFileEntry(
                         id: candidate.url.path,
                         name: candidate.url.lastPathComponent,
                         path: SweepFormat.abbreviatingHome(candidate.url.path, home: displayHome),
                         bytes: candidate.allocatedSize,
-                        modified: candidate.identity.modification.date
-                    ))
+                        modified: candidate.identity.modification.date,
+                        identity: candidate.identity
+                    )
+                    entries.append(entry)
+                    pendingEntries.append(entry)
 
                 case .finished(let summary):
                     if summary.cancelled { cancelled = true }
@@ -268,6 +292,18 @@ final class LargeFilesModel {
     var threshold: LargeFileSizeThreshold = .mb100
     var sortOrder: LargeFileSortOrder = .largestFirst
 
+    // MARK: Trash flow (user-directed: results are actionable, including mid-scan)
+
+    /// Opt-in only: everything here is tier `.caution` (real user content), so nothing is ever
+    /// pre-selected — the exact opposite default from System Junk's safe tier.
+    var selection = InventorySelection()
+    var confirmTrashShown = false
+    private(set) var isTrashing = false
+    private(set) var trashReport: SweepUI.CleanReport?
+    /// Ids trashed while the walk was still running: `finish(_:)` must not resurrect them when
+    /// it replaces `rawEntries` with the walk's own complete list.
+    private var trashedIDs = Set<String>()
+
     private var task: Task<Void, Never>?
     private var lastSequence = 0
 
@@ -299,6 +335,9 @@ final class LargeFilesModel {
         skippedPolicyCount = 0
         wasCancelled = false
         lastSequence = 0
+        selection = InventorySelection()
+        trashedIDs = []
+        trashReport = nil
 
         let home = ScanEnvironment.resolve().home
         let floor = LargeFileSizeThreshold.smallest.bytes
@@ -326,17 +365,103 @@ final class LargeFilesModel {
         filesExamined = tick.filesExamined
         claimedBytes = tick.claimedBytes
         currentPath = tick.currentPath
+        if !tick.newEntries.isEmpty {
+            rawEntries.append(contentsOf: tick.newEntries)
+        }
     }
 
     private func finish(_ outcome: LargeFilesScanService.Outcome) {
         task = nil
-        rawEntries = outcome.entries
+        // The walk's own list is the complete truth — minus anything the user already trashed
+        // while it was still running (streaming makes that possible now).
+        rawEntries = outcome.entries.filter { !trashedIDs.contains($0.id) }
         filesExamined = outcome.filesExamined
         claimedBytes = outcome.claimedBytes
         skippedPolicyCount = outcome.skippedPolicyCount
         wasCancelled = outcome.cancelled
         currentPath = nil
         phase = .results
+    }
+
+    // MARK: - Trash execution
+
+    var selectedCount: Int { selection.selectedCount(in: groups) }
+    var selectedBytes: Int64 { selection.selectedBytes(in: groups) }
+
+    /// Moves every selected (and currently visible under the threshold) file to the Trash —
+    /// reversible by design, one identity-checked `trashItem` per file, with per-item honesty
+    /// in the report. No Gate-1 catalog authorization applies here: these are user-picked
+    /// files the user is looking at, not rule-matched junk, and the mutation is a reversible
+    /// move confirmed explicitly — the same consent shape as the Uninstaller's itemized sheet.
+    func executeTrash() {
+        guard !isTrashing else { return }
+        let items = groups.flatMap(\.items).filter { selection.contains($0.id) }
+        guard !items.isEmpty else { return }
+        let identityByID = Dictionary(uniqueKeysWithValues: rawEntries.map { ($0.id, $0.identity) })
+        isTrashing = true
+
+        Task {
+            let result = await Task.detached(priority: .userInitiated) {
+                Self.performTrash(items: items, identityByID: identityByID)
+            }.value
+            for id in result.trashedIDs {
+                trashedIDs.insert(id)
+                selection.set(id, selected: false)
+            }
+            rawEntries.removeAll { result.trashedIDs.contains($0.id) }
+            trashReport = SweepUI.CleanReport(
+                freedBytes: result.freedBytes,
+                succeededCount: result.trashedIDs.count,
+                outcomes: result.outcomes
+            )
+            isTrashing = false
+        }
+    }
+
+    func dismissTrashReport() { trashReport = nil }
+
+    private struct TrashResult: Sendable {
+        let outcomes: [SweepUI.CleanItemOutcome]
+        let trashedIDs: Set<String>
+        let freedBytes: Int64
+    }
+
+    private nonisolated static func performTrash(
+        items: [InventoryItem], identityByID: [String: FileIdentity?]
+    ) -> TrashResult {
+        var outcomes: [SweepUI.CleanItemOutcome] = []
+        var trashed = Set<String>()
+        var freed: Int64 = 0
+        for item in items {
+            let url = URL(fileURLWithPath: item.id)
+            // Same discipline as every other mutation in this app: the thing being trashed
+            // must be the thing the scan showed. A changed or vanished file settles as a
+            // per-item refusal, never a silent skip and never a trash of whatever sits there
+            // now.
+            if let reviewed = identityByID[item.id] ?? nil {
+                guard let live = try? FileIdentity.read(at: url), live.isSameFile(as: reviewed) else {
+                    outcomes.append(SweepUI.CleanItemOutcome(
+                        id: item.id, title: item.title, byteCount: 0,
+                        status: .failed(reason: "It changed or disappeared since the scan \u{2014} rescan to act on it.")
+                    ))
+                    continue
+                }
+            }
+            do {
+                try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+                trashed.insert(item.id)
+                freed += item.byteCount
+                outcomes.append(SweepUI.CleanItemOutcome(
+                    id: item.id, title: item.title, byteCount: item.byteCount, status: .succeeded
+                ))
+            } catch {
+                outcomes.append(SweepUI.CleanItemOutcome(
+                    id: item.id, title: item.title, byteCount: 0,
+                    status: .failed(reason: (error as NSError).localizedDescription)
+                ))
+            }
+        }
+        return TrashResult(outcomes: outcomes, trashedIDs: trashed, freedBytes: freed)
     }
 }
 
@@ -365,6 +490,8 @@ struct LargeOldFilesScreen: View {
                     if model.phase == .results, !model.groups.isEmpty {
                         SweepSearchField(text: $query, prompt: "Filter paths").frame(width: 240)
                     }
+                    // Live during the scan too: threshold and sort are in-memory re-filters of
+                    // entries already streamed in, never a second walk.
                     Picker("Minimum size", selection: $model.threshold) {
                         ForEach(LargeFileSizeThreshold.allCases) { threshold in
                             Text(threshold.label).tag(threshold)
@@ -373,7 +500,6 @@ struct LargeOldFilesScreen: View {
                     .labelsHidden()
                     .pickerStyle(.menu)
                     .frame(width: 84)
-                    .disabled(model.phase == .scanning)
 
                     Picker("Sort", selection: $model.sortOrder) {
                         ForEach(LargeFileSortOrder.allCases) { order in
@@ -383,7 +509,6 @@ struct LargeOldFilesScreen: View {
                     .labelsHidden()
                     .pickerStyle(.menu)
                     .frame(width: 116)
-                    .disabled(model.phase == .scanning)
 
                     if model.phase == .scanning {
                         Button("Stop") { model.cancel() }.buttonStyle(.sweepQuiet)
@@ -402,10 +527,31 @@ struct LargeOldFilesScreen: View {
             footer
         }
         .animation(reduceMotion ? SweepMotion.crossfade : SweepMotion.layout, value: model.phase)
-        .onChange(of: model.groups) { _, newValue in expansion = .initial(for: newValue) }
+        // Reset expansion only when the set of groups changes, not on every streamed batch —
+        // resetting per batch would fight the user's own collapse/show-more choices all scan.
+        .onChange(of: model.groups.map(\.id)) { _, _ in expansion = .initial(for: model.groups) }
         .onChange(of: model.threshold) { _, _ in expansion = .initial(for: model.groups) }
         .onChange(of: model.sortOrder) { _, _ in expansion = .initial(for: model.groups) }
         .onDisappear { model.cancel() }
+        .confirmationDialog(
+            "Move \(SweepFormat.count(model.selectedCount)) \(model.selectedCount == 1 ? "file" : "files") to the Trash?",
+            isPresented: $model.confirmTrashShown, titleVisibility: .visible
+        ) {
+            Button("Move to Trash", role: .destructive) { model.executeTrash() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Frees \(SweepFormat.bytes(model.selectedBytes)). Everything goes to the Trash \u{2014} restore from there to undo.")
+        }
+        .sheet(isPresented: Binding(
+            get: { model.trashReport != nil },
+            set: { if !$0 { model.dismissTrashReport() } }
+        )) {
+            if let report = model.trashReport {
+                CleanReportState(report: report, onDone: { model.dismissTrashReport() })
+                    .padding(SweepTokens.s5)
+                    .frame(width: 480)
+            }
+        }
     }
 
     @ViewBuilder
@@ -419,20 +565,62 @@ struct LargeOldFilesScreen: View {
                     + "Documents, Desktop, Pictures and anything cloud-backed are never read."
             )
         case .scanning:
-            scanningState
-        case .results:
-            if visibleGroups.isEmpty {
-                InventoryEmptyState(
-                    symbol: query.isEmpty ? "checkmark.circle" : "magnifyingglass",
-                    title: query.isEmpty ? "Nothing at or above \(model.threshold.label)" : "No matches",
-                    message: query.isEmpty
-                        ? "Try a lower minimum size, or rescan."
-                        : "Nothing in the results matches \u{201C}\(query)\u{201D}."
-                )
+            // Results stream in as the walk runs (user-directed: no minutes-long ring). The
+            // ring appears only for the opening moments before the first hit lands; from then
+            // on the list itself is the progress surface, with a slim live strip above it.
+            if model.rawEntries.isEmpty {
+                scanningState
             } else {
-                RevealableInventoryList(groups: visibleGroups, expansion: $expansion, onReveal: reveal)
+                VStack(spacing: 0) {
+                    streamingStrip
+                    Divider()
+                    listOrEmpty
+                }
             }
+        case .results:
+            listOrEmpty
         }
+    }
+
+    @ViewBuilder
+    private var listOrEmpty: some View {
+        if visibleGroups.isEmpty {
+            InventoryEmptyState(
+                symbol: query.isEmpty ? "checkmark.circle" : "magnifyingglass",
+                title: query.isEmpty ? "Nothing at or above \(model.threshold.label)" : "No matches",
+                message: query.isEmpty
+                    ? "Try a lower minimum size, or rescan."
+                    : "Nothing in the results matches \u{201C}\(query)\u{201D}."
+            )
+        } else {
+            RevealableInventoryList(
+                groups: visibleGroups, selection: $model.selection, expansion: $expansion, onReveal: reveal
+            )
+        }
+    }
+
+    /// The live progress readout while results are already on screen: counter, current path,
+    /// and the running claimed total — the ring's information, one line tall.
+    private var streamingStrip: some View {
+        @Bindable var model = model
+        return HStack(spacing: SweepTokens.s3) {
+            ProgressView().controlSize(.small)
+            Text(model.scanningCaption)
+                .font(SweepFont.caption)
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .fixedSize()
+            PathTicker(path: model.currentPath, width: 300)
+            Spacer(minLength: SweepTokens.s3)
+            Text(SweepFormat.bytes(model.claimedBytes))
+                .font(SweepFont.mono)
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .fixedSize()
+        }
+        .padding(.horizontal, SweepTokens.s5)
+        .padding(.vertical, SweepTokens.s2 + 2)
+        .background(.bar)
     }
 
     private var scanningState: some View {
@@ -453,15 +641,19 @@ struct LargeOldFilesScreen: View {
         VStack(spacing: 0) {
             Divider()
             HStack(spacing: SweepTokens.s3) {
-                // Trash action present, per module spec, but locked: same treatment Smart Scan
-                // and System Junk use ahead of Gate 1 — a disabled primary button plus a plain
-                // stated reason, not a banner to dismiss.
-                Button("Move to Trash") {}
+                // Live (user-directed): identity-checked, reversible move to Trash with an
+                // explicit confirmation — enabled the moment anything is selected, including
+                // while the walk is still streaming results in.
+                Button(model.isTrashing ? "Moving\u{2026}" : "Move to Trash") { model.confirmTrashShown = true }
                     .buttonStyle(.sweepPrimary(minWidth: 132))
-                    .disabled(true)
-                    .help("Cleaning arrives at Gate 1")
-                    .accessibilityHint("Disabled. Cleaning arrives at Gate 1.")
-                GateNotice("Cleaning arrives at Gate 1")
+                    .disabled(model.selectedCount == 0 || model.isTrashing)
+                if model.selectedCount > 0 {
+                    Text("\(SweepFormat.count(model.selectedCount)) selected \u{00B7} \(SweepFormat.bytes(model.selectedBytes))")
+                        .font(SweepFont.caption)
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        .fixedSize()
+                }
                 Spacer(minLength: SweepTokens.s3)
                 if model.phase == .results, !model.groups.isEmpty {
                     Text(model.resultsCaption)
@@ -497,6 +689,7 @@ struct LargeOldFilesScreen: View {
 /// trailing-action slot later, this can be deleted in favor of the shared component.
 private struct RevealableInventoryList: View {
     let groups: [InventoryGroup]
+    @Binding var selection: InventorySelection
     @Binding var expansion: InventoryExpansion
     let onReveal: (InventoryItem) -> Void
 
@@ -517,6 +710,10 @@ private struct RevealableInventoryList: View {
                     } header: {
                         GroupHeader(
                             group: group,
+                            selection: selection.state(of: group),
+                            onToggleSelection: {
+                                selection.setAll(group, selected: selection.state(of: group) != .all)
+                            },
                             isExpanded: Binding(
                                 get: { !expansion.isCollapsed(group) },
                                 set: { shouldExpand in
@@ -535,7 +732,14 @@ private struct RevealableInventoryList: View {
 
     private func row(_ item: InventoryItem) -> some View {
         HStack(spacing: SweepTokens.s1) {
-            InventoryRow(item: item, indented: true)
+            InventoryRow(
+                item: item,
+                selection: Binding(
+                    get: { selection.contains(item.id) },
+                    set: { selection.set(item.id, selected: $0) }
+                ),
+                indented: true
+            )
             Button {
                 onReveal(item)
             } label: {

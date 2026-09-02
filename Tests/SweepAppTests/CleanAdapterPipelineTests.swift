@@ -81,7 +81,8 @@ final class CleanAdapterPipelineTests: XCTestCase {
         let reviewedIdentity = try SweepCore.FileIdentity.read(at: nodeURL)
         let context = CleanExecutionContext(
             catalog: catalog, ruleIDByItemID: [nodeURL.path: ruleID],
-            reviewedIdentityByItemID: [nodeURL.path: reviewedIdentity]
+            reviewedIdentityByItemID: [nodeURL.path: reviewedIdentity],
+            codeSignClonesByItemID: [:]
         )
         let item = InventoryItem(id: nodeURL.path, title: nodeName, byteCount: 4, tier: .safe)
         // The internal test seam, not `gate1Open`: `runPipeline` is what SweepCore itself uses to
@@ -155,7 +156,8 @@ final class CleanAdapterPipelineTests: XCTestCase {
         // real `ScanModel` would hold if the swap happened between review and Clean.
         let context = CleanExecutionContext(
             catalog: catalog, ruleIDByItemID: [nodeURL.path: ruleID],
-            reviewedIdentityByItemID: [nodeURL.path: reviewedIdentity]
+            reviewedIdentityByItemID: [nodeURL.path: reviewedIdentity],
+            codeSignClonesByItemID: [:]
         )
         let item = InventoryItem(id: nodeURL.path, title: nodeName, byteCount: 4, tier: .safe)
         let adapter = CleanAdapter(context: context, items: [item], executePipeline: { SweepCore.CleanService.runPipeline($0) })
@@ -220,7 +222,8 @@ extension CleanAdapterPipelineTests {
         let reviewedIdentity = try SweepCore.FileIdentity.read(at: nodeURL)
         let context = CleanExecutionContext(
             catalog: catalog, ruleIDByItemID: [nodeURL.path: ruleID],
-            reviewedIdentityByItemID: [nodeURL.path: reviewedIdentity]
+            reviewedIdentityByItemID: [nodeURL.path: reviewedIdentity],
+            codeSignClonesByItemID: [:]
         )
         let item = InventoryItem(id: nodeURL.path, title: nodeName, byteCount: 4, tier: .safe)
 

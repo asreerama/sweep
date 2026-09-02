@@ -7,8 +7,8 @@ import SwiftUI
 ///
 /// App inventory (icons, sizes, last-used, search + sort) on the left; selecting a row runs
 /// `SweepUninstall.LeftoverMatcher` (read-only) and shows the leftover panel on the right, grouped
-/// by evidence tier. "Preview Removal" opens a sheet that always ends at the Gate U notice — this
-/// wave finds and displays leftovers, it deletes nothing.
+/// by evidence tier. "Preview Removal" opens the itemized consent sheet; Remove executes through
+/// `UninstallService` (Gate U, open since 2026-09-01) — everything moves to the Trash.
 struct UninstallerScreen: View {
     @Bindable var model: UninstallModel
 
@@ -349,9 +349,9 @@ private struct AppSummaryCard: View {
 
 // MARK: - Removal preview sheet
 
-/// The removal preview: bundle + every selected leftover, total size — and a "Remove" button that
-/// is always disabled. App removal arrives at Gate U (a dedicated execution path with its own
-/// review, next wave); this sheet is read-only end to end.
+/// The removal preview: bundle + every selected leftover, itemized in full — the per-item consent
+/// Gate U's authorization consumes. Remove is live (Gate U open); the sheet swaps to the report
+/// in place when the run finishes.
 private struct RemovalPreviewSheet: View {
     @Bindable var model: UninstallModel
 

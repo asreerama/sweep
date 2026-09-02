@@ -1,3 +1,4 @@
+import SweepUninstall
 import SwiftUI
 import SweepUI
 
@@ -27,11 +28,15 @@ struct SmartScanScreen: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     let onReviewItems: () -> Void
+    /// Routes to the Uninstaller for the "Also found: leftovers from uninstalled apps" card —
+    /// Smart Scan surfaces the finding, the Uninstaller owns review and removal.
+    let onReviewOrphans: () -> Void
 
     /// Non-nil while the Clean flow's sheet is up. Built fresh from `scan` each time the button
     /// is pressed rather than kept around, so a rescan between clean runs can never hand a stale
     /// request to a flow already in flight.
     @State private var cleanFlow: CleanFlowModel?
+    @State private var orphanFind = OrphanFindModel()
 
     /// What this screen is actually showing — see the type doc for why this is not just
     /// `scan.phase` re-read.
@@ -102,7 +107,10 @@ struct SmartScanScreen: View {
             }
         }
         .animation(reduceMotion ? SweepMotion.crossfade : SweepMotion.layout, value: displayPhase)
-        .onChange(of: scan.phase) { _, _ in syncDisplayPhase() }
+        .onChange(of: scan.phase) { _, newPhase in
+            syncDisplayPhase()
+            if newPhase == .results { orphanFind.refresh() }
+        }
     }
 
     /// Mirrors `scan.phase` into `displayPhase` — immediately on every edge except
@@ -294,6 +302,8 @@ struct SmartScanScreen: View {
                 }
             }
 
+            alsoFound
+
             if let note = scan.skippedSummary {
                 Footnote(note, symbol: "info.circle")
                     .padding(.horizontal, SweepTokens.s5)
@@ -343,6 +353,59 @@ struct SmartScanScreen: View {
             summaryCard(scan.needsReviewGroups)
         }
         .padding(.horizontal, SweepTokens.s5)
+    }
+
+    /// The pass the rule catalog cannot express (user-directed: "Smart Scan is currently the
+    /// same as System Junk scan"): files left behind by apps that are no longer installed,
+    /// found by the Uninstaller's own orphan matcher. Read-only pointer here — per-item
+    /// evidence, selection and removal stay in the Uninstaller's orphan mode.
+    @ViewBuilder
+    private var alsoFound: some View {
+        if orphanFind.isSearching || (orphanFind.finding?.count ?? 0) > 0 {
+            VStack(alignment: .leading, spacing: SweepTokens.s2) {
+                HStack(spacing: SweepTokens.s2 - 2) {
+                    Image(systemName: "app.dashed")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Text("Also found")
+                        .font(SweepFont.sectionTitle)
+                        .foregroundStyle(.primary)
+                }
+                SectionCard {
+                    HStack(spacing: SweepTokens.s3) {
+                        ModuleIcon(symbol: "app.dashed", diameter: 26)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Leftovers from uninstalled apps")
+                                .font(SweepFont.rowTitleEmphasis)
+                                .lineLimit(1)
+                            Text(orphanCaption)
+                                .font(SweepFont.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        Spacer(minLength: SweepTokens.s3)
+                        if orphanFind.isSearching {
+                            ProgressView().controlSize(.small)
+                        } else if let finding = orphanFind.finding {
+                            SizeColumn(byteCount: finding.totalBytes, font: SweepFont.monoEmphasis, emphasized: true)
+                            Button("Review") { onReviewOrphans() }
+                                .buttonStyle(.sweepQuiet)
+                        }
+                    }
+                    .padding(SweepTokens.s4)
+                }
+            }
+            .padding(.horizontal, SweepTokens.s5)
+        }
+    }
+
+    private var orphanCaption: String {
+        if orphanFind.isSearching { return "Checking for files apps left behind\u{2026}" }
+        guard let finding = orphanFind.finding else { return "" }
+        let sample = finding.sampleBundleIDs.joined(separator: ", ")
+        let count = "\(SweepFormat.count(finding.count)) \(finding.count == 1 ? "item" : "items")"
+        return sample.isEmpty ? count : "\(count) \u{00B7} \(sample)"
     }
 
     private var resultsFooter: some View {
@@ -400,5 +463,53 @@ struct SmartScanScreen: View {
                 .buttonStyle(.sweepQuiet)
         }
         .padding(SweepTokens.s5)
+    }
+}
+
+// MARK: - Orphan discovery (the "Also found" card's data)
+
+/// Runs the Uninstaller's orphan matcher once per finished scan: installed-app inventory,
+/// leftover roots walked with the matcher's own defaults, sizes summed per candidate. Kept
+/// deliberately independent of `UninstallModel` — Smart Scan must not force the Uninstaller's
+/// whole prefetch machinery (app icons, receipts cache, root index) to spin up just to answer
+/// "is there anything orphaned worth pointing at".
+@MainActor
+@Observable
+final class OrphanFindModel {
+    struct Finding: Equatable, Sendable {
+        let count: Int
+        let totalBytes: Int64
+        /// Up to three distinct bundle ids, for the card's one-line caption.
+        let sampleBundleIDs: [String]
+    }
+
+    private(set) var finding: Finding?
+    private(set) var isSearching = false
+    private var task: Task<Void, Never>?
+
+    func refresh() {
+        task?.cancel()
+        isSearching = true
+        finding = nil
+        task = Task {
+            let result = await Task.detached(priority: .utility) { () -> Finding in
+                let installed = Set(AppInventory.scan().compactMap(\.bundleIdentifier))
+                let orphans = LeftoverMatcher.orphanCandidates(installedBundleIDs: installed)
+                var bytes: Int64 = 0
+                for orphan in orphans {
+                    bytes += FileSizeCalculator.allocatedSize(at: orphan.url)
+                }
+                var seen = Set<String>()
+                var sample: [String] = []
+                for orphan in orphans where seen.insert(orphan.apparentBundleID).inserted {
+                    sample.append(orphan.apparentBundleID)
+                    if sample.count == 3 { break }
+                }
+                return Finding(count: orphans.count, totalBytes: bytes, sampleBundleIDs: sample)
+            }.value
+            guard !Task.isCancelled else { return }
+            finding = result
+            isSearching = false
+        }
     }
 }

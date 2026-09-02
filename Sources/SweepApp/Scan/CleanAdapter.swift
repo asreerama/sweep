@@ -142,6 +142,13 @@ struct CleanAdapter: CleanBackend {
     private func cleanOne(
         id: String, item: InventoryItem, freedBytes: inout Int64
     ) async -> SweepUI.CleanItemOutcome {
+        // Detector-sourced code-sign clones have no rule and no receipt: they ride
+        // `CleanRequest.codeSignClones`, and `CleanService` authorizes them through its own
+        // parallel clone path (fresh identity read, age, not-running, direct-child-of-real-
+        // clone-root, policy — all re-proved at execute time, never trusted from the scan).
+        if let clone = context.codeSignClonesByItemID[id] {
+            return await cleanClone(clone, id: id, item: item, freedBytes: &freedBytes)
+        }
         guard let ruleID = context.ruleIDByItemID[id] else {
             // Internal bookkeeping gap, not a filesystem condition — retrying can never fix it.
             return SweepUI.CleanItemOutcome(
@@ -216,6 +223,70 @@ struct CleanAdapter: CleanBackend {
                     // The capacity-delta estimate for *this* node's own scan+clean pass — see
                     // the type doc for why this is N independent estimates summed rather than
                     // one measured across the whole batch.
+                    freedBytes += report.freedBytesEstimate
+                }
+            }
+
+            if let failureReason {
+                return SweepUI.CleanItemOutcome(
+                    id: id, title: item.title, byteCount: item.byteCount, status: .failed(reason: failureReason)
+                )
+            }
+            return SweepUI.CleanItemOutcome(id: id, title: item.title, byteCount: item.byteCount, status: .succeeded)
+        } catch {
+            return SweepUI.CleanItemOutcome(
+                id: id, title: item.title, byteCount: item.byteCount, status: .failed(reason: String(describing: error))
+            )
+        }
+    }
+
+    // MARK: - One code-sign clone
+
+    /// The clone counterpart of `cleanOne`: no rule, no receipt. The request carries the
+    /// detector's original candidate in `codeSignClones` plus an *empty* sealed batch minted
+    /// from a fresh depth-1 walk of the clone root — the batch contributes only the sealed
+    /// scan-session/catalog-digest/freshness envelope `CleanRequest` requires, while item
+    /// resolution happens against the clone id. A pre-flight identity check here keeps the
+    /// honest "changed since review" copy; `CleanService` re-proves everything again itself
+    /// (fresh identity read, age, not-running, direct child of the real clone root, policy).
+    private func cleanClone(
+        _ clone: CodeSignCloneCandidate, id: String, item: InventoryItem, freedBytes: inout Int64
+    ) async -> SweepUI.CleanItemOutcome {
+        if let reviewed = context.reviewedIdentityByItemID[id] {
+            guard let live = try? FileIdentity.read(at: clone.candidate.url), live.isSameFile(as: reviewed) else {
+                return SweepUI.CleanItemOutcome(
+                    id: id, title: item.title, byteCount: item.byteCount,
+                    status: .failed(reason: "It changed or disappeared since the scan \u{2014} the app may have "
+                        + "relaunched and rebuilt its clone. Rescan to clean it.")
+                )
+            }
+        }
+        do {
+            let parentURL = clone.candidate.url.deletingLastPathComponent()
+            let envelopeScan = try await ScanEngine().run(
+                ScanRequest(roots: [parentURL], maximumDepth: 1)
+            )
+            let catalogDigest = try SweepCore.CleanService.currentCatalogDigest()
+            let batch = try envelopeScan.sealedBatch(selecting: [], catalogDigest: catalogDigest)
+            let request = SweepCore.CleanRequest(
+                batch: batch, codeSignClones: [clone], selectedCandidateIDs: [id]
+            )
+
+            var failureReason: String?
+            for try await event in executePipeline(request) {
+                switch event {
+                case .started, .progress:
+                    break
+                case .itemCompleted(let outcome):
+                    if outcome.outcome != .succeeded, failureReason == nil {
+                        failureReason = Self.describe(outcome)
+                    }
+                case .finished(let report):
+                    if (report.journalingDegraded || !report.committed), failureReason == nil {
+                        failureReason = report.journalingDegraded
+                            ? "Stopped early: the safety journal could not record progress. Nothing unrecorded was touched."
+                            : "The operation did not fully commit; review the report."
+                    }
                     freedBytes += report.freedBytesEstimate
                 }
             }

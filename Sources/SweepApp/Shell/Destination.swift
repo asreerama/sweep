@@ -68,7 +68,7 @@ enum Destination: String, Hashable, Identifiable, CaseIterable {
     /// One line, shown under the screen title. Says what the module does and what it will not do.
     var subtitle: String {
         switch self {
-        case .smartScan: "One pass over caches, logs and developer junk. Read-only in this build."
+        case .smartScan: "One pass over caches, logs and developer junk. Cleaning moves items to the Trash."
         case .systemJunk: "Everything the rule catalog claims, grouped by rule."
         case .largeFiles: "Volume scan with size and age filters."
         case .memory: "Live pressure, compressor stats and the apps holding the memory."

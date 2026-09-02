@@ -15,7 +15,7 @@ struct SystemJunkScreen: View {
     @State private var cleanFlow: CleanFlowModel?
 
     private var visibleGroups: [InventoryGroup] {
-        InventoryAggregate.filter(scan.ruleGroups, query: query)
+        InventoryAggregate.filter(scan.systemJunkRuleGroups, query: query)
     }
 
     var body: some View {
@@ -27,14 +27,14 @@ struct SystemJunkScreen: View {
                 subtitle: Destination.systemJunk.subtitle
             ) {
                 HStack(spacing: SweepTokens.s2) {
-                    if !scan.ruleGroups.isEmpty {
+                    if !scan.systemJunkRuleGroups.isEmpty {
                         SweepSearchField(text: $query, prompt: "Filter paths")
                             .frame(width: 240)
                     }
                     if scan.isScanning {
                         Button("Stop") { scan.cancel() }.buttonStyle(.sweepQuiet)
                     } else {
-                        Button(scan.ruleGroups.isEmpty ? "Scan" : "Rescan") { scan.rescan() }
+                        Button(scan.systemJunkRuleGroups.isEmpty ? "Scan" : "Rescan") { scan.rescan() }
                             .buttonStyle(.sweepQuiet)
                     }
                 }
@@ -53,8 +53,8 @@ struct SystemJunkScreen: View {
         // Re-applies the row budget every time a scan lands a new rule-group set: System Junk
         // groups by rule (often dozens of them), and the budget has to hold from the first frame
         // a scan produces — not only after the user opens or pages a group (PLAN §6b).
-        .onAppear { expansion = .initial(for: scan.ruleGroups) }
-        .onChange(of: scan.ruleGroups) { _, newValue in expansion = .initial(for: newValue) }
+        .onAppear { expansion = .initial(for: scan.systemJunkRuleGroups) }
+        .onChange(of: scan.systemJunkRuleGroups) { _, newValue in expansion = .initial(for: newValue) }
     }
 
     @ViewBuilder
@@ -105,14 +105,14 @@ struct SystemJunkScreen: View {
             HStack(spacing: SweepTokens.s3) {
                 Button("Clean") { startClean() }
                     .buttonStyle(.sweepPrimary(minWidth: 108))
-                    .disabled(!CleanAdapter.isEnabled || scan.selection.selectedCount(in: scan.ruleGroups) == 0)
+                    .disabled(!CleanAdapter.isEnabled || scan.selection.selectedCount(in: scan.systemJunkRuleGroups) == 0)
                     .help(CleanAdapter.isEnabled ? "Move the selected items to Trash" : "Cleaning arrives at Gate 1")
                     .accessibilityHint(CleanAdapter.isEnabled ? "" : "Disabled. Cleaning arrives at Gate 1.")
                 if !CleanAdapter.isEnabled {
                     GateNotice("Cleaning arrives at Gate 1")
                 }
                 Spacer(minLength: SweepTokens.s3)
-                if scan.phase == .results, !scan.ruleGroups.isEmpty {
+                if scan.phase == .results, !scan.systemJunkRuleGroups.isEmpty {
                     Text(selectionSummary)
                         .font(SweepFont.mono)
                         .monospacedDigit()
@@ -147,7 +147,7 @@ struct SystemJunkScreen: View {
     }
 
     private var selectionSummary: String {
-        let groups = scan.ruleGroups
+        let groups = scan.systemJunkRuleGroups
         let selected = scan.selection.selectedCount(in: groups)
         let total = InventoryAggregate.totalItems(groups)
         let bytes = SweepFormat.bytes(scan.selection.selectedBytes(in: groups))
