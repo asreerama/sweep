@@ -216,8 +216,17 @@ Verification rules, every agent:
 ## 6c. Status log (2026-09-01, overnight full-PLAN wave)
 
 - **Gates:** Gate 1 (trash-only clean) OPEN. Gate U (uninstall execution) OPEN — three Codex
-  adversarial rounds, final SAFE verdict. Gate 2 (direct deletion) CLOSED — Codex readiness
-  review commissioned this wave; flips only on a SAFE verdict with fixes landed.
+  adversarial rounds, final SAFE verdict. Gate 2 (direct deletion) **stays CLOSED** — Codex
+  readiness review (2026-09-01, session 01a060c7) returned NOT SAFE with six must-fixes:
+  (1) no closed allowlist of direct-delete-eligible cache roots, (2) check/unlink TOCTOU (no
+  staging rename + slot-verified identity), (3) directory descendants deleted without manifest/
+  deep validation, (4) no partial-deletion state in results or WAL, (5) post-mutation journal
+  failure swallows the report, (6) the named Gate2FaultInjectionTests/CleanServiceGate2Tests
+  suites do not exist and nothing exercises the real `.directDelete` mode. Plus all nine PLAN
+  fault-injection cases lack mutation-path coverage. This is the Gate 2 work package; the flip
+  waits for it. Trash-only covers every shipped clean, so nothing user-visible is gated on it.
+  The finding-#2 pattern (rename to unguessable slot, verify identity through the slot, then
+  remove) was applied immediately to `EmptyTrashService`, the one shipped direct-removal path.
 - **Modules live:** Smart Scan (safe-tier clean + orphan "Also found" card + Empty Trash flow),
   System Junk (category-scoped, code-sign-clone detector wired end to end), Large & Old Files
   (streaming results, live identity-checked Move to Trash), Memory (app-aggregated quit,

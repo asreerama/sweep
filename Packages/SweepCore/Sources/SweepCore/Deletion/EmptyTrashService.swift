@@ -114,24 +114,39 @@ public enum EmptyTrashService {
         outcomes.reserveCapacity(review.items.count)
 
         for item in review.items {
-            let liveIdentity: FileIdentity
+            // Check-then-delete on the same pathname is a TOCTOU window (Codex Gate-2 review,
+            // finding-#2 class: a swap between the identity read and the removal deletes the
+            // replacement). Order here closes the nameable window: rename the entry to an
+            // unguessable slot FIRST (atomic; an attacker cannot target a name they cannot
+            // predict), verify the slot's identity against the review, and only then remove.
+            // A pre-rename swap is caught by the post-rename check and the imposter is
+            // restored under its original name, untouched.
+            let slot = trashDirectory.appending(path: ".sweep-emptying-\(UUID().uuidString)")
             do {
-                liveIdentity = try FileIdentity.read(at: item.url)
-            } catch let error as FileIdentityError where error.isNotFound {
+                try FileManager.default.moveItem(at: item.url, to: slot)
+            } catch let error as NSError where error.code == NSFileNoSuchFileError || error.code == NSFileReadNoSuchFileError {
                 outcomes.append(Outcome(item: item, result: .vanishedSinceReview))
                 continue
             } catch {
-                outcomes.append(Outcome(item: item, result: .failed(String(describing: error))))
+                outcomes.append(Outcome(item: item, result: .failed((error as NSError).localizedDescription)))
                 continue
             }
-            guard liveIdentity.isSameFile(as: item.identity) else {
+
+            let slotIdentity = try? FileIdentity.read(at: slot)
+            guard let slotIdentity, slotIdentity.isSameFile(as: item.identity) else {
+                // Not the reviewed object: put whatever it is back where it was and refuse.
+                try? FileManager.default.moveItem(at: slot, to: item.url)
                 outcomes.append(Outcome(item: item, result: .changedSinceReview))
                 continue
             }
+
             do {
-                try FileManager.default.removeItem(at: item.url)
+                try FileManager.default.removeItem(at: slot)
                 outcomes.append(Outcome(item: item, result: .deleted))
             } catch {
+                // The object is verified-ours but could not be removed; restore its name so
+                // the Trash never accumulates anonymous slot entries.
+                try? FileManager.default.moveItem(at: slot, to: item.url)
                 outcomes.append(Outcome(item: item, result: .failed((error as NSError).localizedDescription)))
             }
         }
