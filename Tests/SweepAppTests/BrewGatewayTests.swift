@@ -73,7 +73,7 @@ final class BrewGatewayTests: XCTestCase {
         try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
         try Data(repeating: 0, count: 8192).write(to: nested.appending(path: "b.bin"))
 
-        let total = DirectorySize.allocatedBytes(at: root)
+        let total = DirectorySize.allocatedBytes(atPath: root.path)
         // Allocated (block) size, not logical size: assert a reasonable floor rather than an
         // exact byte count, since APFS block allocation can round up.
         XCTAssertGreaterThanOrEqual(total, 4096 + 8192)
@@ -81,7 +81,7 @@ final class BrewGatewayTests: XCTestCase {
 
     func testAllocatedBytesOfAMissingPathIsZeroNotAnError() {
         let missing = URL(fileURLWithPath: "/private/tmp/sweep-directorysize-does-not-exist-\(UUID().uuidString)")
-        XCTAssertEqual(DirectorySize.allocatedBytes(at: missing), 0)
+        XCTAssertEqual(DirectorySize.allocatedBytes(atPath: missing.path), 0)
     }
 
     func testAllocatedBytesDoesNotFollowSymlinksIntoASiblingTree() throws {
@@ -97,7 +97,7 @@ final class BrewGatewayTests: XCTestCase {
 
         // Sizing `root` should count `real/f.bin` exactly once via the `real` subdirectory, and
         // the symlink `linked` itself contributes nothing (never followed, never a regular file).
-        let total = DirectorySize.allocatedBytes(at: root)
+        let total = DirectorySize.allocatedBytes(atPath: root.path)
         XCTAssertGreaterThanOrEqual(total, 4096)
         XCTAssertLessThan(total, 4096 * 2, "the symlink must not be followed into a second copy of `real`")
     }

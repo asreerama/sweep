@@ -73,6 +73,10 @@ struct SweepApp: App {
                 .onOpenURL { url in state.handleOpenURL(url) }
         }
         .defaultSize(width: 1060, height: 700)
+        // No titlebar (user-directed): the bar added nothing — no toolbar content beyond the
+        // sidebar toggle, which now lives in the sidebar's own top strip. The traffic lights
+        // float over `sidebarGround`, and the strip they sit in stays a window-drag region.
+        .windowStyle(.hiddenTitleBar)
 
         // `isInserted` is the hand-off switch (PLAN §3 module 7): unchecked the instant `SweepMenu`
         // is detected running, so there is never more than one Sweep status item on screen.

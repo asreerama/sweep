@@ -24,7 +24,7 @@ struct CapabilityStatusChip: View {
         }
         .foregroundStyle(tint)
         .padding(.horizontal, SweepTokens.s3)
-        .padding(.vertical, 6)
+        .padding(.vertical, 7)
         .background(
             Capsule().fill(tint.opacity(status == .available ? 0.12 : 0.08))
         )
@@ -37,10 +37,10 @@ struct CapabilityStatusChip: View {
         if isRefreshing {
             ProgressView()
                 .controlSize(.mini)
-                .frame(width: 11, height: 11)
+                .frame(width: 12.5, height: 12.5)
         } else {
             Image(systemName: symbol)
-                .font(.system(size: 10.5, weight: .semibold))
+                .font(.system(size: 12.5, weight: .semibold))
                 .symbolRenderingMode(.hierarchical)
         }
     }

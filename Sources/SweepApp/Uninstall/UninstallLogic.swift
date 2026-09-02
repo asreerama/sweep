@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import SweepPolicy
+import SweepUI
 import SweepUninstall
 
 // MARK: - Pure logic (unit-testable; see Tests/SweepAppTests/UninstallerLogicTests.swift)
@@ -25,13 +26,15 @@ enum AppSortField: String, CaseIterable, Identifiable, Sendable {
 
 enum UninstallLogic {
     /// Case- and diacritic-insensitive filter over name and bundle id, same contract as
-    /// `InventoryGroup.filtered(by:)` elsewhere in the app.
+    /// `InventoryGroup.filtered(by:)` elsewhere in the app, via the shared `SearchFold` matcher.
+    /// The fold here still runs per call (an installed-apps list is ~10² rows, not the 10⁴-row
+    /// inventory that forced pre-folded keys) — if this list ever grows a stored key, follow
+    /// `InventoryItem.searchKey`.
     static func filterApps(_ apps: [InstalledApp], query: String) -> [InstalledApp] {
-        let trimmed = query.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else { return apps }
+        let folded = SearchFold.fold(query.trimmingCharacters(in: .whitespaces))
+        guard !folded.isEmpty else { return apps }
         return apps.filter { app in
-            app.name.range(of: trimmed, options: [.caseInsensitive, .diacriticInsensitive]) != nil
-                || (app.bundleIdentifier?.range(of: trimmed, options: [.caseInsensitive, .diacriticInsensitive]) != nil)
+            SearchFold.key(app.name, app.bundleIdentifier).contains(folded)
         }
     }
 

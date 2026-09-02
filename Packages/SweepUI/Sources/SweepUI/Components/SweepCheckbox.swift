@@ -27,17 +27,17 @@ public struct SweepCheckbox: View {
     public var body: some View {
         Button(action: action) {
             ZStack {
-                RoundedRectangle(cornerRadius: 3.5, style: .continuous)
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
                     .fill(fill)
-                RoundedRectangle(cornerRadius: 3.5, style: .continuous)
-                    .strokeBorder(border, lineWidth: 0.8)
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .strokeBorder(border, lineWidth: 1)
                 if state != .none {
                     Image(systemName: state == .all ? "checkmark" : "minus")
-                        .font(.system(size: 8.5, weight: .bold))
+                        .font(.system(size: 11, weight: .bold))
                         .foregroundStyle(.white)
                 }
             }
-            .frame(width: 13, height: 13)
+            .frame(width: 16, height: 16)
             .opacity(isEnabled ? 1 : 0.4)
             .animation(SweepMotion.row, value: state)
         }

@@ -134,6 +134,70 @@ final class HomebrewModelTests: XCTestCase {
         XCTAssertTrue(model.pendingAction?.previewText.contains("brew upgrade --cask flutter") == true)
     }
 
+    // MARK: - Staged load (listing → sizes → update check)
+
+    func testRefreshMergesOutdatedInfoFromTheUpdateCheck() async {
+        let model = HomebrewModel(gateway: FixtureBrewGateway())
+        await model.refresh()
+        XCTAssertEqual(model.snapshot.outdated.count, BrewSnapshot.sample.outdated.count)
+        XCTAssertFalse(model.isSizing)
+        XCTAssertFalse(model.isCheckingUpdates)
+    }
+
+    func testMergedCarriesForwardSizesAndUpdateInfoByID() {
+        let old = BrewSnapshot.sample
+        let bare = BrewSnapshot(
+            packages: old.packages.map {
+                BrewPackage(id: $0.id, name: $0.name, isCask: $0.isCask,
+                            installedVersion: $0.installedVersion, latestVersion: nil, sizeBytes: 0)
+            },
+            cache: nil, prefix: old.prefix
+        )
+        let merged = HomebrewModel.merged(listing: bare, carryingForwardFrom: old)
+        XCTAssertEqual(merged.totalBytes, old.totalBytes, "sizes carry forward across a re-refresh")
+        XCTAssertEqual(merged.outdated.count, old.outdated.count, "update chips carry forward too")
+        XCTAssertEqual(merged.cache?.path, old.cache?.path)
+    }
+
+    func testMergedDropsACarriedUpdateChipOnceTheInstalledVersionCatchesUp() {
+        let before = BrewSnapshot(
+            packages: [BrewPackage(id: "formula:node", name: "node", isCask: false,
+                                   installedVersion: "26.4.0", latestVersion: "26.8.1", sizeBytes: 5)],
+            cache: nil, prefix: "/opt/homebrew"
+        )
+        // The fresh filesystem read now sees the upgraded keg on disk.
+        let listing = BrewSnapshot(
+            packages: [BrewPackage(id: "formula:node", name: "node", isCask: false,
+                                   installedVersion: "26.8.1", latestVersion: nil, sizeBytes: 0)],
+            cache: nil, prefix: "/opt/homebrew"
+        )
+        let merged = HomebrewModel.merged(listing: listing, carryingForwardFrom: before)
+        XCTAssertNil(merged.packages[0].latestVersion,
+                     "a just-upgraded package must not keep a stale Update available chip")
+    }
+
+    func testApplyingCheckClearsStaleChipsAndSetsFreshOnes() {
+        let snapshot = BrewSnapshot(
+            packages: [
+                BrewPackage(id: "formula:stale", name: "stale", isCask: false,
+                            installedVersion: "1.0", latestVersion: "1.1", sizeBytes: 1),
+                BrewPackage(id: "formula:fresh", name: "fresh", isCask: false,
+                            installedVersion: "2.0", latestVersion: nil, sizeBytes: 1),
+            ],
+            cache: nil, prefix: "/opt/homebrew"
+        )
+        let check = BrewUpdateCheck(
+            outdated: BrewOutdatedResponse(
+                formulae: [BrewOutdatedEntry(name: "fresh", installedVersions: ["2.0"], currentVersion: "2.4")],
+                casks: []
+            ),
+            cache: nil
+        )
+        let applied = HomebrewModel.applying(check: check, to: snapshot)
+        XCTAssertNil(applied.packages[0].latestVersion, "absent from brew outdated means up to date")
+        XCTAssertEqual(applied.packages[1].latestVersion, "2.4")
+    }
+
     // MARK: - Kind.matches (race guard for a superseded preview)
 
     func testPendingActionKindMatchesIdentifiesTheSameSingletonAction() {
@@ -156,7 +220,9 @@ final class HomebrewModelTests: XCTestCase {
 private struct FailingPreviewGateway: BrewGateway {
     let inner: FixtureBrewGateway
     var isAvailable: Bool { inner.isAvailable }
-    func snapshot() async throws -> BrewSnapshot { try await inner.snapshot() }
+    func listing() async throws -> BrewSnapshot { try await inner.listing() }
+    func sizes(for packages: [BrewPackage]) async -> [String: Int64] { await inner.sizes(for: packages) }
+    func updateCheck() async throws -> BrewUpdateCheck { try await inner.updateCheck() }
     func cleanupPreview() async throws -> String { throw BrewGatewayError.malformedOutput("preview boom") }
     func cleanup() async throws -> String { try await inner.cleanup() }
     func autoremovePreview() async throws -> String { try await inner.autoremovePreview() }

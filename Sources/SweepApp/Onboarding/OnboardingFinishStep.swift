@@ -24,14 +24,14 @@ struct OnboardingFinishStep: View {
                     .fill(SweepTokens.accent.gradient)
                     .frame(width: 72, height: 72)
                 Image(systemName: "checkmark")
-                    .font(.system(size: 30, weight: .semibold))
+                    .font(.system(size: 32, weight: .semibold))
                     .foregroundStyle(.white)
             }
             .shadow(color: SweepTokens.accent.opacity(0.28), radius: 16, y: 8)
 
             VStack(spacing: SweepTokens.s2) {
                 Text("You're set up")
-                    .font(.system(size: 22, weight: .semibold))
+                    .font(.system(size: 24, weight: .semibold))
                 Text("A couple of optional conveniences, then straight into Smart Scan.")
                     .font(SweepFont.screenSubtitle)
                     .foregroundStyle(.secondary)
@@ -130,7 +130,7 @@ struct OnboardingFinishStep: View {
     ) -> some View {
         HStack(alignment: .top, spacing: SweepTokens.s3) {
             Image(systemName: symbol)
-                .font(.system(size: 13, weight: .regular))
+                .font(SweepFont.caption)
                 .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(.secondary)
                 .frame(width: 22, alignment: .center)

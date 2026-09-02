@@ -103,6 +103,14 @@ public struct CleanReport: Sendable, Hashable {
     public var failures: [CleanItemOutcome] {
         outcomes.filter { if case .failed = $0.status { true } else { false } }
     }
+
+    /// Sum of `byteCount` over outcomes that actually moved to the Trash. `freedBytes` is a
+    /// volume-capacity delta and reads as ~0 whenever the move stays on the same volume — the
+    /// ordinary case for a move to Trash — so the report hero leads with this instead: what the
+    /// user actually watched happen, not a capacity figure that has not moved yet.
+    public var movedBytes: Int64 {
+        outcomes.filter { $0.status == .succeeded }.reduce(0) { $0 + $1.byteCount }
+    }
 }
 
 /// One step of the async clean stream — the UI-facing mirror of SweepCore's pinned `CleanEvent`.

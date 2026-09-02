@@ -52,7 +52,7 @@ struct MaintenanceScreen: View {
             VStack(alignment: .leading, spacing: SweepTokens.s3) {
                 HStack(spacing: SweepTokens.s2) {
                     Image(systemName: helperStatusSymbol)
-                        .font(.system(size: 13, weight: .medium))
+                        .font(.system(size: 14.5, weight: .medium))
                         .foregroundStyle(helperStatusIsBusy ? .secondary : SweepTokens.tierCaution)
                     Text(MaintenanceHelperPresentation.statusLine(for: model.helper.state))
                         .font(SweepFont.rowTitle)
@@ -104,10 +104,10 @@ struct MaintenanceScreen: View {
             VStack(alignment: .leading, spacing: SweepTokens.s3) {
                 HStack(alignment: .top, spacing: SweepTokens.s3) {
                     Image(systemName: kind.symbol)
-                        .font(.system(size: 16, weight: .medium))
+                        .font(.system(size: 18, weight: .medium))
                         .symbolRenderingMode(.hierarchical)
                         .foregroundStyle(SweepTokens.accent)
-                        .frame(width: 22)
+                        .frame(width: 24)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(kind.title)
                             .font(SweepFont.sectionTitle)
@@ -195,7 +195,7 @@ struct MaintenanceScreen: View {
             Label {
                 Text(firstLine(of: reason)).font(SweepFont.caption)
             } icon: {
-                Image(systemName: "exclamationmark.triangle").font(.system(size: 9.5))
+                Image(systemName: "exclamationmark.triangle").font(.system(size: 11.5))
             }
             .foregroundStyle(SweepTokens.tierExpert)
         }
@@ -263,7 +263,7 @@ private struct MaintenancePreviewSheet: View {
             }
             .padding(SweepTokens.s5)
         }
-        .frame(width: 460)
+        .frame(width: 500)
         .fixedSize(horizontal: false, vertical: true)
     }
 }

@@ -31,7 +31,7 @@ struct DeveloperScreen: View {
                 HStack(spacing: SweepTokens.s2) {
                     if !model.environmentGroups.isEmpty {
                         SweepSearchField(text: $query, prompt: "Filter environments")
-                            .frame(width: 200)
+                            .frame(width: 240)
                     }
                     if model.isScanning {
                         Button("Stop") { model.cancel() }.buttonStyle(.sweepQuiet)
@@ -93,9 +93,9 @@ struct DeveloperScreen: View {
     }
 
     private var scanningState: some View {
-        VStack(spacing: SweepTokens.s4) {
-            ScanRing(state: .scanning, diameter: 96) {
-                HeroByteCounter(byteCount: model.claimedBytes, size: 22)
+        VStack(spacing: SweepTokens.s5) {
+            ScanRing(state: .scanning, diameter: SweepTokens.moduleRingDiameter) {
+                HeroByteCounter(byteCount: model.claimedBytes, size: SweepTokens.moduleRingCounterSize)
             }
             Text(model.scanningCaption)
                 .font(SweepFont.caption)

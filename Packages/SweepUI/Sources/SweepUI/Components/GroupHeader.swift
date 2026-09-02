@@ -68,10 +68,10 @@ public struct GroupHeader: View {
                     }
                 } label: {
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.secondary)
                         .rotationEffect(.degrees(isExpanded.wrappedValue ? 90 : 0))
-                        .frame(width: 12, height: 12)
+                        .frame(width: 14, height: 14)
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(isExpanded.wrappedValue ? "Collapse \(title)" : "Expand \(title)")
@@ -87,10 +87,10 @@ public struct GroupHeader: View {
                 // row is compact and already carries a chevron, checkbox, badge and size — a
                 // tinted glyph reads as "this module's color" without adding another shape.
                 Image(systemName: symbol)
-                    .font(.system(size: 11, weight: .regular))
+                    .font(.system(size: 13, weight: .regular))
                     .symbolRenderingMode(.hierarchical)
                     .foregroundStyle(SweepModuleHue.color(forSymbol: symbol) ?? .secondary)
-                    .frame(width: 15)
+                    .frame(width: 17)
             }
 
             Text(title)
@@ -111,7 +111,7 @@ public struct GroupHeader: View {
             SizeColumn(value: sizeValue, unit: sizeUnit, font: SweepFont.monoEmphasis, emphasized: true)
         }
         .padding(.horizontal, SweepTokens.s4)
-        .frame(height: 32)
+        .frame(height: 38)
         .background(.bar)
         .overlay(alignment: .bottom) { Divider() }
         .accessibilityElement(children: .contain)

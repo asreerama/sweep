@@ -18,7 +18,7 @@ struct OnboardingWelcomeStep: View {
                     .fill(SweepTokens.accent.gradient)
                     .frame(width: 72, height: 72)
                 Image(systemName: "wind")
-                    .font(.system(size: 32, weight: .medium))
+                    .font(.system(size: 34, weight: .medium))
                     .symbolRenderingMode(.hierarchical)
                     .foregroundStyle(.white)
             }
@@ -26,7 +26,7 @@ struct OnboardingWelcomeStep: View {
 
             VStack(spacing: SweepTokens.s2) {
                 Text("Welcome to Sweep")
-                    .font(.system(size: 22, weight: .semibold))
+                    .font(.system(size: 24, weight: .semibold))
                 Text("An instrument for keeping your Mac clean, not a black box that guesses.")
                     .font(SweepFont.screenSubtitle)
                     .foregroundStyle(.secondary)
@@ -67,7 +67,7 @@ struct OnboardingFactRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: SweepTokens.s3) {
             Image(systemName: symbol)
-                .font(.system(size: 14, weight: .medium))
+                .font(.system(size: 16, weight: .medium))
                 .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(SweepTokens.accent)
                 .frame(width: 22, height: 22)

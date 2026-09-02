@@ -30,13 +30,18 @@ public struct CleanFlowContainer: View {
                 CleanProgressState(update: update, totalBytes: model.requestSummary.totalBytes)
                     .frame(width: 420, height: 420)
             case .report(let report):
+                // Width only, height content-driven: a clean report is short (hero + one
+                // footnote line) and a fixed height here used to leave it stranded in a 300 pt
+                // blank middle. `CleanReportState` caps its own failure list's `ScrollView`, so
+                // this never grows unbounded when a report does have a long failure list.
                 CleanReportState(
                     report: report,
                     onDone: onDismiss,
                     canRetry: model.isBackendEnabled,
                     onRetry: { model.retryFailed() }
                 )
-                .frame(width: 460, height: 480)
+                .frame(width: 460)
+                .fixedSize(horizontal: false, vertical: true)
             case .failed(let message):
                 failure(message)
                     .frame(width: 420, height: 320)

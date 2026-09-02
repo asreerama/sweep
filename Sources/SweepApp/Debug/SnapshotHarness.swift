@@ -297,7 +297,7 @@ enum SnapshotHarness {
                 content: SidebarView(
                     selection: .constant(state.destination),
                     showsStressHarness: state.environment.showsStressHarness,
-                    isCollapsed: false
+                    isCollapsed: .constant(false)
                 )
                 .padding(.top, titlebarInset)
                 .frame(width: column.width, height: column.height)

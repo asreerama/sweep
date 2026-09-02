@@ -20,7 +20,7 @@ struct UninstallerScreen: View {
             Divider()
             HStack(spacing: 0) {
                 appList
-                    .frame(minWidth: 300, idealWidth: 360, maxWidth: 420)
+                    .frame(minWidth: 340, idealWidth: 400, maxWidth: 460)
                 Divider()
                 detailPanel
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -37,7 +37,7 @@ struct UninstallerScreen: View {
     private var header: some View {
         HStack(spacing: SweepTokens.s2) {
             if !model.apps.isEmpty {
-                SweepSearchField(text: $model.searchQuery, prompt: "Search apps").frame(width: 170)
+                SweepSearchField(text: $model.searchQuery, prompt: "Search apps").frame(width: 240)
             }
             Picker("Sort", selection: $model.sortField) {
                 ForEach(AppSortField.allCases) { field in Text(field.label).tag(field) }
@@ -49,7 +49,7 @@ struct UninstallerScreen: View {
                 model.sortAscending.toggle()
             } label: {
                 Image(systemName: model.sortAscending ? "arrow.up" : "arrow.down")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(size: 12.5, weight: .medium))
             }
             .buttonStyle(.sweepQuiet)
             .accessibilityLabel(model.sortAscending ? "Ascending" : "Descending")
@@ -131,7 +131,7 @@ struct UninstallerScreen: View {
         VStack(spacing: 0) {
             HStack(spacing: SweepTokens.s3) {
                 Image(systemName: "questionmark.app.fill")
-                    .font(.system(size: 30, weight: .light))
+                    .font(.system(size: 34, weight: .light))
                     .symbolRenderingMode(.hierarchical)
                     .foregroundStyle(.tertiary)
                 VStack(alignment: .leading, spacing: 2) {
@@ -210,7 +210,7 @@ private struct AppRowView: View {
             HStack(spacing: SweepTokens.s3) {
                 Image(nsImage: icon)
                     .resizable()
-                    .frame(width: 28, height: 28)
+                    .frame(width: 32, height: 32)
                 VStack(alignment: .leading, spacing: 1) {
                     HStack(spacing: SweepTokens.s1) {
                         Text(app.name)
@@ -219,7 +219,7 @@ private struct AppRowView: View {
                             .lineLimit(1)
                         if isProtected {
                             Image(systemName: "lock.fill")
-                                .font(.system(size: 9, weight: .semibold))
+                                .font(.system(size: 11.5, weight: .semibold))
                                 .foregroundStyle(.tertiary)
                         }
                         if isRunning {
@@ -250,7 +250,7 @@ private struct AppRowView: View {
                 }
             }
             .padding(.horizontal, SweepTokens.s3)
-            .frame(height: 52)
+            .frame(height: 58)
             .background {
                 RoundedRectangle(cornerRadius: SweepTokens.rowRadius, style: .continuous)
                     .fill(isSelected ? AnyShapeStyle(SweepTokens.accent.opacity(0.12)) : AnyShapeStyle(.clear))
@@ -294,7 +294,7 @@ private struct AppSummaryCard: View {
                     Image(nsImage: icon).resizable().frame(width: 48, height: 48)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(app.name)
-                            .font(.system(size: 16, weight: .semibold))
+                            .font(SweepFont.sectionTitle)
                         Text(subtitle)
                             .font(SweepFont.caption)
                             .foregroundStyle(.secondary)
@@ -406,7 +406,7 @@ private struct RemovalPreviewSheet: View {
             }
             .padding(SweepTokens.s5)
         }
-        .frame(width: 460)
+        .frame(width: 500)
         .fixedSize(horizontal: false, vertical: true)
     }
 

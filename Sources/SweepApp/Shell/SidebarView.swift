@@ -14,7 +14,7 @@ import SweepUI
 struct SidebarView: View {
     @Binding var selection: Destination
     let showsStressHarness: Bool
-    let isCollapsed: Bool
+    @Binding var isCollapsed: Bool
 
     var body: some View {
         // No `ScrollView`: at the 600 pt minimum window height the whole IA fits with room to
@@ -22,6 +22,8 @@ struct SidebarView: View {
         // grows past the fold (Packages, Plugins, Lipo, File Search are queued for v1.1) the
         // primary block gets a scroll view and Toolbox stays a bottom inset.
         VStack(alignment: .leading, spacing: 0) {
+            topStrip
+
             ForEach(SidebarGroup.primary) { group in
                 if isCollapsed {
                     // Section headers carry no information an icon rail can use; a small gap
@@ -41,6 +43,33 @@ struct SidebarView: View {
 
             toolbox
         }
+    }
+
+    /// The window has no titlebar (`.hiddenTitleBar`, user-directed): the traffic lights float
+    /// over this strip's left edge, and the sidebar toggle takes the trailing slot — or, in the
+    /// 72 pt rail, drops below the lights where there is no room beside them. The strip's height
+    /// clears the lights so the first row never collides with them.
+    @ViewBuilder
+    private var topStrip: some View {
+        if isCollapsed {
+            VStack(spacing: 0) {
+                Color.clear.frame(height: 34)
+                toggleButton.frame(maxWidth: .infinity)
+            }
+            .padding(.bottom, SweepTokens.s1)
+        } else {
+            HStack {
+                Spacer()
+                toggleButton
+            }
+            .padding(.horizontal, SweepTokens.s3)
+            .frame(height: 44, alignment: .bottom)
+        }
+    }
+
+    /// The "panel" glyph every modern SaaS sidebar uses, not AppKit's `sidebar.left`.
+    private var toggleButton: some View {
+        SidebarToggleButton(isCollapsed: $isCollapsed)
     }
 
     private var toolbox: some View {
@@ -83,6 +112,35 @@ struct SidebarView: View {
     }
 }
 
+/// The sidebar collapse control: the filled-left-panel glyph (the Linear/Arc-register "panel"
+/// icon, user-directed — not AppKit's `sidebar.left`), quiet until hovered, keeping the ⌘⌃S
+/// shortcut the old toolbar button carried.
+private struct SidebarToggleButton: View {
+    @Binding var isCollapsed: Bool
+    @State private var isHovering = false
+
+    var body: some View {
+        Button {
+            isCollapsed.toggle()
+        } label: {
+            Image(systemName: "rectangle.leftthird.inset.filled")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(isHovering ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                .frame(width: 28, height: 28)
+                .background {
+                    RoundedRectangle(cornerRadius: SweepTokens.rowRadius - 2, style: .continuous)
+                        .fill(isHovering ? AnyShapeStyle(.fill.quaternary) : AnyShapeStyle(.clear))
+                }
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+        .help(isCollapsed ? "Expand the sidebar" : "Collapse the sidebar to icons")
+        .keyboardShortcut("s", modifiers: [.command, .control])
+        .accessibilityLabel(isCollapsed ? "Expand the sidebar" : "Collapse the sidebar")
+    }
+}
+
 /// One icon-rail entry: the module icon centered in a fixed slot, selection as an accent-tinted
 /// pill behind it, the row title surviving as a tooltip and the accessibility label. Toolbox rows
 /// keep their quieter plain-glyph treatment, same contract as the full-width rows.
@@ -98,7 +156,7 @@ private struct SidebarRailRow: View {
     var body: some View {
         Button(action: action) {
             glyph
-                .frame(width: 40, height: tier == .primary ? 32 : 28)
+                .frame(width: 48, height: tier == .primary ? 38 : 34)
                 .background {
                     RoundedRectangle(cornerRadius: SweepTokens.rowRadius, style: .continuous)
                         .fill(background)
@@ -114,20 +172,15 @@ private struct SidebarRailRow: View {
         .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
     }
 
-    @ViewBuilder
+    /// Same module-hue chip as the full-width rows (scale v3) — the rail keeps the tier contract
+    /// the same way the expanded sidebar does, through size alone.
     private var glyph: some View {
-        if tier == .primary {
-            ModuleIcon(symbol: symbol, diameter: 22)
-        } else {
-            Image(systemName: symbol)
-                .font(.system(size: 12, weight: .regular))
-                .symbolRenderingMode(.hierarchical)
-                .foregroundStyle(isSelected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary))
-        }
+        ModuleIcon(symbol: symbol, diameter: tier == .primary ? 26 : 22)
     }
 
     private var background: AnyShapeStyle {
-        if isSelected { return AnyShapeStyle(Color.accentColor.opacity(0.20)) }
+        // Same indigo family as the full-width rows' selection — never the system accent.
+        if isSelected { return AnyShapeStyle(SweepTokens.accent.opacity(0.20)) }
         if isHovering { return AnyShapeStyle(.fill.quaternary) }
         return AnyShapeStyle(.clear)
     }

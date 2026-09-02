@@ -21,12 +21,12 @@ public struct SweepPrimaryButtonStyle: ButtonStyle {
 
     public func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 13, weight: .semibold))
+            .font(.system(size: 15, weight: .semibold))
             .foregroundStyle(isEnabled ? .white : Color.secondary)
             .frame(minWidth: minWidth)
-            .frame(height: 32)
+            .frame(height: 36)
             .background {
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                RoundedRectangle(cornerRadius: SweepTokens.rowRadius, style: .continuous)
                     .fill(isEnabled ? AnyShapeStyle(tint) : AnyShapeStyle(.fill.tertiary))
             }
             .opacity(configuration.isPressed ? 0.82 : 1)
@@ -45,17 +45,17 @@ public struct SweepQuietButtonStyle: ButtonStyle {
 
     public func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 12.5, weight: .medium))
+            .font(.system(size: 14, weight: .medium))
             .foregroundStyle(isEnabled ? AnyShapeStyle(.primary) : AnyShapeStyle(.tertiary))
-            .padding(.horizontal, SweepTokens.s3)
+            .padding(.horizontal, SweepTokens.s3 + 2)
             .frame(minWidth: minWidth)
-            .frame(height: 28)
+            .frame(height: 32)
             .background {
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                RoundedRectangle(cornerRadius: SweepTokens.rowRadius, style: .continuous)
                     .fill(configuration.isPressed ? AnyShapeStyle(.fill.secondary) : AnyShapeStyle(.fill.tertiary))
             }
             .overlay {
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                RoundedRectangle(cornerRadius: SweepTokens.rowRadius, style: .continuous)
                     .strokeBorder(.separator, lineWidth: 0.5)
             }
             .contentShape(Rectangle())
@@ -161,7 +161,7 @@ public struct GateNotice: View {
         Label {
             Text(text).font(SweepFont.caption)
         } icon: {
-            Image(systemName: symbol).font(.system(size: 10, weight: .medium))
+            Image(systemName: symbol).font(.system(size: 11.5, weight: .medium))
         }
         .foregroundStyle(.tertiary)
         .accessibilityLabel(text)
@@ -181,7 +181,7 @@ public struct Footnote: View {
     public var body: some View {
         HStack(spacing: SweepTokens.s1 + 2) {
             if let symbol {
-                Image(systemName: symbol).font(.system(size: 9.5, weight: .regular))
+                Image(systemName: symbol).font(.system(size: 11, weight: .regular))
             }
             Text(text).font(SweepFont.caption)
         }
@@ -208,18 +208,18 @@ public struct SweepSearchField: View {
     public var body: some View {
         HStack(spacing: SweepTokens.s2 - 2) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 11, weight: .medium))
+                .font(.system(size: 12.5, weight: .medium))
                 .foregroundStyle(.tertiary)
             TextField(prompt, text: $text)
                 .textFieldStyle(.plain)
-                .font(.system(size: 12))
+                .font(.system(size: 13.5))
                 .focused($isFocused)
             if !text.isEmpty {
                 Button {
                     text = ""
                 } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 11))
+                        .font(.system(size: 12.5))
                         .foregroundStyle(.tertiary)
                 }
                 .buttonStyle(.plain)
@@ -227,7 +227,7 @@ public struct SweepSearchField: View {
             }
         }
         .padding(.horizontal, SweepTokens.s2)
-        .frame(height: 24)
+        .frame(height: 28)
         .background {
             RoundedRectangle(cornerRadius: 6, style: .continuous)
                 .fill(.fill.tertiary)
@@ -265,7 +265,7 @@ public struct PathTicker: View {
             // instead of forcing horizontal overflow. Fixed height keeps the layout from bouncing
             // as paths appear and disappear.
             .frame(maxWidth: width)
-            .frame(height: 16, alignment: .center)
+            .frame(height: 18, alignment: .center)
             .opacity(path == nil ? 0 : 1)
             .accessibilityHidden(true)
     }

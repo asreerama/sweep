@@ -259,7 +259,7 @@ struct StartupItemsScreen: View {
                     if index > 0 { Divider().padding(.horizontal, SweepTokens.s3) }
                     HStack(spacing: SweepTokens.s3 - 2) {
                         Image(systemName: "power.circle")
-                            .font(.system(size: 12, weight: .regular))
+                            .font(.system(size: 13.5, weight: .regular))
                             .foregroundStyle(.secondary)
                             .frame(width: 17, alignment: .center)
                         Text(row.label)
@@ -353,7 +353,7 @@ private struct StartupItemRowView: View {
     var body: some View {
         HStack(spacing: SweepTokens.s3 - 2) {
             Image(systemName: row.source.symbol)
-                .font(.system(size: 12, weight: .regular))
+                .font(.system(size: 13.5, weight: .regular))
                 .foregroundStyle(.secondary)
                 .frame(width: 17, alignment: .center)
             VStack(alignment: .leading, spacing: 0) {
@@ -374,7 +374,7 @@ private struct StartupItemRowView: View {
             }
             Button(action: onReveal) {
                 Image(systemName: "arrow.up.forward.square")
-                    .font(.system(size: 11, weight: .regular))
+                    .font(.system(size: 12.5, weight: .regular))
                     .foregroundStyle(.tertiary)
             }
             .buttonStyle(.plain)

@@ -22,7 +22,7 @@ struct HomebrewScreen: View {
                 HStack(spacing: SweepTokens.s2) {
                     if model.loadState == .loaded {
                         SweepSearchField(text: $query, prompt: "Filter packages")
-                            .frame(width: 200)
+                            .frame(width: 240)
                     }
                     if model.isRefreshing {
                         ProgressView().controlSize(.small)
@@ -78,7 +78,7 @@ struct HomebrewScreen: View {
         ScrollView {
             VStack(alignment: .leading, spacing: SweepTokens.s5) {
                 summarySection
-                if !model.snapshot.outdated.isEmpty {
+                if !filteredOutdated.isEmpty {
                     outdatedSection
                 }
                 installedSection
@@ -97,16 +97,24 @@ struct HomebrewScreen: View {
         SectionCard {
             HStack(spacing: 0) {
                 statTile(title: "Formulae", value: SweepFormat.count(model.snapshot.formulae.count))
-                Divider().frame(height: 32)
+                Divider().frame(height: 36)
                 statTile(title: "Casks", value: SweepFormat.count(model.snapshot.casks.count))
-                Divider().frame(height: 32)
+                Divider().frame(height: 36)
+                // "…" while `brew outdated` is still deciding — the staged load renders this
+                // card seconds before the update check lands, and a hard "0" would read as
+                // "everything is current" when the truth is "still checking."
                 statTile(
                     title: "Outdated",
-                    value: SweepFormat.count(model.snapshot.outdated.count),
+                    value: model.isCheckingUpdates && model.snapshot.outdated.isEmpty
+                        ? "\u{2026}" : SweepFormat.count(model.snapshot.outdated.count),
                     tint: model.snapshot.outdated.isEmpty ? nil : SweepTokens.accent
                 )
-                Divider().frame(height: 32)
-                statTile(title: "Cache", value: model.snapshot.cache.map { SweepFormat.bytes($0.sizeBytes) } ?? "\u{2013}")
+                Divider().frame(height: 36)
+                statTile(
+                    title: "Cache",
+                    value: model.snapshot.cache.map { SweepFormat.bytes($0.sizeBytes) }
+                        ?? (model.isCheckingUpdates ? "\u{2026}" : "\u{2013}")
+                )
             }
             .padding(SweepTokens.s4)
         }
@@ -115,7 +123,7 @@ struct HomebrewScreen: View {
     private func statTile(title: String, value: String, tint: Color? = nil) -> some View {
         VStack(spacing: 4) {
             Text(value)
-                .font(.system(size: 18, weight: .semibold))
+                .font(.system(size: 22, weight: .semibold))
                 .monospacedDigit()
                 .foregroundStyle(tint ?? SweepTokens.heroInk)
             Text(title.uppercased())
@@ -152,7 +160,7 @@ struct HomebrewScreen: View {
                     .animation(SweepMotion.layout, value: progress.completed)
             }
             SectionCard {
-                ForEach(Array(model.snapshot.outdated.enumerated()), id: \.element.id) { index, package in
+                ForEach(Array(filteredOutdated.enumerated()), id: \.element.id) { index, package in
                     if index > 0 { Divider().padding(.horizontal, SweepTokens.s3) }
                     packageRow(package)
                         .padding(.horizontal, SweepTokens.s3 - 2)
@@ -161,13 +169,24 @@ struct HomebrewScreen: View {
         }
     }
 
+    /// One folded query applied to EVERY section (user-reported: filtering only the Installed
+    /// list while the Outdated section — the first thing on screen — ignored the field read as
+    /// "search doesn't work"). Pre-folded `searchKey`s + `contains`, never per-keystroke ICU.
+    private var foldedQuery: String {
+        SearchFold.fold(query.trimmingCharacters(in: .whitespaces))
+    }
+
     private var filteredPackages: [BrewPackage] {
-        let trimmed = query.trimmingCharacters(in: .whitespaces)
+        let folded = foldedQuery
         let base = model.snapshot.packages
-        let matched = trimmed.isEmpty
-            ? base
-            : base.filter { $0.name.range(of: trimmed, options: [.caseInsensitive, .diacriticInsensitive]) != nil }
+        let matched = folded.isEmpty ? base : base.filter { $0.searchKey.contains(folded) }
         return matched.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    private var filteredOutdated: [BrewPackage] {
+        let folded = foldedQuery
+        guard !folded.isEmpty else { return model.snapshot.outdated }
+        return model.snapshot.outdated.filter { $0.searchKey.contains(folded) }
     }
 
     private var installedSection: some View {
@@ -207,10 +226,10 @@ struct HomebrewScreen: View {
         HStack(spacing: SweepTokens.s3) {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(package.isCask ? AnyShapeStyle(SweepTokens.accent.opacity(0.12)) : AnyShapeStyle(.fill.quaternary))
-                .frame(width: 34, height: 34)
+                .frame(width: 38, height: 38)
                 .overlay {
                     Image(systemName: package.isCask ? "macwindow" : "terminal")
-                        .font(.system(size: 14, weight: .medium))
+                        .font(.system(size: 16, weight: .medium))
                         .foregroundStyle(package.isCask ? AnyShapeStyle(SweepTokens.accent) : AnyShapeStyle(.secondary))
                 }
             VStack(alignment: .leading, spacing: 2) {
@@ -221,7 +240,16 @@ struct HomebrewScreen: View {
                 packageSubtitle(package)
             }
             Spacer(minLength: SweepTokens.s3)
-            SizeColumn(byteCount: package.sizeBytes, emphasized: true)
+            // The staged load renders rows milliseconds after open, seconds before the disk walk
+            // has sized them — a quiet placeholder for that span, never a lying "Zero KB".
+            if model.isSizing, package.sizeBytes == 0 {
+                Text("\u{2014}")
+                    .font(SweepFont.monoSmall)
+                    .foregroundStyle(.tertiary)
+                    .frame(width: SweepTokens.sizeColumnWidth, alignment: .trailing)
+            } else {
+                SizeColumn(byteCount: package.sizeBytes, emphasized: true)
+            }
             upgradeAccessory(for: package)
             // Uninstall: routes through the same preview-then-confirm sheet as every other
             // mutation — the sheet is the confirmation dialog, naming the package, its size and
@@ -231,7 +259,7 @@ struct HomebrewScreen: View {
                     model.requestUninstall(package)
                 } label: {
                     Image(systemName: "trash")
-                        .font(.system(size: 12, weight: .regular))
+                        .font(.system(size: 13.5, weight: .regular))
                         .foregroundStyle(.secondary)
                         .contentShape(Rectangle())
                 }
@@ -242,7 +270,7 @@ struct HomebrewScreen: View {
             }
         }
         .padding(.vertical, SweepTokens.s2)
-        .frame(minHeight: 54)
+        .frame(minHeight: 60)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(package.name), \(package.isCask ? "Mac app" : "command-line tool"), \(SweepFormat.bytes(package.sizeBytes))\(package.isOutdated ? ", update available" : "")")
     }
@@ -262,10 +290,12 @@ struct HomebrewScreen: View {
                     .truncationMode(.middle)
             }
         } else {
+            // "up to date" is only claimable once `brew outdated` has actually answered — while
+            // the staged load's update check is in flight the row states just what it knows.
             Text([
                 package.isCask ? "Mac app" : "Command-line tool",
                 package.installedVersion,
-                "up to date",
+                model.isCheckingUpdates ? nil : "up to date",
             ].compactMap(\.self).joined(separator: " \u{00B7} "))
                 .font(SweepFont.caption)
                 .foregroundStyle(.secondary)
@@ -440,7 +470,7 @@ private struct BrewCommandPreviewSheet: View {
             }
             .padding(SweepTokens.s5)
         }
-        .frame(width: 460)
+        .frame(width: 500)
         .fixedSize(horizontal: false, vertical: true)
     }
 }

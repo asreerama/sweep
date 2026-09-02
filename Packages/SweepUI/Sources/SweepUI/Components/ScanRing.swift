@@ -267,10 +267,10 @@ private struct ScanRingDemo: View {
                 switch state {
                 case .idle:
                     Image(systemName: "sparkles")
-                        .font(.system(size: 30, weight: .light))
+                        .font(.system(size: 34, weight: .light))
                         .foregroundStyle(.quaternary)
                 case .scanning, .complete:
-                    HeroByteCounter(byteCount: bytes, size: 54, caption: "12,904 items")
+                    HeroByteCounter(byteCount: bytes, size: 64, caption: "12,904 items")
                 }
             }
             Picker("", selection: $state) {

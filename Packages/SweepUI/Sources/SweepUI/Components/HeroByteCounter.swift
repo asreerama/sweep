@@ -18,7 +18,7 @@ public struct HeroByteCounter: View {
 
     public init(
         byteCount: Int64,
-        size: CGFloat = 54,
+        size: CGFloat = 64,
         label: String? = nil,
         caption: String? = nil
     ) {
@@ -36,7 +36,7 @@ public struct HeroByteCounter: View {
                 // Proportional to the number, never wrapping: the whole lockup scales as one
                 // unit with the ring it sits in.
                 Text(label.uppercased())
-                    .font(.system(size: max(9, size * 0.20), weight: .semibold))
+                    .font(.system(size: max(11, size * 0.20), weight: .semibold))
                     .tracking(size * 0.028)
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
@@ -52,7 +52,7 @@ public struct HeroByteCounter: View {
                     .foregroundStyle(SweepTokens.heroInk)
                     .contentTransition(reduceMotion ? .identity : .numericText(value: Double(byteCount)))
                 Text(parts.unit)
-                    .font(SweepFont.heroUnit(size * 0.26))
+                    .font(SweepFont.heroUnit(size * 0.42))
                     .tracking(0.4)
                     .foregroundStyle(.secondary)
                     .contentTransition(.identity)
@@ -66,7 +66,7 @@ public struct HeroByteCounter: View {
                 // runs, and a second animated number under the first is noise competing with
                 // the one number the screen is about.
                 Text(caption)
-                    .font(.system(size: max(10, size * 0.22)))
+                    .font(SweepFont.caption)
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
                     .lineLimit(1)

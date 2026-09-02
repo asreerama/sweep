@@ -363,7 +363,7 @@ struct LargeOldFilesScreen: View {
             ) {
                 HStack(spacing: SweepTokens.s2) {
                     if model.phase == .results, !model.groups.isEmpty {
-                        SweepSearchField(text: $query, prompt: "Filter paths").frame(width: 170)
+                        SweepSearchField(text: $query, prompt: "Filter paths").frame(width: 240)
                     }
                     Picker("Minimum size", selection: $model.threshold) {
                         ForEach(LargeFileSizeThreshold.allCases) { threshold in
@@ -436,9 +436,9 @@ struct LargeOldFilesScreen: View {
     }
 
     private var scanningState: some View {
-        VStack(spacing: SweepTokens.s4) {
-            ScanRing(state: .scanning, diameter: 96) {
-                HeroByteCounter(byteCount: model.claimedBytes, size: 22)
+        VStack(spacing: SweepTokens.s5) {
+            ScanRing(state: .scanning, diameter: SweepTokens.moduleRingDiameter) {
+                HeroByteCounter(byteCount: model.claimedBytes, size: SweepTokens.moduleRingCounterSize)
             }
             Text(model.scanningCaption)
                 .font(SweepFont.caption)
@@ -540,7 +540,7 @@ private struct RevealableInventoryList: View {
                 onReveal(item)
             } label: {
                 Image(systemName: "arrow.up.forward.square")
-                    .font(.system(size: 11, weight: .regular))
+                    .font(.system(size: 12.5, weight: .regular))
                     .foregroundStyle(.tertiary)
             }
             .buttonStyle(.plain)
@@ -560,7 +560,7 @@ private struct RevealableInventoryList: View {
             HStack(spacing: SweepTokens.s2) {
                 Color.clear.frame(width: SweepTokens.rowDisclosureIndent, height: 1)
                 Image(systemName: "ellipsis.circle")
-                    .font(.system(size: 12, weight: .regular))
+                    .font(.system(size: 13.5, weight: .regular))
                     .foregroundStyle(.secondary)
                     .frame(width: 17, alignment: .center)
                 Text("Show all \(SweepFormat.count(group.itemCount))")

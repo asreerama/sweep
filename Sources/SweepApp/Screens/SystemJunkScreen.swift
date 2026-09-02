@@ -29,7 +29,7 @@ struct SystemJunkScreen: View {
                 HStack(spacing: SweepTokens.s2) {
                     if !scan.ruleGroups.isEmpty {
                         SweepSearchField(text: $query, prompt: "Filter paths")
-                            .frame(width: 200)
+                            .frame(width: 240)
                     }
                     if scan.isScanning {
                         Button("Stop") { scan.cancel() }.buttonStyle(.sweepQuiet)
@@ -86,9 +86,9 @@ struct SystemJunkScreen: View {
     }
 
     private var scanningState: some View {
-        VStack(spacing: SweepTokens.s4) {
-            ScanRing(state: .scanning, diameter: 96, progress: scan.progress) {
-                HeroByteCounter(byteCount: scan.claimedBytes, size: 22)
+        VStack(spacing: SweepTokens.s5) {
+            ScanRing(state: .scanning, diameter: SweepTokens.moduleRingDiameter, progress: scan.progress) {
+                HeroByteCounter(byteCount: scan.claimedBytes, size: SweepTokens.moduleRingCounterSize)
             }
             Text(scan.scanningCaption)
                 .font(SweepFont.caption)

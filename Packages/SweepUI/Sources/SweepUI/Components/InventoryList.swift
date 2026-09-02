@@ -111,9 +111,9 @@ struct InventoryShowMoreRow: View {
             HStack(spacing: SweepTokens.s2) {
                 Color.clear.frame(width: SweepTokens.rowDisclosureIndent, height: 1)
                 Image(systemName: "ellipsis.circle")
-                    .font(.system(size: 12, weight: .regular))
+                    .font(.system(size: 13.5, weight: .regular))
                     .foregroundStyle(.secondary)
-                    .frame(width: 17, alignment: .center)
+                    .frame(width: 19, alignment: .center)
                 Text("Show all \(SweepFormat.count(total))")
                     .font(SweepFont.rowTitle)
                     .foregroundStyle(Color.accentColor)
@@ -147,10 +147,10 @@ public struct InventoryEmptyState: View {
     public var body: some View {
         VStack(spacing: SweepTokens.s3) {
             Image(systemName: symbol)
-                .font(.system(size: 26, weight: .light))
+                .font(.system(size: 28, weight: .light))
                 .foregroundStyle(.quaternary)
             Text(title)
-                .font(.system(size: 13, weight: .medium))
+                .font(.system(size: 15, weight: .medium))
                 .foregroundStyle(.secondary)
             if let message {
                 Text(message)

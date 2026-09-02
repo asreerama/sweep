@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import SweepUI
 
 // MARK: - Models
 
@@ -11,6 +12,22 @@ struct BrewPackage: Identifiable, Hashable, Sendable {
     let installedVersion: String?
     let latestVersion: String?
     let sizeBytes: Int64
+    /// Folded once here so the screen's per-keystroke filter is a plain `contains`, same
+    /// construction-time discipline as `InventoryItem.searchKey`.
+    let searchKey: String
+
+    init(
+        id: String, name: String, isCask: Bool,
+        installedVersion: String?, latestVersion: String?, sizeBytes: Int64
+    ) {
+        self.id = id
+        self.name = name
+        self.isCask = isCask
+        self.installedVersion = installedVersion
+        self.latestVersion = latestVersion
+        self.sizeBytes = sizeBytes
+        self.searchKey = SearchFold.fold(name)
+    }
 
     var isOutdated: Bool { latestVersion != nil }
 }
@@ -34,6 +51,14 @@ struct BrewSnapshot: Sendable {
     var totalBytes: Int64 { packages.reduce(0) { $0 + $1.sizeBytes } }
 }
 
+/// The slow tail of a refresh: what `brew outdated --json=v2` knows about newer versions, plus
+/// the download cache's location and size. Fetched in the background *after* the listing is
+/// already on screen — see `HomebrewModel.refresh()`'s staged-load doc.
+struct BrewUpdateCheck: Sendable {
+    let outdated: BrewOutdatedResponse
+    let cache: BrewCacheInfo?
+}
+
 enum BrewGatewayError: Error, CustomStringConvertible, Sendable, Equatable {
     case brewNotFound
     case malformedOutput(String)
@@ -50,14 +75,31 @@ enum BrewGatewayError: Error, CustomStringConvertible, Sendable, Equatable {
 
 // MARK: - Gateway protocol (test/fixture seam, mirrors `CleanBackend`)
 
-/// What the Homebrew screen needs from brew. Behind a protocol so `HomebrewModel` is unit
-/// testable against `FixtureBrewGateway` without ever launching a process, and so a screenshot
-/// run can request fixture data (`SWEEP_TOOLBOX_BREW_FIXTURE=1`) on a machine where a real
-/// Homebrew refresh would be slow — "fixture data acceptable for Homebrew if machine brew is
-/// slow" is a data-source choice, not a UI compromise: the screen code is identical either way.
+/// What the Homebrew screen needs from brew, split into a staged read so the screen can render
+/// the instant it opens (measured on this machine, 2026-09-01: the old single `snapshot()` call
+/// took ~4.6 s warm — 3.45 s of serial per-package disk sizing plus 0.7 s of `brew outdated` —
+/// which read as "the Homebrew screen is slow" next to apps that list packages instantly):
+///
+/// 1. ``listing()`` — names and installed versions straight from the Cellar/Caskroom directory
+///    layout, no `brew` process at all. Milliseconds; this is what makes the screen instant.
+/// 2. ``sizes(for:)`` — the real per-package disk walk, run concurrently and merged in when done.
+/// 3. ``updateCheck()`` — `brew outdated` plus the cache readout, the only part that needs brew's
+///    own knowledge, merged in whenever it lands.
+///
+/// Behind a protocol so `HomebrewModel` is unit testable against `FixtureBrewGateway` without
+/// ever launching a process, and so a screenshot run can request fixture data
+/// (`SWEEP_TOOLBOX_BREW_FIXTURE=1`) — a data-source choice, not a UI compromise: the screen code
+/// is identical either way.
 protocol BrewGateway: Sendable {
     var isAvailable: Bool { get }
-    func snapshot() async throws -> BrewSnapshot
+    /// Filesystem-only: package names + installed versions from Cellar/Caskroom directory names.
+    /// Sizes are 0 and `latestVersion` nil until the later stages land.
+    func listing() async throws -> BrewSnapshot
+    /// On-disk allocated bytes for each of `packages`, keyed by `BrewPackage.id`. Never throws:
+    /// an unreadable directory is a size of zero on this screen, not an error banner.
+    func sizes(for packages: [BrewPackage]) async -> [String: Int64]
+    /// `brew outdated --json=v2` + `brew --cache` — the refresh's slow tail.
+    func updateCheck() async throws -> BrewUpdateCheck
     /// `brew cleanup --prune=all --dry-run` — read-only, safe to call any time.
     func cleanupPreview() async throws -> String
     /// `brew cleanup --prune=all` — only ever called after the caller has shown the preview above
@@ -75,7 +117,9 @@ protocol BrewGateway: Sendable {
 
 /// Process-backed gateway. Every mutating call (`cleanup`, `autoremove`, `upgrade`) runs the real
 /// `brew` subcommand as the current user — PLAN §2's "typed command adapters... run as user,
-/// never root" — via `BrewProcessRunner`, never a shell.
+/// never root" — via `BrewProcessRunner`, never a shell. Reads, by contrast, avoid launching
+/// `brew` wherever the filesystem already has the answer: the Cellar/Caskroom layout *is* brew's
+/// own installed-package database, and reading it directly is what makes ``listing()`` instant.
 struct RealBrewGateway: BrewGateway {
     private let brewPath: String?
 
@@ -85,10 +129,94 @@ struct RealBrewGateway: BrewGateway {
 
     var isAvailable: Bool { brewPath != nil }
 
-    func snapshot() async throws -> BrewSnapshot {
+    /// `/opt/homebrew/bin/brew` → `/opt/homebrew` (and the Intel equivalent). Fixed layout —
+    /// brew itself derives the prefix the same way.
+    static func prefix(forBrewPath brewPath: String) -> String {
+        ((brewPath as NSString).deletingLastPathComponent as NSString).deletingLastPathComponent
+    }
+
+    func listing() async throws -> BrewSnapshot {
+        guard let brewPath else { throw BrewGatewayError.brewNotFound }
+        return try await Task.detached(priority: .userInitiated) {
+            Self.buildListing(prefix: Self.prefix(forBrewPath: brewPath))
+        }.value
+    }
+
+    /// One `Cellar/<name>/<version>` (or `Caskroom/<token>/<version>`) readdir pass. The newest
+    /// version directory is reported as the installed version — with multiple kegs present that
+    /// matches `brew outdated`'s `installed_versions.last` convention, and ``updateCheck()``
+    /// refines it later for the outdated rows anyway.
+    private static func buildListing(prefix: String) -> BrewSnapshot {
+        var packages: [BrewPackage] = []
+        for (root, isCask) in [(prefix + "/Cellar", false), (prefix + "/Caskroom", true)] {
+            for entry in versionedDirectories(in: root) {
+                packages.append(BrewPackage(
+                    id: "\(isCask ? "cask" : "formula"):\(entry.name)",
+                    name: entry.name,
+                    isCask: isCask,
+                    installedVersion: entry.version,
+                    latestVersion: nil,
+                    sizeBytes: 0
+                ))
+            }
+        }
+        return BrewSnapshot(packages: packages, cache: nil, prefix: prefix)
+    }
+
+    private static func versionedDirectories(in root: String) -> [(name: String, version: String?)] {
+        let fileManager = FileManager.default
+        guard let names = try? fileManager.contentsOfDirectory(atPath: root) else { return [] }
+        return names
+            .filter { !$0.hasPrefix(".") }
+            .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+            .compactMap { name in
+                let directory = root + "/" + name
+                var isDirectory: ObjCBool = false
+                guard fileManager.fileExists(atPath: directory, isDirectory: &isDirectory),
+                      isDirectory.boolValue else { return nil }
+                let versions = ((try? fileManager.contentsOfDirectory(atPath: directory)) ?? [])
+                    .filter { !$0.hasPrefix(".") }
+                    .sorted { $0.compare($1, options: .numeric) == .orderedAscending }
+                return (name, versions.last)
+            }
+    }
+
+    /// Every package's walk is its own task — the walks are syscall-bound and independent, and
+    /// the concurrent pool brings the measured 3.45 s serial pass down to well under a second on
+    /// a warm cache.
+    func sizes(for packages: [BrewPackage]) async -> [String: Int64] {
+        guard let brewPath else { return [:] }
+        let prefix = Self.prefix(forBrewPath: brewPath)
+        return await withTaskGroup(of: (String, Int64).self, returning: [String: Int64].self) { group in
+            for package in packages {
+                let root = prefix + (package.isCask ? "/Caskroom/" : "/Cellar/") + package.name
+                group.addTask(priority: .utility) {
+                    (package.id, DirectorySize.allocatedBytes(atPath: root))
+                }
+            }
+            var result: [String: Int64] = [:]
+            for await (id, bytes) in group { result[id] = bytes }
+            return result
+        }
+    }
+
+    func updateCheck() async throws -> BrewUpdateCheck {
         guard let brewPath else { throw BrewGatewayError.brewNotFound }
         return try await Task.detached(priority: .utility) {
-            try Self.buildSnapshot(brewPath: brewPath)
+            let outdated = try Self.decodeOutdated(
+                BrewProcessRunner.run(brewPath: brewPath, ["outdated", "--json=v2"])
+            )
+            // `brew --cache` (not `SweepPolicy.resolvedRoots(for: .homebrewCache)`) on purpose:
+            // brew honors `HOMEBREW_CACHE` and a user who has relocated it (e.g. off the internal
+            // drive) has a real cache directory `SweepPolicy`'s fixed `~/Library/Caches/Homebrew`
+            // candidate would never find — asking the tool that owns the setting beats guessing
+            // its default.
+            var cache: BrewCacheInfo?
+            if let cachePath = try? BrewProcessRunner.run(brewPath: brewPath, ["--cache"])
+                .trimmingCharacters(in: .whitespacesAndNewlines), !cachePath.isEmpty {
+                cache = BrewCacheInfo(path: cachePath, sizeBytes: DirectorySize.allocatedBytes(atPath: cachePath))
+            }
+            return BrewUpdateCheck(outdated: outdated, cache: cache)
         }.value
     }
 
@@ -110,64 +238,6 @@ struct RealBrewGateway: BrewGateway {
         return try await Task.detached(priority: .userInitiated) {
             try BrewProcessRunner.run(brewPath: brewPath, arguments)
         }.value
-    }
-
-    // MARK: - Snapshot assembly (runs off the main actor; `brew list`/`--prefix`/`--cache` are
-    // fast, but sizing every Cellar/Caskroom directory is a real disk walk per package)
-
-    private static func buildSnapshot(brewPath: String) throws -> BrewSnapshot {
-        let prefix = try BrewProcessRunner.run(brewPath: brewPath, ["--prefix"])
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let cellar = URL(fileURLWithPath: prefix).appendingPathComponent("Cellar")
-        let caskroom = URL(fileURLWithPath: prefix).appendingPathComponent("Caskroom")
-
-        let formulaNames = lines(try BrewProcessRunner.run(brewPath: brewPath, ["list", "--formula", "-1"]))
-        let caskNames = lines(try BrewProcessRunner.run(brewPath: brewPath, ["list", "--cask", "-1"]))
-
-        let outdatedJSON = try BrewProcessRunner.run(brewPath: brewPath, ["outdated", "--json=v2"])
-        let outdated = try decodeOutdated(outdatedJSON)
-        let outdatedFormulaByName = Dictionary(outdated.formulae.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
-        let outdatedCaskByName = Dictionary(outdated.casks.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
-
-        var packages: [BrewPackage] = []
-        for name in formulaNames {
-            let entry = outdatedFormulaByName[name]
-            packages.append(BrewPackage(
-                id: "formula:\(name)",
-                name: name,
-                isCask: false,
-                installedVersion: entry?.installedVersions.last,
-                latestVersion: entry?.currentVersion,
-                sizeBytes: DirectorySize.allocatedBytes(at: cellar.appendingPathComponent(name))
-            ))
-        }
-        for name in caskNames {
-            let entry = outdatedCaskByName[name]
-            packages.append(BrewPackage(
-                id: "cask:\(name)",
-                name: name,
-                isCask: true,
-                installedVersion: entry?.installedVersions.last,
-                latestVersion: entry?.currentVersion,
-                sizeBytes: DirectorySize.allocatedBytes(at: caskroom.appendingPathComponent(name))
-            ))
-        }
-
-        // `brew --cache` (not `SweepPolicy.resolvedRoots(for: .homebrewCache)`) on purpose: brew
-        // honors `HOMEBREW_CACHE` and a user who has relocated it (e.g. off the internal drive)
-        // has a real cache directory `SweepPolicy`'s fixed `~/Library/Caches/Homebrew` candidate
-        // would never find — asking the tool that owns the setting beats guessing its default.
-        var cache: BrewCacheInfo?
-        if let cachePath = try? BrewProcessRunner.run(brewPath: brewPath, ["--cache"])
-            .trimmingCharacters(in: .whitespacesAndNewlines), !cachePath.isEmpty {
-            cache = BrewCacheInfo(path: cachePath, sizeBytes: DirectorySize.allocatedBytes(at: URL(fileURLWithPath: cachePath)))
-        }
-
-        return BrewSnapshot(packages: packages.sorted { $0.sizeBytes > $1.sizeBytes }, cache: cache, prefix: prefix)
-    }
-
-    private static func lines(_ output: String) -> [String] {
-        output.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
     }
 
     private static func decodeOutdated(_ json: String) throws -> BrewOutdatedResponse {
@@ -202,34 +272,39 @@ struct BrewOutdatedEntry: Decodable, Sendable {
 
 // MARK: - Directory sizing
 
-/// On-disk sizing for one Cellar/Caskroom/cache directory, entirely in-process (`FileManager` +
-/// `lstat`) rather than shelling out to `du`: this module already launches `brew` as its one
-/// external command per PLAN §2, and a size readout is exactly the kind of typed, native API read
+/// On-disk sizing for one Cellar/Caskroom/cache directory, entirely in-process rather than
+/// shelling out to `du`: this module already launches `brew` as its one external command per
+/// PLAN §2, and a size readout is exactly the kind of typed, native API read
 /// `SweepCore.ScanEngine` already uses everywhere else in Sweep (allocated blocks, hard-link
 /// deduplicated), so this keeps every size in the app honest the same way.
+///
+/// Walks with `fts(3)`, not `FileManager.enumerator`: the enumerator pays per-entry URL
+/// construction plus a redundant `lstat` on top of its own directory reads, measured here at
+/// 3.45 s over this machine's ~200 k Cellar files where a bare `find` does the same walk in
+/// 0.47 s. `fts` hands back each entry's `stat` from the walk itself — no second syscall, no URL.
 enum DirectorySize {
     private struct InodeKey: Hashable {
         let device: Int32
         let inode: UInt64
     }
 
-    /// Sum of on-disk allocated bytes under `url`, each inode counted once. Missing or unreadable
-    /// paths return 0 rather than throwing — an uninstalled package or a permission hiccup is a
-    /// size of zero on this screen, never an error banner.
-    static func allocatedBytes(at url: URL) -> Int64 {
-        guard let enumerator = FileManager.default.enumerator(
-            at: url, includingPropertiesForKeys: nil, options: []
-        ) else { return 0 }
+    /// Sum of on-disk allocated bytes under `path`, each inode counted once. Missing or
+    /// unreadable paths return 0 rather than throwing — an uninstalled package or a permission
+    /// hiccup is a size of zero on this screen, never an error banner.
+    static func allocatedBytes(atPath path: String) -> Int64 {
+        // `FTS_PHYSICAL`, never `FTS_LOGICAL`: a symlink (common inside a Caskroom `.app`) is
+        // sized as itself, never followed — following one risks double-counting or an infinite
+        // loop through a self-referential link, neither of which needs guarding by hand when the
+        // walk itself refuses to follow.
+        var argv: [UnsafeMutablePointer<CChar>?] = [strdup(path), nil]
+        defer { free(argv[0]) }
+        guard let stream = fts_open(&argv, FTS_PHYSICAL | FTS_NOCHDIR, nil) else { return 0 }
+        defer { fts_close(stream) }
 
         var total: Int64 = 0
         var seen = Set<InodeKey>()
-        for case let fileURL as URL in enumerator {
-            var info = stat()
-            // `lstat`, never `stat`: a symlink (common inside a Caskroom `.app`) is sized as
-            // itself, never followed — following one risks double-counting or an infinite loop
-            // through a self-referential link, neither of which this screen needs to guard
-            // against by hand when `lstat` already refuses to.
-            guard lstat(fileURL.path, &info) == 0, info.st_mode & S_IFMT == S_IFREG else { continue }
+        while let entry = fts_read(stream) {
+            guard Int32(entry.pointee.fts_info) == FTS_F, let info = entry.pointee.fts_statp?.pointee else { continue }
             let key = InodeKey(device: info.st_dev, inode: info.st_ino)
             guard seen.insert(key).inserted else { continue }
             // `st_blocks` is always in 512-byte units, independent of the filesystem's own block
@@ -244,9 +319,10 @@ enum DirectorySize {
 
 /// Realistic, static data mirroring a real `brew outdated --json=v2`/`brew list` run on this
 /// machine (Homebrew 6.0.15, captured 2026-09-01) — used when `SWEEP_TOOLBOX_BREW_FIXTURE=1` asks
-/// for it, and by `HomebrewModelTests`. Every mutating call fails loudly rather than silently
-/// pretending to succeed: a fixture that quietly "ran" `cleanup` would be a worse test double than
-/// no test double at all.
+/// for it, and by `HomebrewModelTests`. The staged reads all derive from one `snapshotResult` so
+/// a test controls the whole refresh with a single seam. Every mutating call fails loudly rather
+/// than silently pretending to succeed: a fixture that quietly "ran" `cleanup` would be a worse
+/// test double than no test double at all.
 struct FixtureBrewGateway: BrewGateway {
     enum FixtureError: Error, Sendable { case mutationsDisabled }
 
@@ -255,7 +331,31 @@ struct FixtureBrewGateway: BrewGateway {
     var previewOutput = "Nothing to prune, would remove 0B."
     var mutationResult: Result<String, Error> = .failure(FixtureError.mutationsDisabled)
 
-    func snapshot() async throws -> BrewSnapshot { try snapshotResult.get() }
+    func listing() async throws -> BrewSnapshot { try snapshotResult.get() }
+
+    func sizes(for packages: [BrewPackage]) async -> [String: Int64] {
+        guard let snapshot = try? snapshotResult.get() else { return [:] }
+        return Dictionary(snapshot.packages.map { ($0.id, $0.sizeBytes) }, uniquingKeysWith: { first, _ in first })
+    }
+
+    func updateCheck() async throws -> BrewUpdateCheck {
+        let snapshot = try snapshotResult.get()
+        func entry(_ package: BrewPackage) -> BrewOutdatedEntry {
+            BrewOutdatedEntry(
+                name: package.name,
+                installedVersions: [package.installedVersion].compactMap { $0 },
+                currentVersion: package.latestVersion ?? ""
+            )
+        }
+        return BrewUpdateCheck(
+            outdated: BrewOutdatedResponse(
+                formulae: snapshot.formulae.filter(\.isOutdated).map(entry),
+                casks: snapshot.casks.filter(\.isOutdated).map(entry)
+            ),
+            cache: snapshot.cache
+        )
+    }
+
     func cleanupPreview() async throws -> String { previewOutput }
     func cleanup() async throws -> String { try mutationResult.get() }
     func autoremovePreview() async throws -> String { previewOutput }

@@ -10,8 +10,8 @@ struct RootView: View {
     /// hidden sidebar: navigation stays one click away in both states.
     @AppStorage("sweep.sidebar.collapsed") private var sidebarCollapsed = false
 
-    private static let sidebarWidth: CGFloat = 216
-    private static let railWidth: CGFloat = 64
+    private static let sidebarWidth: CGFloat = 248
+    private static let railWidth: CGFloat = 72
 
     var body: some View {
         // A hand-rolled split, not `NavigationSplitView`: on macOS 26 the system sidebar renders
@@ -23,11 +23,24 @@ struct RootView: View {
             SidebarView(
                 selection: $state.destination,
                 showsStressHarness: state.environment.showsStressHarness,
-                isCollapsed: sidebarCollapsed
+                isCollapsed: $sidebarCollapsed
             )
             .frame(width: sidebarCollapsed ? Self.railWidth : Self.sidebarWidth)
             .frame(maxHeight: .infinity, alignment: .top)
-            .background(SweepTokens.sidebarGround)
+            // Behind-window sidebar material (user-directed: the solid `sidebarGround` read as
+            // flat grey). The system blur brings the desktop's color through; the faint accent
+            // wash on top keeps the pane in the app's indigo family rather than neutral vibrancy
+            // grey. `sidebarGround` remains underneath as the fallback ground the material
+            // composites over — and the whole stack stays a plane of the window, not macOS 26's
+            // floating glass overlay.
+            .background {
+                ZStack {
+                    SweepTokens.sidebarGround
+                    SidebarMaterial()
+                    SweepTokens.accent.opacity(0.045)
+                }
+                .ignoresSafeArea()
+            }
 
             Divider()
 
@@ -57,21 +70,17 @@ struct RootView: View {
                     .background(SweepTokens.groundGradient)
             }
         }
+        // Full-bleed under the hidden titlebar: without this, the invisible titlebar's safe-area
+        // inset leaves a transparent strip above both panes (the traffic lights would float over
+        // bare window background instead of `sidebarGround`). The sidebar's own `topStrip`
+        // provides the clearance the safe area used to.
+        .ignoresSafeArea(.container, edges: .top)
         .animation(reduceMotion ? SweepMotion.crossfade : SweepMotion.layout, value: state.destination)
         .animation(reduceMotion ? SweepMotion.crossfade : SweepMotion.layout, value: sidebarCollapsed)
+        // Window title kept for Mission Control / the app switcher; nothing draws it on screen —
+        // the window itself is `.hiddenTitleBar` (SweepApp.swift) and the sidebar toggle lives in
+        // `SidebarView`'s top strip beside the traffic lights.
         .navigationTitle(state.destination.title)
-        .toolbar(removing: .title)
-        .toolbar {
-            ToolbarItem(placement: .navigation) {
-                Button {
-                    sidebarCollapsed.toggle()
-                } label: {
-                    Image(systemName: "sidebar.left")
-                }
-                .help(sidebarCollapsed ? "Expand the sidebar" : "Collapse the sidebar to icons")
-                .keyboardShortcut("s", modifiers: [.command, .control])
-            }
-        }
         .environment(state.scan)
         .environment(state.homebrew)
         .environment(\.sweepAnimationsEnabled, visibility.isVisible)
@@ -113,4 +122,21 @@ struct RootView: View {
             HomebrewScreen()
         }
     }
+}
+
+/// The sidebar's behind-window blur. `.sidebar` material, active state following the window —
+/// the standard Mac translucency, hosted here because SwiftUI exposes no material that blends
+/// behind the window rather than within it. Renders as a flat approximation in the offscreen
+/// snapshot harness (no window server behind it there), which is fine: the harness verifies
+/// layout, not desktop bleed-through.
+private struct SidebarMaterial: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.material = .sidebar
+        view.blendingMode = .behindWindow
+        view.state = .followsWindowActiveState
+        return view
+    }
+
+    func updateNSView(_ view: NSVisualEffectView, context: Context) {}
 }

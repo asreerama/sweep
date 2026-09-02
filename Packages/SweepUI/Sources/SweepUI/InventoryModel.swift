@@ -1,5 +1,21 @@
 import Foundation
 
+/// Case- and diacritic-folding for search, done ONCE per string at construction time — never per
+/// keystroke. The previous filter ran ICU substring search (`range(of:options:)`) over every
+/// item's title and detail on every keystroke in `body`; folding each side once and comparing
+/// with plain `String.contains` does the same match orders of magnitude cheaper, which is what
+/// keeps a filter over a 10,000-row inventory keystroke-instant.
+public enum SearchFold {
+    public static func fold(_ string: String) -> String {
+        string.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
+    }
+
+    /// One key covering several fields, so a row matches on any of them with a single `contains`.
+    public static func key(_ fields: String?...) -> String {
+        fold(fields.compactMap(\.self).joined(separator: "\n"))
+    }
+}
+
 /// Safety tier, as the UI speaks it.
 ///
 /// Deliberately not `SweepCore.Tier`: SweepUI depends on nothing, so every component here is
@@ -48,6 +64,9 @@ public struct InventoryItem: Identifiable, Hashable, Sendable {
     public let sizeValue: String
     public let sizeUnit: String
     public let tier: SweepTier
+    /// Folded title+detail, computed here for the same reason `sizeText` is: search runs per
+    /// keystroke over every row, so the folding cost belongs at aggregation time, not in `body`.
+    public let searchKey: String
 
     public init(
         id: String,
@@ -67,6 +86,7 @@ public struct InventoryItem: Identifiable, Hashable, Sendable {
         self.sizeUnit = parts.unit
         self.sizeText = "\(parts.value) \(parts.unit)"
         self.tier = tier
+        self.searchKey = SearchFold.key(title, detail)
     }
 }
 
@@ -85,6 +105,9 @@ public struct InventoryGroup: Identifiable, Hashable, Sendable {
     public let sizeUnit: String
     public let tier: SweepTier
 
+    /// Folded group title, same construction-time discipline as `InventoryItem.searchKey`.
+    public let searchKey: String
+
     public init(id: String, title: String, symbol: String = "folder", items: [InventoryItem]) {
         self.id = id
         self.title = title
@@ -97,6 +120,7 @@ public struct InventoryGroup: Identifiable, Hashable, Sendable {
         self.sizeUnit = parts.unit
         self.sizeText = "\(parts.value) \(parts.unit)"
         self.tier = items.map(\.tier).max() ?? .safe
+        self.searchKey = SearchFold.fold(title)
     }
 
     public var itemCount: Int { items.count }
@@ -104,15 +128,12 @@ public struct InventoryGroup: Identifiable, Hashable, Sendable {
     /// Case- and diacritic-insensitive filter over title and detail. Returns `nil` when nothing
     /// in the group survives, so callers can drop the section header too.
     public func filtered(by query: String) -> InventoryGroup? {
-        let trimmed = query.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else { return self }
-        if title.range(of: trimmed, options: [.caseInsensitive, .diacriticInsensitive]) != nil {
-            return self
-        }
-        let matches = items.filter { item in
-            item.title.range(of: trimmed, options: [.caseInsensitive, .diacriticInsensitive]) != nil
-                || (item.detail?.range(of: trimmed, options: [.caseInsensitive, .diacriticInsensitive]) != nil)
-        }
+        let folded = SearchFold.fold(query.trimmingCharacters(in: .whitespaces))
+        guard !folded.isEmpty else { return self }
+        if searchKey.contains(folded) { return self }
+        // Pre-folded keys + plain `contains`: the whole per-keystroke cost is one substring scan
+        // per row, no ICU, no allocation — see `SearchFold`'s doc for why this matters at scale.
+        let matches = items.filter { $0.searchKey.contains(folded) }
         guard !matches.isEmpty else { return nil }
         return InventoryGroup(id: id, title: title, symbol: symbol, items: matches)
     }

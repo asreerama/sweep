@@ -61,8 +61,11 @@ struct SmartScanScreen: View {
     /// The ring's diameter. The hero holds one confident size across scanning and results rather
     /// than collapsing to a small dot when the scan lands — a shrunk results ring read as "so small
     /// nobody can see it." `HeroByteCounter`'s `size` is computed from this constant.
-    private let scanRingDiameter: CGFloat = 240
-    private let resultsRingDiameter: CGFloat = 240
+    // Scale v3: the scanning hero owns an otherwise-empty pane and earns real presence; results
+    // keep a step down so the result list still gets the room. (An earlier 120 pt results ring
+    // was rejected as "so small nobody can see it" — never shrink below ~240.)
+    private let scanRingDiameter: CGFloat = 300
+    private let resultsRingDiameter: CGFloat = 260
 
     private enum ScanDisplayPhase: Equatable {
         case idle
@@ -328,7 +331,7 @@ struct SmartScanScreen: View {
         VStack(alignment: .leading, spacing: SweepTokens.s2) {
             HStack(spacing: SweepTokens.s2 - 2) {
                 Image(systemName: "exclamationmark.triangle")
-                    .font(.system(size: 10.5, weight: .medium))
+                    .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(SweepTokens.tierCaution)
                 Text("Needs review")
                     .font(SweepFont.sectionTitle)

@@ -23,10 +23,10 @@ public struct TierBadge: View {
                 .font(SweepFont.badge)
                 .tracking(0.5)
                 .foregroundStyle(tint)
-                .padding(.horizontal, 5)
-                .padding(.vertical, 2)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
                 .background(
-                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
                         .fill(tint.opacity(0.12))
                 )
                 .accessibilityLabel("\(tier.label) tier")

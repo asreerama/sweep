@@ -3,7 +3,7 @@ import SwiftUI
 
 /// One row of an inventory: icon, title, optional path, size, tier, optional checkbox.
 ///
-/// Two densities. `.standard` is the 34 pt list row that appears ten thousand times;
+/// Two densities. `.standard` is the 44 pt list row that appears ten thousand times;
 /// `.summary` is the taller row Smart Scan uses for its per-group totals. Both put the size in
 /// the same fixed-width `SizeColumn`, so numbers line up down the page and across groups
 /// without a `Table`, and both indent past the group header's disclosure chevron so a row's
@@ -120,13 +120,13 @@ public struct InventoryRow: View {
                     NSWorkspace.shared.activateFileViewerSelecting([revealURL])
                 } label: {
                     Image(systemName: "arrow.up.forward.app")
-                        .font(.system(size: 11.5, weight: .medium))
+                        .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(.secondary)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .help("Reveal in Finder")
-                .frame(width: 16)
+                .frame(width: 18)
                 .opacity(isHovering ? 1 : 0)
                 .allowsHitTesting(isHovering)
                 .accessibilityLabel("Reveal \(title) in Finder")
@@ -171,13 +171,13 @@ public struct InventoryRow: View {
     @ViewBuilder
     private var icon: some View {
         if emphasis == .summary {
-            ModuleIcon(symbol: symbol, diameter: 22)
+            ModuleIcon(symbol: symbol, diameter: 26)
         } else {
             Image(systemName: symbol)
-                .font(.system(size: 12, weight: .regular))
+                .font(.system(size: 13.5, weight: .regular))
                 .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(.secondary)
-                .frame(width: 17, alignment: .center)
+                .frame(width: 19, alignment: .center)
         }
     }
 }

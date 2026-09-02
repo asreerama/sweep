@@ -18,8 +18,11 @@ public struct CleanConfirmSheet: View {
     public var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: SweepTokens.s2) {
+                // Scale v3: `screenTitle` (28 pt) is sized for a content pane's header, not a
+                // 420 pt-wide sheet — `sectionTitle` reads as a confident dialog headline
+                // without dwarfing the byte figure and volume list underneath it.
                 Text("Clean \(SweepFormat.itemCount(summary.itemCount))?")
-                    .font(SweepFont.screenTitle)
+                    .font(SweepFont.sectionTitle)
                     .foregroundStyle(.primary)
                 HStack(spacing: SweepTokens.s2 - 2) {
                     Text(SweepFormat.bytes(summary.totalBytes))

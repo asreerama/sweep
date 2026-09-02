@@ -16,10 +16,10 @@ struct ModulePlaceholderScreen: View {
             Divider()
             VStack(spacing: SweepTokens.s3) {
                 Image(systemName: destination.symbol)
-                    .font(.system(size: 28, weight: .light))
+                    .font(.system(size: 32, weight: .light))
                     .foregroundStyle(.quaternary)
                 Text(arrival)
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.system(size: 14.5, weight: .medium))
                     .foregroundStyle(.secondary)
                 if destination.tier == .toolbox {
                     Footnote("Toolbox modules never auto-select and never feed Smart Scan.", symbol: "hand.raised")
@@ -83,7 +83,7 @@ struct ListStressScreen: View {
                 title: Destination.listStress.title,
                 subtitle: Destination.listStress.subtitle
             ) {
-                SweepSearchField(text: $query, prompt: "Filter paths").frame(width: 200)
+                SweepSearchField(text: $query, prompt: "Filter paths").frame(width: 240)
             }
             Divider()
             InventoryList(groups: visible, selection: $selection, expansion: $expansion)

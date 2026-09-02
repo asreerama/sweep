@@ -36,11 +36,11 @@ public struct SweepStatRow: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: SweepTokens.s2 - 2) {
                 Image(systemName: symbol)
-                    .font(.system(size: 10.5, weight: .regular))
+                    .font(.system(size: 12, weight: .regular))
                     .foregroundStyle(.secondary)
-                    .frame(width: 14, alignment: .center)
+                    .frame(width: 15, alignment: .center)
                 Text(title)
-                    .font(.system(size: 11.5, weight: .regular))
+                    .font(.system(size: 13, weight: .regular))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
                 Spacer(minLength: SweepTokens.s2)

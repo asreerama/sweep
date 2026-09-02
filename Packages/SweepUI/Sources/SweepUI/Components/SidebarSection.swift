@@ -3,18 +3,19 @@ import SwiftUI
 /// The sidebar's two tiers, expressed as one enum so the difference is a data choice rather
 /// than duplicated view code.
 ///
-/// Primary rows are 13 pt medium at full contrast on a 28 pt row. Toolbox rows are 12 pt
-/// regular in secondary at 24 pt, with a smaller glyph — advanced tools, quieter, out of the
-/// way, exactly the contract in PLAN §3: Toolbox modules never auto-select and never feed
-/// Smart Scan, and the sidebar should say so before the user clicks anything.
+/// Scale v3: primary rows are 15 pt medium on a 38 pt row with a 26 pt module chip — the
+/// System Settings register, not an Xcode inspector. Toolbox rows sit one visible step down
+/// (14 pt regular, 34 pt row, 22 pt chip): advanced tools, quieter, out of the way, exactly
+/// the contract in PLAN §3 — Toolbox modules never auto-select and never feed Smart Scan, and
+/// the sidebar should say so before the user clicks anything.
 public enum SidebarTier: Sendable {
     case primary
     case toolbox
 
     var font: Font { self == .primary ? SweepFont.sidebarPrimary : SweepFont.sidebarToolbox }
-    var rowHeight: CGFloat { self == .primary ? 32 : 28 }
-    var glyphSize: CGFloat { self == .primary ? 13.5 : 12 }
-    var glyphWidth: CGFloat { self == .primary ? 22 : 20 }
+    var rowHeight: CGFloat { self == .primary ? 38 : 34 }
+    var glyphSize: CGFloat { self == .primary ? 15 : 13.5 }
+    var glyphWidth: CGFloat { self == .primary ? 26 : 22 }
     var indent: CGFloat { self == .primary ? SweepTokens.s2 : SweepTokens.s2 }
 }
 
@@ -45,8 +46,8 @@ public struct SidebarSectionHeader: View {
 ///
 /// Selection is drawn rather than delegated to `List`, because the Toolbox block is pinned to
 /// the bottom of the sidebar outside the scrolling list and the two halves have to highlight
-/// identically. Uses `Color.accentColor` for the selected fill, matching every other AppKit
-/// sidebar on the machine.
+/// identically. The selected fill is `SweepTokens.accent` — the app's indigo, one palette
+/// everywhere — not the system accent.
 public struct SidebarRow: View {
     private let title: String
     private let symbol: String
@@ -104,24 +105,19 @@ public struct SidebarRow: View {
         .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
     }
 
-    /// Primary rows get the colored "System Settings" badge (PLAN §5 volume-raise); Toolbox
-    /// stays the plain hierarchical glyph it always was — advanced, quieter, out of the way, the
-    /// same contract that keeps Toolbox rows a size down and a shade back.
-    @ViewBuilder
+    /// Every row gets the colored "System Settings" chip (scale v3 — the whole sidebar carries
+    /// the module-hue identity now, Toolbox included). The tier contract survives in metrics,
+    /// not icon treatment: Toolbox chips are 4 pt smaller on a shorter row in a lighter face.
+    /// `ModuleIcon` itself falls back to a plain hierarchical glyph for symbols with no assigned
+    /// hue, so an unrecognized row degrades to exactly the old look.
     private var icon: some View {
-        if tier == .primary {
-            ModuleIcon(symbol: symbol, diameter: tier.glyphWidth)
-        } else {
-            Image(systemName: symbol)
-                .font(.system(size: tier.glyphSize, weight: .regular))
-                .symbolRenderingMode(.hierarchical)
-                .frame(width: tier.glyphWidth, alignment: .center)
-                .foregroundStyle(glyphStyle)
-        }
+        ModuleIcon(symbol: symbol, diameter: tier.glyphWidth)
     }
 
     private var background: AnyShapeStyle {
-        if isSelected { return AnyShapeStyle(Color.accentColor) }
+        // The app's own indigo, not `Color.accentColor`: system blue was the one surface still
+        // speaking AppKit in a palette that says indigo everywhere else (Scale v3 SaaS pass).
+        if isSelected { return AnyShapeStyle(SweepTokens.accent) }
         if isHovering { return AnyShapeStyle(.fill.quaternary) }
         return AnyShapeStyle(.clear)
     }
@@ -131,10 +127,6 @@ public struct SidebarRow: View {
         return AnyShapeStyle(tier == .primary ? HierarchicalShapeStyle.primary : HierarchicalShapeStyle.secondary)
     }
 
-    private var glyphStyle: AnyShapeStyle {
-        if isSelected { return AnyShapeStyle(.white) }
-        return AnyShapeStyle(tier == .primary ? HierarchicalShapeStyle.secondary : HierarchicalShapeStyle.tertiary)
-    }
 }
 
 #Preview("Sidebar") {

@@ -298,7 +298,7 @@ struct MemoryScreen: View {
                 .font(SweepFont.mono)
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
-                .frame(width: 90, alignment: .trailing)
+                .frame(width: 104, alignment: .trailing)
             if row.canQuit {
                 Button("Quit") { quit(row) }
                     .buttonStyle(.sweepQuiet)
@@ -319,7 +319,7 @@ struct MemoryScreen: View {
                 .frame(width: 18, height: 18)
         } else {
             Image(systemName: "apple.logo")
-                .font(.system(size: 13, weight: .regular))
+                .font(.system(size: 14.5, weight: .regular))
                 .foregroundStyle(.secondary)
                 .help("System process")
         }

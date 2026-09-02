@@ -100,6 +100,19 @@ final class HomebrewModel {
     /// the new snapshot in place; only the first-ever load shows the empty loading state.
     private(set) var isRefreshing = false
 
+    /// True while the concurrent per-package disk walk is still filling sizes in — the screen
+    /// shows a size placeholder instead of a misleading "0 B" for exactly this span.
+    private(set) var isSizing = false
+    /// True while `brew outdated` is still deciding which rows get an "Update available" chip.
+    private(set) var isCheckingUpdates = false
+
+    /// Staged load (user-reported "the Homebrew listing is still slow — PearClean gets it
+    /// instantly"): the old single-await refresh held the whole screen on a spinner for the
+    /// full ~4.6 s snapshot. Now the filesystem listing renders in milliseconds, then the two
+    /// slow reads — sizing and the update check — run concurrently and merge into the visible
+    /// snapshot as each lands. Known sizes and update info from the previous snapshot are
+    /// carried forward across a re-refresh so nothing on screen ever blanks or flickers back
+    /// to a placeholder.
     func refresh() async {
         guard gateway.isAvailable else {
             loadState = .unavailable
@@ -111,9 +124,10 @@ final class HomebrewModel {
         if !hadContent { loadState = .loading }
         isRefreshing = true
         defer { isRefreshing = false }
+
+        let listing: BrewSnapshot
         do {
-            snapshot = try await gateway.snapshot()
-            loadState = .loaded
+            listing = try await gateway.listing()
         } catch {
             // A background refresh of a listing the user is looking at must not blank it either:
             // keep the stale content, surface the failure in the console.
@@ -122,7 +136,78 @@ final class HomebrewModel {
             } else {
                 loadState = .failed(String(describing: error))
             }
+            return
         }
+        snapshot = Self.merged(listing: listing, carryingForwardFrom: snapshot)
+        loadState = .loaded
+
+        isSizing = true
+        isCheckingUpdates = true
+        async let pendingSizes = gateway.sizes(for: listing.packages)
+        async let pendingCheck = gateway.updateCheck()
+
+        snapshot = Self.applying(sizes: await pendingSizes, to: snapshot)
+        isSizing = false
+
+        do {
+            snapshot = Self.applying(check: try await pendingCheck, to: snapshot)
+        } catch {
+            appendConsole("Update check failed: \(String(describing: error))")
+        }
+        isCheckingUpdates = false
+    }
+
+    // MARK: - Staged-snapshot merging (internal, unit-tested directly)
+
+    /// Phase 1: the fresh filesystem listing over whatever the screen already knows. Sizes and
+    /// update info carry forward by package id so a re-refresh never regresses visible data —
+    /// with one guard: carried update info goes stale the moment the on-disk version catches up
+    /// to it, so a package upgraded seconds ago must not keep its "Update available" chip while
+    /// the fresh `brew outdated` is still in flight.
+    static func merged(listing: BrewSnapshot, carryingForwardFrom old: BrewSnapshot) -> BrewSnapshot {
+        let oldByID = Dictionary(old.packages.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let packages = listing.packages.map { fresh -> BrewPackage in
+            guard let prior = oldByID[fresh.id] else { return fresh }
+            let installed = fresh.installedVersion ?? prior.installedVersion
+            let latest = prior.latestVersion == installed ? nil : prior.latestVersion
+            return BrewPackage(
+                id: fresh.id, name: fresh.name, isCask: fresh.isCask,
+                installedVersion: installed, latestVersion: latest, sizeBytes: prior.sizeBytes
+            )
+        }
+        return BrewSnapshot(packages: packages, cache: old.cache, prefix: listing.prefix)
+    }
+
+    /// Phase 2: fresh disk sizes by package id; a package the walk did not size keeps what it had.
+    static func applying(sizes: [String: Int64], to snapshot: BrewSnapshot) -> BrewSnapshot {
+        BrewSnapshot(
+            packages: snapshot.packages.map { package in
+                guard let bytes = sizes[package.id] else { return package }
+                return BrewPackage(
+                    id: package.id, name: package.name, isCask: package.isCask,
+                    installedVersion: package.installedVersion, latestVersion: package.latestVersion,
+                    sizeBytes: bytes
+                )
+            },
+            cache: snapshot.cache, prefix: snapshot.prefix
+        )
+    }
+
+    /// Phase 3: `brew outdated`'s verdict replaces any carried update info wholesale — a package
+    /// absent from the response is up to date, clearing stale carried chips.
+    static func applying(check: BrewUpdateCheck, to snapshot: BrewSnapshot) -> BrewSnapshot {
+        let formulaByName = Dictionary(check.outdated.formulae.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
+        let caskByName = Dictionary(check.outdated.casks.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
+        let packages = snapshot.packages.map { package -> BrewPackage in
+            let entry = (package.isCask ? caskByName : formulaByName)[package.name]
+            return BrewPackage(
+                id: package.id, name: package.name, isCask: package.isCask,
+                installedVersion: entry?.installedVersions.last ?? package.installedVersion,
+                latestVersion: entry.map(\.currentVersion),
+                sizeBytes: package.sizeBytes
+            )
+        }
+        return BrewSnapshot(packages: packages, cache: check.cache ?? snapshot.cache, prefix: snapshot.prefix)
     }
 
     // MARK: - Preview-first actions

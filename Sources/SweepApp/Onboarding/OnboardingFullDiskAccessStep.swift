@@ -31,14 +31,14 @@ struct OnboardingFullDiskAccessStep: View {
                     .fill(SweepTokens.accent.opacity(0.14))
                     .frame(width: 72, height: 72)
                 Image(systemName: "lock.shield")
-                    .font(.system(size: 30, weight: .medium))
+                    .font(.system(size: 32, weight: .medium))
                     .symbolRenderingMode(.hierarchical)
                     .foregroundStyle(SweepTokens.accent)
             }
 
             VStack(spacing: SweepTokens.s2) {
                 Text("Full Disk Access")
-                    .font(.system(size: 22, weight: .semibold))
+                    .font(.system(size: 24, weight: .semibold))
                 Text("Some of what Sweep can find — Mail, Time Machine, other apps' containers — lives in places macOS protects by default.")
                     .font(SweepFont.screenSubtitle)
                     .foregroundStyle(.secondary)

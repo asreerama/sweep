@@ -150,26 +150,33 @@ public enum SweepTokens {
     public static let s6: CGFloat = 40
     public static let s7: CGFloat = 64
 
-    public static let cornerRadius: CGFloat = 10
+    public static let cornerRadius: CGFloat = 12
     /// Sidebar rows, inventory rows, badges.
-    public static let rowRadius: CGFloat = 6
+    public static let rowRadius: CGFloat = 8
 
     /// Fixed column widths for the size readout, so every row's digits line up across groups
     /// without a Table. Value right-aligned, unit left-aligned beside it. Sized for the raised
     /// mono ramp.
-    public static let sizeValueWidth: CGFloat = 52
-    public static let sizeUnitWidth: CGFloat = 28
-    public static let sizeColumnWidth: CGFloat = 84
+    public static let sizeValueWidth: CGFloat = 62
+    public static let sizeUnitWidth: CGFloat = 32
+    public static let sizeColumnWidth: CGFloat = 100
 
     /// Indent applied to inventory rows so their checkbox sits under the group header's,
     /// past the header's disclosure chevron.
-    public static let rowDisclosureIndent: CGFloat = 20
+    public static let rowDisclosureIndent: CGFloat = 22
 
-    public static let inventoryRowHeight: CGFloat = 38
-    public static let summaryRowHeight: CGFloat = 50
+    public static let inventoryRowHeight: CGFloat = 44
+    public static let summaryRowHeight: CGFloat = 58
+
+    /// The hero scan ring on module screens (System Junk, Developer, Large & Old Files): one
+    /// diameter everywhere a screen's scanning state IS the content. Scale v3: the old 96 pt
+    /// ring floated as a speck in a ~900 pt pane — a hero element earns hero size.
+    public static let moduleRingDiameter: CGFloat = 240
+    /// The byte counter inside a module scan ring, sized to the ring.
+    public static let moduleRingCounterSize: CGFloat = 44
 
     /// Oversized animated number (GB found / freed): the app's visual signature.
-    public static func heroNumberFont(size: CGFloat = 56) -> Font {
+    public static func heroNumberFont(size: CGFloat = 64) -> Font {
         .system(size: size, weight: .medium, design: .default)
     }
 
@@ -180,30 +187,32 @@ public enum SweepTokens {
 /// The type ramp. Hierarchy is carried by weight and size, never by color alone.
 /// SF Pro (system) for text, SF Mono for anything columnar or path-shaped.
 ///
-/// Raised one step across the board (2026-09-01, user-reported): the original ramp bottomed out at
-/// 9–11.5 pt, which read as unreadably small in daily use. Nothing in the app should set type
-/// below ~10 pt now. Row metrics in `SweepTokens` moved with it so nothing clips.
+/// Scale v3 (2026-09-01, user-directed rebuild): this app is a consumer Mac utility, not a dev
+/// tool — the ramp is sized for a person glancing at it from normal viewing distance, anchored
+/// on a 15 pt row body (comfortably above the 13 pt system default that reads as "inspector
+/// panel"). Raised twice from the original 9–11.5 pt ramp; nothing in the app sets type below
+/// 11 pt now. Row metrics in `SweepTokens` moved with it so nothing clips.
 public enum SweepFont {
     // Sidebar, two tiers.
-    public static let sidebarPrimary = Font.system(size: 13.5, weight: .medium)
-    public static let sidebarToolbox = Font.system(size: 13, weight: .regular)
-    public static let sidebarSection = Font.system(size: 10.5, weight: .semibold)
+    public static let sidebarPrimary = Font.system(size: 15, weight: .medium)
+    public static let sidebarToolbox = Font.system(size: 14, weight: .regular)
+    public static let sidebarSection = Font.system(size: 11.5, weight: .semibold)
 
     // Content pane.
-    public static let screenTitle = Font.system(size: 24, weight: .semibold)
-    public static let screenSubtitle = Font.system(size: 13, weight: .regular)
-    public static let sectionTitle = Font.system(size: 14, weight: .semibold)
+    public static let screenTitle = Font.system(size: 28, weight: .semibold)
+    public static let screenSubtitle = Font.system(size: 14.5, weight: .regular)
+    public static let sectionTitle = Font.system(size: 16, weight: .semibold)
 
     // Rows.
-    public static let rowTitle = Font.system(size: 13.5, weight: .regular)
-    public static let rowTitleEmphasis = Font.system(size: 14.5, weight: .medium)
-    public static let caption = Font.system(size: 12.5, weight: .regular)
-    public static let badge = Font.system(size: 10, weight: .semibold)
+    public static let rowTitle = Font.system(size: 15, weight: .regular)
+    public static let rowTitleEmphasis = Font.system(size: 16, weight: .medium)
+    public static let caption = Font.system(size: 13.5, weight: .regular)
+    public static let badge = Font.system(size: 11, weight: .semibold)
 
     // Data. Always paired with `.monospacedDigit()` at the call site where the glyphs must align.
-    public static let mono = Font.system(size: 12.5, weight: .regular, design: .monospaced)
-    public static let monoSmall = Font.system(size: 11.5, weight: .regular, design: .monospaced)
-    public static let monoEmphasis = Font.system(size: 14, weight: .medium, design: .monospaced)
+    public static let mono = Font.system(size: 13.5, weight: .regular, design: .monospaced)
+    public static let monoSmall = Font.system(size: 12.5, weight: .regular, design: .monospaced)
+    public static let monoEmphasis = Font.system(size: 15.5, weight: .medium, design: .monospaced)
 
     /// SF Pro Display is selected automatically at these sizes; tracking is tightened by hand.
     public static func hero(_ size: CGFloat) -> Font { .system(size: size, weight: .medium) }
