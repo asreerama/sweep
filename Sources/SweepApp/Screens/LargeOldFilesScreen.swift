@@ -420,13 +420,14 @@ final class LargeFilesModel {
 
     func dismissTrashReport() { trashReport = nil }
 
-    private struct TrashResult: Sendable {
+    /// Internal (not private) so `LargeFilesTrashTests` can exercise the identity discipline directly.
+    struct TrashResult: Sendable {
         let outcomes: [SweepUI.CleanItemOutcome]
         let trashedIDs: Set<String>
         let freedBytes: Int64
     }
 
-    private nonisolated static func performTrash(
+    nonisolated static func performTrash(
         items: [InventoryItem], identityByID: [String: FileIdentity?]
     ) -> TrashResult {
         var outcomes: [SweepUI.CleanItemOutcome] = []

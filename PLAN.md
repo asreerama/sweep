@@ -210,8 +210,31 @@ Verification rules, every agent:
 
 ## 6b. Known issues (open, discovered in build)
 
-- **macOS 26 titlebar corruption past ~32,767pt scroll content** (2^15 CG limit; reproduced with LazyVStack AND native List; evidence screenshots in scratchpad/final/). Fix at Gate 1: never render unbounded content height — groups collapsed beyond N rows, "Show all" paginates within group. Also better UX at scale. Owner: Gate 1 wave.
-- **Smart Scan summary currently includes caution-tier groups** (cosmetic while read-only; contract says Smart Scan = safe tier only). Gate 1 wiring must filter selection to `safe` before any clean executes.
+- **macOS 26 titlebar corruption past ~32,767pt scroll content** (2^15 CG limit; reproduced with LazyVStack AND native List; evidence screenshots in scratchpad/final/). RESOLVED at Gate 1: bounded expansion (`InventoryExpansion`/`InventoryBudget` — groups collapsed beyond N rows, "Show all" paginates within group).
+- **Smart Scan summary currently includes caution-tier groups** — RESOLVED: `smartScanCleanRequest()` builds from `safeSummaryGroups` only; caution findings render in the structurally separate "Needs review" block and never join the clean.
+
+## 6c. Status log (2026-09-01, overnight full-PLAN wave)
+
+- **Gates:** Gate 1 (trash-only clean) OPEN. Gate U (uninstall execution) OPEN — three Codex
+  adversarial rounds, final SAFE verdict. Gate 2 (direct deletion) CLOSED — Codex readiness
+  review commissioned this wave; flips only on a SAFE verdict with fixes landed.
+- **Modules live:** Smart Scan (safe-tier clean + orphan "Also found" card + Empty Trash flow),
+  System Junk (category-scoped, code-sign-clone detector wired end to end), Large & Old Files
+  (streaming results, live identity-checked Move to Trash), Memory (app-aggregated quit,
+  measured pressure gauge), Maintenance, Startup Items, Uninstaller (live removal, itemized
+  identity-bound consent, Dock droplet, SmartDelete watcher), Homebrew, Developer, App Lipo,
+  Plugins. Packages + File Search hub modules in build this same wave.
+- **Empty Trash:** shipped per module-1 contract — identities snapshotted at review, late
+  additions skipped and counted, per-item refusal on identity change, double confirmation,
+  `removeItem` only within the reviewed snapshot. Its own service (`EmptyTrashService`), not
+  the shared clean pipeline.
+- **Budgets (measured on this machine, release build):** app bundle 11 MB (< 12 MB budget,
+  binary 9.2 MB). Idle CPU 0.0% (< 0.5% budget). Idle RSS ~126 MB with or without the window —
+  the 50 MB menubar budget is MISSED by the full app, so per the module-7 decision gate the
+  menubar stays in-app for v1.0 and the minimal split menubar login item is the v1.1 path.
+  Cold-launch-to-first-frame not yet instrumented.
+- **Design:** scale v4 sidebar (32 pt marquee chips, 80 pt launcher rail), glyph set v2 (modern
+  register), layout contracts (atoms never compress, panes own floors, window min 980).
 
 ## 7. Risks
 
