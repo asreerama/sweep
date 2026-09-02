@@ -17,29 +17,33 @@ struct SidebarView: View {
     @Binding var isCollapsed: Bool
 
     var body: some View {
-        // No `ScrollView`: at the 600 pt minimum window height the whole IA fits with room to
-        // spare, and a `Spacer` is what actually pins Toolbox to the bottom. If the Toolbox
-        // grows past the fold (Packages, Plugins, Lipo, File Search are queued for v1.1) the
-        // primary block gets a scroll view and Toolbox stays a bottom inset.
+        // The contingency this file always planned for arrived: with Lipo, Plugins and
+        // Packages the Toolbox outgrew the 600 pt minimum window, so the primary block scrolls
+        // and Toolbox stays a pinned bottom inset. At normal window heights nothing actually
+        // scrolls — the ScrollView is taller than its content and the layout reads identically.
         VStack(alignment: .leading, spacing: 0) {
             topStrip
 
-            ForEach(SidebarGroup.primary) { group in
-                if isCollapsed {
-                    // Section headers carry no information an icon rail can use; a small gap
-                    // keeps the grouping legible without labels.
-                    Color.clear.frame(height: SweepTokens.s2)
-                } else if let title = group.title {
-                    SidebarSectionHeader(title)
-                } else {
-                    Color.clear.frame(height: SweepTokens.s2)
-                }
-                ForEach(group.destinations) { destination in
-                    row(destination)
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(SidebarGroup.primary) { group in
+                        if isCollapsed {
+                            // Section headers carry no information an icon rail can use; a
+                            // small gap keeps the grouping legible without labels.
+                            Color.clear.frame(height: SweepTokens.s2)
+                        } else if let title = group.title {
+                            SidebarSectionHeader(title)
+                        } else {
+                            Color.clear.frame(height: SweepTokens.s2)
+                        }
+                        ForEach(group.destinations) { destination in
+                            row(destination)
+                        }
+                    }
                 }
             }
 
-            Spacer(minLength: SweepTokens.s5)
+            Spacer(minLength: SweepTokens.s3)
 
             toolbox
         }

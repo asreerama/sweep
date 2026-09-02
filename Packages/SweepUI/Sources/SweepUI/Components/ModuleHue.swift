@@ -35,6 +35,8 @@ public enum SweepModuleHue {
         case "mug": Color(hex: 0xB08968)                                           // Homebrew — muted tan
         case "scissors": Color(hex: 0x4F9DB6)                                      // App Lipo — muted petrol
         case "puzzlepiece.extension": Color(hex: 0x9AA25C)                         // Plugins — muted olive
+        case "cube": Color(hex: 0x8FA0B8)                                          // Packages — muted steel
+        case "text.magnifyingglass": Color(hex: 0x6BAF8D)                          // File Search — muted jade
         default: nil
         }
     }

@@ -131,6 +131,10 @@ struct RootView: View {
             LipoScreen()
         case .plugins:
             PluginsScreen()
+        case .packages:
+            PackagesScreen()
+        case .fileSearch:
+            FileSearchScreen()
         }
     }
 }
