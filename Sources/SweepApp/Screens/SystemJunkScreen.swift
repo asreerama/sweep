@@ -63,8 +63,8 @@ struct SystemJunkScreen: View {
         case .idle:
             InventoryEmptyState(
                 symbol: "trash",
-                title: "Ready when you are",
-                message: "Run a scan to see everything the rule catalog can find in your caches, logs and developer roots."
+                title: "Ready to scan",
+                message: "Run a scan to see what Sweep can find in your caches, logs and developer folders."
             )
         case .scanning:
             scanningState
@@ -76,7 +76,7 @@ struct SystemJunkScreen: View {
                     symbol: query.isEmpty ? "checkmark.circle" : "magnifyingglass",
                     title: query.isEmpty ? "Nothing here needs cleaning" : "No matches",
                     message: query.isEmpty
-                        ? "No rule claimed anything under the roots this build can read."
+                        ? "Nothing in the folders Sweep can read needs cleaning."
                         : "Nothing in the results matches \u{201C}\(query)\u{201D}."
                 )
             } else {
@@ -106,10 +106,10 @@ struct SystemJunkScreen: View {
                 Button("Clean") { startClean() }
                     .buttonStyle(.sweepPrimary(minWidth: 108))
                     .disabled(!CleanAdapter.isEnabled || scan.selection.selectedCount(in: scan.systemJunkRuleGroups) == 0)
-                    .help(CleanAdapter.isEnabled ? "Move the selected items to Trash" : "Cleaning arrives at Gate 1")
-                    .accessibilityHint(CleanAdapter.isEnabled ? "" : "Disabled. Cleaning arrives at Gate 1.")
+                    .help(CleanAdapter.isEnabled ? "Move the selected items to Trash" : "Cleaning is not available in this build")
+                    .accessibilityHint(CleanAdapter.isEnabled ? "" : "Disabled. Cleaning is not available in this build.")
                 if !CleanAdapter.isEnabled {
-                    GateNotice("Cleaning arrives at Gate 1")
+                    GateNotice("Cleaning is not available in this build")
                 }
                 Spacer(minLength: SweepTokens.s3)
                 if scan.phase == .results, !scan.systemJunkRuleGroups.isEmpty {

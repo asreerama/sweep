@@ -132,26 +132,37 @@ struct InventoryShowMoreRow: View {
     }
 }
 
-/// Shown in place of the list when a scan found nothing, or a filter matched nothing.
+/// Shown in place of the list when a scan found nothing, a filter matched nothing, or work is
+/// still running. Pass `isBusy: true` for the last case: a title ending in an ellipsis with no
+/// moving affordance under it is indistinguishable from a wedged screen.
 public struct InventoryEmptyState: View {
     private let symbol: String
     private let title: String
     private let message: String?
+    private let isBusy: Bool
 
-    public init(symbol: String, title: String, message: String? = nil) {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    public init(symbol: String, title: String, message: String? = nil, isBusy: Bool = false) {
         self.symbol = symbol
         self.title = title
         self.message = message
+        self.isBusy = isBusy
     }
 
     public var body: some View {
         VStack(spacing: SweepTokens.s3) {
             Image(systemName: symbol)
                 .font(.system(size: 28, weight: .light))
-                .foregroundStyle(.quaternary)
+                .foregroundStyle(isBusy ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.quaternary))
+                .symbolEffect(.pulse, options: .repeating, isActive: isBusy && !reduceMotion)
             Text(title)
                 .font(.system(size: 15, weight: .medium))
                 .foregroundStyle(.secondary)
+            if isBusy {
+                IndeterminateSweepBar()
+                    .padding(.top, 2)
+            }
             if let message {
                 Text(message)
                     .font(SweepFont.caption)
@@ -161,6 +172,47 @@ public struct InventoryEmptyState: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(isBusy ? .updatesFrequently : [])
+    }
+}
+
+/// The "still working" affordance under a busy empty state: a highlight travelling the width of a
+/// hairline track. Deliberately indeterminate — the scans behind these states have no countable
+/// total, and a determinate bar filling toward an invented 100% would be a lie.
+private struct IndeterminateSweepBar: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var advanced = false
+
+    private let trackWidth: CGFloat = 128
+    private let thickness: CGFloat = 3
+    private var highlightWidth: CGFloat { reduceMotion ? trackWidth : trackWidth * 0.36 }
+
+    var body: some View {
+        Capsule()
+            .fill(.quaternary)
+            .frame(width: trackWidth, height: thickness)
+            .overlay(alignment: .leading) {
+                Capsule()
+                    .fill(.tertiary)
+                    // Reduce Motion keeps the signal but drops the travel: the full-width bar
+                    // breathes in place instead of sliding.
+                    .frame(width: highlightWidth, height: thickness)
+                    .offset(x: reduceMotion ? 0 : (advanced ? trackWidth - highlightWidth : 0))
+                    .opacity(reduceMotion ? (advanced ? 0.85 : 0.2) : 1)
+            }
+            .clipShape(Capsule())
+            .animation(cycle, value: advanced)
+            .onAppear { advanced = true }
+            .onDisappear { advanced = false }
+            .accessibilityHidden(true)
+    }
+
+    private var cycle: Animation {
+        let base: Animation = reduceMotion
+            ? .easeInOut(duration: 1.1)
+            : .easeInOut(duration: SweepMotion.sweepPeriod * 0.75)
+        return base.repeatForever(autoreverses: true)
     }
 }
 

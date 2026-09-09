@@ -27,7 +27,7 @@ struct OnboardingWelcomeStep: View {
             VStack(spacing: SweepTokens.s2) {
                 Text("Welcome to Sweep")
                     .font(.system(size: 24, weight: .semibold))
-                Text("An instrument for keeping your Mac clean, not a black box that guesses.")
+                Text("A precise tool for keeping your Mac clean, with every finding shown before anything moves.")
                     .font(SweepFont.screenSubtitle)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -41,7 +41,7 @@ struct OnboardingWelcomeStep: View {
             OnboardingFactRow(
                 symbol: "hand.raised",
                 title: "Never your files",
-                detail: "Documents, Photos, and anything synced to iCloud or another cloud drive are outside every rule Sweep scans with — not hidden behind a setting, never touched at all."
+                detail: "Documents, Photos, and anything synced to iCloud or another cloud drive sit outside every rule Sweep scans with. They are never read and never touched."
             )
             OnboardingFactRow(
                 symbol: "eye",

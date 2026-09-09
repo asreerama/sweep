@@ -94,7 +94,7 @@ struct ListStressScreen: View {
                     Footnote(
                         "\(SweepFormat.count(InventoryAggregate.totalItems(groups))) rows total, "
                             + "\(SweepFormat.count(renderedRowCount)) rendered across \(SweepFormat.count(groups.count)) sections "
-                            + "(budget \(InventoryBudget.maxVisibleRows)) — PLAN §6b.",
+                            + "(budget \(InventoryBudget.maxVisibleRows)).",
                         symbol: "speedometer"
                     )
                     Spacer()

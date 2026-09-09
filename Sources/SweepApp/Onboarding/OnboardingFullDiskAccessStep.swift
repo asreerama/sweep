@@ -39,7 +39,7 @@ struct OnboardingFullDiskAccessStep: View {
             VStack(spacing: SweepTokens.s2) {
                 Text("Full Disk Access")
                     .font(.system(size: 24, weight: .semibold))
-                Text("Some of what Sweep can find — Mail, Time Machine, other apps' containers — lives in places macOS protects by default.")
+                Text("Some of what Sweep can find, such as Mail, Time Machine and other apps\u{2019} containers, lives in places macOS protects by default.")
                     .font(SweepFont.screenSubtitle)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -50,7 +50,7 @@ struct OnboardingFullDiskAccessStep: View {
             // The honest line (PLAN §4, verbatim requirement): granting this is not a
             // precondition to use Sweep at all.
             Footnote(
-                "Safe modules work without this. Granting it just lets Sweep see everything, not just what any app can already read.",
+                "Safe modules work without this. Granting it lets Sweep see everything, not only what any app can already read.",
                 symbol: "checkmark.shield"
             )
             .frame(maxWidth: 420)
@@ -70,7 +70,7 @@ struct OnboardingFullDiskAccessStep: View {
                 // Manual fallback (PLAN §4): shown unconditionally, since a broken deep link
                 // fails open — this process has no reliable way to detect that System Settings
                 // landed on the wrong pane, or failed to open at all.
-                Text("If that doesn't open the right pane: System Settings \u{2192} Privacy & Security \u{2192} Full Disk Access, then enable Sweep.")
+                Text("If that doesn\u{2019}t open the right pane: System Settings \u{2192} Privacy & Security \u{2192} Full Disk Access, then enable Sweep.")
                     .font(SweepFont.caption)
                     .foregroundStyle(.tertiary)
                     .multilineTextAlignment(.center)

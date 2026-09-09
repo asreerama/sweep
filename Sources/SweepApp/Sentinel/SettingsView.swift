@@ -12,7 +12,7 @@ struct SettingsView: View {
         Form {
             Section {
                 Toggle("Offer to clean up leftovers when an app is moved to the Trash", isOn: $settings.isEnabled)
-                Text("Watches \u{7E}/.Trash. When a .app lands there, Sweep shows a quiet panel offering to open the Uninstaller with that app's leftovers ready to review \u{2014} nothing is ever deleted from the offer itself.")
+                Text("Watches \u{7E}/.Trash. When an app lands there, Sweep shows a panel offering to open the Uninstaller with that app\u{2019}s leftovers ready to review. Nothing is ever deleted from the offer itself.")
                     .font(SweepFont.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -22,7 +22,7 @@ struct SettingsView: View {
 
             Section {
                 Toggle("Run the menu bar app on its own (separate, lighter-weight process)", isOn: $menuBarLoginItem.isEnabled)
-                Text("Sweep's menu bar stats normally run inside Sweep itself. Turning this on registers a small standalone menu bar app that launches at login and keeps showing stats even when Sweep is closed \u{2014} Sweep's own menu bar item steps aside automatically while it's running. Status: \(menuBarLoginItem.statusDescription).")
+                Text("Sweep\u{2019}s menu bar stats normally run inside Sweep itself. Turning this on registers a small standalone menu bar app that launches at login and keeps showing stats even when Sweep is closed. Sweep\u{2019}s own menu bar item steps aside automatically while it is running. Status: \(menuBarLoginItem.statusDescription).")
                     .font(SweepFont.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

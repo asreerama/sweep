@@ -65,7 +65,7 @@ struct UninstallerScreen: View {
     @ViewBuilder
     private var appList: some View {
         if model.isLoadingApps {
-            InventoryEmptyState(symbol: "xmark.bin", title: "Reading installed apps\u{2026}")
+            InventoryEmptyState(symbol: "xmark.bin", title: "Reading installed apps\u{2026}", isBusy: true)
         } else if model.visibleApps.isEmpty {
             InventoryEmptyState(
                 symbol: model.searchQuery.isEmpty ? "xmark.bin" : "magnifyingglass",
@@ -160,7 +160,7 @@ struct UninstallerScreen: View {
     private func leftoverBody(emptyMessage: String) -> some View {
         Group {
             if model.isLoadingLeftovers {
-                InventoryEmptyState(symbol: "magnifyingglass", title: "Looking for leftovers\u{2026}")
+                InventoryEmptyState(symbol: "magnifyingglass", title: "Looking for leftovers\u{2026}", isBusy: true)
             } else if model.leftoverGroups.isEmpty {
                 InventoryEmptyState(symbol: "checkmark.circle", title: "No leftovers found", message: emptyMessage)
             } else {

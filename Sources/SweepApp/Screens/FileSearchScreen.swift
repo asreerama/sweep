@@ -16,7 +16,7 @@ struct FileSearchScreen: View {
         VStack(spacing: 0) {
             ScreenHeader(
                 title: "File Search",
-                subtitle: "Find any file by name, sorted by what it costs you."
+                subtitle: "Find any file by name, sorted by size."
             ) {
                 HStack(spacing: SweepTokens.s2) {
                     if model.phase == .searching {
@@ -84,7 +84,7 @@ struct FileSearchScreen: View {
             idleState
         } else if model.entries.isEmpty {
             if model.phase == .searching {
-                InventoryEmptyState(symbol: "magnifyingglass", title: "Searching\u{2026}")
+                InventoryEmptyState(symbol: "magnifyingglass", title: "Searching\u{2026}", isBusy: true)
             } else {
                 InventoryEmptyState(
                     symbol: "questionmark.folder",

@@ -129,7 +129,7 @@ struct PackagesScreen: View {
     @ViewBuilder
     private var content: some View {
         if !model.hasLoaded {
-            InventoryEmptyState(symbol: "shippingbox", title: "Reading installer receipts\u{2026}")
+            InventoryEmptyState(symbol: "shippingbox", title: "Reading installer receipts\u{2026}", isBusy: true)
         } else if model.vendorGroups.isEmpty {
             InventoryEmptyState(symbol: "checkmark.circle", title: "No third-party installer receipts found.")
         } else if filteredGroups.isEmpty {
@@ -203,7 +203,7 @@ struct PackagesScreen: View {
             Divider()
             HStack(spacing: SweepTokens.s3) {
                 Footnote(
-                    "Read-only. Forgetting or uninstalling by receipt is destructive and arrives behind its own gate.",
+                    "Read-only. Forgetting or uninstalling by receipt is destructive and is not available in this build.",
                     symbol: "lock"
                 )
                 Spacer(minLength: SweepTokens.s3)

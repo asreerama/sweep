@@ -69,9 +69,9 @@ struct DeveloperScreen: View {
         case .idle:
             InventoryEmptyState(
                 symbol: "hammer",
-                title: "Ready when you are",
-                message: "Scans your installed developer tools — Xcode-adjacent caches live in "
-                    + "System Junk; this is npm, JetBrains, editors, Gradle and friends."
+                title: "Ready to scan",
+                message: "Scans caches left by your installed developer tools: npm, JetBrains, "
+                    + "editors, Gradle and others. Xcode-adjacent caches appear in System Junk."
             )
         case .scanning:
             scanningState
@@ -83,7 +83,7 @@ struct DeveloperScreen: View {
                     symbol: query.isEmpty ? "checkmark.circle" : "magnifyingglass",
                     title: query.isEmpty ? "No developer caches found" : "No matches",
                     message: query.isEmpty
-                        ? "Nothing under the developer tools this build knows about needs cleaning."
+                        ? "None of the developer tools Sweep supports have caches that need cleaning."
                         : "Nothing in the results matches \u{201C}\(query)\u{201D}."
                 )
             } else {
@@ -113,10 +113,10 @@ struct DeveloperScreen: View {
                 Button("Clean") { startClean() }
                     .buttonStyle(.sweepPrimary(minWidth: 108))
                     .disabled(!CleanAdapter.isEnabled || model.selection.selectedCount(in: model.environmentGroups) == 0)
-                    .help(CleanAdapter.isEnabled ? "Move the selected items to Trash" : "Cleaning arrives at Gate 1")
-                    .accessibilityHint(CleanAdapter.isEnabled ? "" : "Disabled. Cleaning arrives at Gate 1.")
+                    .help(CleanAdapter.isEnabled ? "Move the selected items to Trash" : "Cleaning is not available in this build")
+                    .accessibilityHint(CleanAdapter.isEnabled ? "" : "Disabled. Cleaning is not available in this build.")
                 if !CleanAdapter.isEnabled {
-                    GateNotice("Cleaning arrives at Gate 1")
+                    GateNotice("Cleaning is not available in this build")
                 }
                 Spacer(minLength: SweepTokens.s3)
                 if model.phase == .results, !model.environmentGroups.isEmpty {

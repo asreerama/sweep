@@ -323,7 +323,7 @@ struct LipoScreen: View {
         case .idle, .scanning:
             // `.idle` lasts only until the `.task` below fires, so both phases read as the scan
             // already being underway — there is no "No scan yet" state a user can reach.
-            InventoryEmptyState(symbol: "square.stack.3d.up", title: "Scanning installed apps\u{2026}")
+            InventoryEmptyState(symbol: "square.stack.3d.up", title: "Scanning installed apps\u{2026}", isBusy: true)
         case .results:
             if model.rows.isEmpty {
                 InventoryEmptyState(

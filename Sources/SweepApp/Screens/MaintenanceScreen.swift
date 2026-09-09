@@ -179,13 +179,22 @@ struct MaintenanceScreen: View {
                 .frame(maxWidth: 220, alignment: .leading)
             }
         case .thinSnapshots:
-            Picker("Urgency", selection: $model.selectedUrgency) {
-                ForEach(MaintenanceUrgencyLevel.allCases) { level in
-                    Text(level.label).tag(level.rawValue)
+            // The segmented style drops the Picker's own label into the leading edge of the row,
+            // where a narrow card wraps it one character per line. Hide it and carry the name in
+            // a caption above the control instead.
+            VStack(alignment: .leading, spacing: SweepTokens.s1) {
+                Text("Urgency")
+                    .font(SweepFont.caption)
+                    .foregroundStyle(.secondary)
+                Picker("Urgency", selection: $model.selectedUrgency) {
+                    ForEach(MaintenanceUrgencyLevel.allCases) { level in
+                        Text(level.label).tag(level.rawValue)
+                    }
                 }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(maxWidth: 320)
             }
-            .pickerStyle(.segmented)
-            .frame(maxWidth: 320)
         }
     }
 

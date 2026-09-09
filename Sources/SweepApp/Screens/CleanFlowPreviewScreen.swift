@@ -83,7 +83,7 @@ struct CleanFlowPreviewScreen: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(SweepTokens.ground)
             Footnote(
-                "Debug-only: the real flow starts from Smart Scan / System Junk once CleanAdapter.isEnabled flips.",
+                "Debug only: the real flow starts from Smart Scan or System Junk once live cleaning is enabled.",
                 symbol: "hand.raised"
             )
             .padding(SweepTokens.s4)
@@ -116,7 +116,7 @@ struct CleanFlowPreviewScreen: View {
                     InventoryEmptyState(
                         symbol: "exclamationmark.triangle",
                         title: "Clean could not finish",
-                        message: "Gate 1 has not been opened in this build; live cleaning is disabled."
+                        message: "Live cleaning is disabled in this build."
                     )
                     Button("Done") {}.buttonStyle(.sweepQuiet)
                 }

@@ -142,7 +142,7 @@ struct PluginsScreen: View {
     @ViewBuilder
     private var content: some View {
         if !model.hasLoaded {
-            InventoryEmptyState(symbol: "puzzlepiece.extension", title: "Reading plug-in folders\u{2026}")
+            InventoryEmptyState(symbol: "puzzlepiece.extension", title: "Reading plug-in folders\u{2026}", isBusy: true)
         } else if model.groups.isEmpty {
             InventoryEmptyState(symbol: "checkmark.circle", title: "No third-party plug-ins found.")
         } else {

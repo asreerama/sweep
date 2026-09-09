@@ -40,6 +40,71 @@ public struct SweepPrimaryButtonStyle: ButtonStyle {
     }
 }
 
+/// The hero CTA — one per app, Smart Scan's Scan button. Same family as `sweepPrimary` but sized
+/// and lit for a screen whose entire job is this one action: the ring-arc gradient as its fill,
+/// an accent-tinted glow that deepens on hover, a gentle hover lift. The gradient is weighted
+/// toward `accent` (violet only reaches the trailing corner) so the white label keeps contrast
+/// across both appearances.
+public struct SweepHeroButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+
+    public init() {}
+
+    public func makeBody(configuration: Configuration) -> some View {
+        HeroBody(configuration: configuration, isEnabled: isEnabled)
+    }
+
+    /// Inner view rather than logic in `makeBody`: hover is per-instance `@State`, which a
+    /// `ButtonStyle` struct cannot hold itself.
+    private struct HeroBody: View {
+        let configuration: Configuration
+        let isEnabled: Bool
+        @State private var hovering = false
+        /// Tracked so appearance flips re-resolve the adaptive gradient — `SweepTokens.adaptive`
+        /// colors are captured at body-run time, and this body otherwise only re-runs on
+        /// hover/press.
+        @Environment(\.colorScheme) private var colorScheme
+
+        var body: some View {
+            configuration.label
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(isEnabled ? .white : Color.secondary)
+                .padding(.horizontal, SweepTokens.s5)
+                .frame(minWidth: 188)
+                .frame(height: 44)
+                .background {
+                    RoundedRectangle(cornerRadius: SweepTokens.cornerRadius, style: .continuous)
+                        .fill(isEnabled
+                            ? AnyShapeStyle(LinearGradient(
+                                stops: [
+                                    .init(color: SweepTokens.accent, location: 0),
+                                    .init(color: SweepTokens.accent, location: 0.45),
+                                    .init(color: SweepTokens.accentViolet, location: 1.35),
+                                ],
+                                startPoint: .topLeading, endPoint: .bottomTrailing
+                            ))
+                            : AnyShapeStyle(.fill.tertiary))
+                }
+                .overlay {
+                    // Hairline light rim, the same glassy read as `ModuleIcon`'s chips.
+                    RoundedRectangle(cornerRadius: SweepTokens.cornerRadius, style: .continuous)
+                        .strokeBorder(.white.opacity(isEnabled ? 0.22 : 0), lineWidth: 1)
+                }
+                .shadow(
+                    color: isEnabled
+                        ? SweepTokens.accent.opacity((hovering ? 0.45 : 0.26) * (colorScheme == .dark ? 1.3 : 1))
+                        : .clear,
+                    radius: hovering ? 16 : 10, y: 4
+                )
+                .scaleEffect(configuration.isPressed ? 0.97 : (hovering ? 1.02 : 1))
+                .animation(SweepMotion.row, value: configuration.isPressed)
+                .animation(SweepMotion.row, value: hovering)
+                .onHover { hovering = $0 && isEnabled }
+                .contentShape(Rectangle())
+        }
+    }
+}
+
 /// Everything else. Bordered, neutral, no tint.
 public struct SweepQuietButtonStyle: ButtonStyle {
     private let minWidth: CGFloat
@@ -79,6 +144,10 @@ extension ButtonStyle where Self == SweepPrimaryButtonStyle {
 
 extension ButtonStyle where Self == SweepQuietButtonStyle {
     public static var sweepQuiet: SweepQuietButtonStyle { SweepQuietButtonStyle() }
+}
+
+extension ButtonStyle where Self == SweepHeroButtonStyle {
+    public static var sweepHero: SweepHeroButtonStyle { SweepHeroButtonStyle() }
 }
 
 // MARK: - Screen furniture

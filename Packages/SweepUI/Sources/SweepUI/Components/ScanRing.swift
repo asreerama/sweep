@@ -31,6 +31,9 @@ extension EnvironmentValues {
 /// - **Indeterminate** (`progress` nil — the smaller secondary-screen scan indicators): the
 ///   original turning conic comet, kept for callers with no fraction to show.
 ///
+/// A determinate caller can additionally pass `idleFraction` to make the *idle* ring a dimmed
+/// gauge (Smart Scan: the home volume's used fraction) instead of an empty track.
+///
 /// Both land the same way: on completion the arc closes to a full circle and the ring gives one
 /// settle-and-release pulse. Under Reduce Motion nothing turns or scales.
 public struct ScanRing<Content: View>: View {
@@ -39,6 +42,11 @@ public struct ScanRing<Content: View>: View {
     /// A 0…1 scan fraction, or `nil` for an indeterminate spinner. Only ever grows while scanning;
     /// `state == .complete` overrides it to a full ring regardless.
     private let progress: Double?
+    /// A 0…1 fraction the *idle* ring shows as a dimmed gauge arc — Smart Scan passes the home
+    /// volume's used fraction, so the ring reads as a live disk gauge before a scan ever runs
+    /// instead of an empty track. Drawn at reduced opacity so a mostly-full disk is never
+    /// mistaken for a scan that already completed. `nil` keeps the classic empty idle ring.
+    private let idleFraction: Double?
     private let content: Content
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -57,11 +65,13 @@ public struct ScanRing<Content: View>: View {
         state: ScanRingState,
         diameter: CGFloat = 240,
         progress: Double? = nil,
+        idleFraction: Double? = nil,
         @ViewBuilder content: () -> Content
     ) {
         self.state = state
         self.diameter = diameter
         self.progress = progress
+        self.idleFraction = idleFraction
         self.content = content()
     }
 
@@ -70,13 +80,15 @@ public struct ScanRing<Content: View>: View {
     private var trackWidth: CGFloat { max(3, diameter * 0.075) }
     private var sweepWidth: CGFloat { max(3, diameter * 0.075) }
 
-    private var isDeterminate: Bool { progress != nil }
+    private var isDeterminate: Bool { progress != nil || idleFraction != nil }
 
     /// How much of the ring the determinate arc draws. `.complete` always shows a full circle so a
-    /// scan whose fraction lands a hair short of 1 still closes cleanly.
+    /// scan whose fraction lands a hair short of 1 still closes cleanly. Idle shows the caller's
+    /// gauge fraction, if any — starting a scan animates it back to 0 (the gauge rewinds) before
+    /// the progress arc grows, so the two readings never blend into one ambiguous arc.
     private var shownFraction: CGFloat {
         switch state {
-        case .idle: 0
+        case .idle: CGFloat(min(max(idleFraction ?? 0, 0), 1))
         case .complete: 1
         case .scanning: CGFloat(min(max(progress ?? 0, 0), 1))
         }
@@ -137,8 +149,17 @@ public struct ScanRing<Content: View>: View {
                 .stroke(SweepTokens.ringArc, style: StrokeStyle(lineWidth: sweepWidth, lineCap: .round))
                 .rotationEffect(.degrees(-90))
         }
+        // The idle gauge is a quieter voice than live scan progress — same gradient family,
+        // stepped-down presence, so "how full the disk is" never reads as "a scan is running."
+        .opacity(state == .idle ? 0.5 : 1)
         .scaleEffect(pulseScale)
-        .animation(reduceMotion ? SweepMotion.crossfade : .easeOut(duration: 0.32), value: shownFraction)
+        // Idle draw-in (the gauge sweeping out to the disk's fraction when stats land) takes the
+        // settled-ring trim spring; live scan ticks keep the short ease so the arc tracks them
+        // without lag.
+        .animation(
+            reduceMotion ? SweepMotion.crossfade : (state == .idle ? SweepMotion.ringTrim : .easeOut(duration: 0.32)),
+            value: shownFraction
+        )
     }
 
     /// Conic comet: transparent for most of the turn, ramping to full accent at its head.

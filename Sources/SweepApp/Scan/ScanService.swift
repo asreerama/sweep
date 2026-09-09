@@ -583,9 +583,9 @@ enum ScanService {
         case .systemJunk: "Caches, logs and crash reports quietly piling up in the background."
         case .developer: "Old build output and simulator data Xcode never clears on its own."
         case .homebrew: "Downloaded formula and cask archives left behind after installing."
-        case .largeFiles: "Big, old files taking up space you've probably forgotten about."
+        case .largeFiles: "Large files you have not opened in a long time."
         case .uninstall: "Leftovers from apps that are already gone."
-        case .maintenance: "Small housekeeping tasks that keep things running smoothly."
+        case .maintenance: "Routine maintenance tasks that keep macOS running smoothly."
         }
     }
 

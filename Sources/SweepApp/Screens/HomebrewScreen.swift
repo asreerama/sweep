@@ -58,7 +58,7 @@ struct HomebrewScreen: View {
     private var content: some View {
         switch model.loadState {
         case .idle, .loading:
-            InventoryEmptyState(symbol: "mug", title: "Checking Homebrew\u{2026}")
+            InventoryEmptyState(symbol: "mug", title: "Checking Homebrew\u{2026}", isBusy: true)
         case .unavailable:
             InventoryEmptyState(
                 symbol: "mug",

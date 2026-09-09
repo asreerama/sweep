@@ -30,9 +30,9 @@ struct OnboardingFinishStep: View {
             .shadow(color: SweepTokens.accent.opacity(0.28), radius: 16, y: 8)
 
             VStack(spacing: SweepTokens.s2) {
-                Text("You're set up")
+                Text("You\u{2019}re set up")
                     .font(.system(size: 24, weight: .semibold))
-                Text("A couple of optional conveniences, then straight into Smart Scan.")
+                Text("Two optional settings, then Smart Scan.")
                     .font(SweepFont.screenSubtitle)
                     .foregroundStyle(.secondary)
             }
@@ -42,7 +42,7 @@ struct OnboardingFinishStep: View {
                     optionRow(
                         symbol: "trash",
                         title: "Offer cleanup on app removal",
-                        detail: "When a .app lands in the Trash, show a quiet panel offering to open the Uninstaller with its leftovers ready to review."
+                        detail: "When an app lands in the Trash, show a panel offering to open the Uninstaller with its leftovers ready to review."
                     ) {
                         Toggle("", isOn: $sentinel.isEnabled)
                             .labelsHidden()

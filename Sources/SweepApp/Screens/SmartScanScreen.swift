@@ -1,3 +1,4 @@
+import SweepSystem
 import SweepUninstall
 import SwiftUI
 import SweepUI
@@ -38,6 +39,23 @@ struct SmartScanScreen: View {
     @State private var cleanFlow: CleanFlowModel?
     @State private var orphanFind = OrphanFindModel()
     @State private var emptyTrash = EmptyTrashModel()
+
+    /// Pause ambient idle motion (breathing bloom, aurora drift) with the same occlusion switch
+    /// that stops the scan sweep — nothing breathes where nobody can see it.
+    @Environment(\.sweepAnimationsEnabled) private var animationsEnabled
+
+    /// The idle hero's disk gauge: free/total for the volume the scan would clean, read once per
+    /// mount off the main actor. `nil` until it lands (microseconds — statfs-level work), during
+    /// which the ring shows its empty track and the counter stays hidden; the gauge arc then
+    /// draws in and the free-space number rolls up, which is the idle screen's entrance beat.
+    @State private var disk: DiskGauge?
+
+    private struct DiskGauge: Equatable {
+        let freeBytes: Int64
+        let totalBytes: Int64
+        let usedFraction: Double
+        let volumeName: String
+    }
 
     /// What this screen is actually showing — see the type doc for why this is not just
     /// `scan.phase` re-read.
@@ -114,6 +132,20 @@ struct SmartScanScreen: View {
             }
         }
         .animation(reduceMotion ? SweepMotion.crossfade : SweepMotion.layout, value: displayPhase)
+        .task {
+            let home = scan.homeURL
+            let stats = await Task.detached(priority: .utility) { DiskStatsReader.read(volumeURL: home) }.value
+            guard let stats, stats.totalBytes > 0 else { return }
+            // Animated assignment so the counter fades in on the same beat the gauge arc draws.
+            withAnimation(reduceMotion ? SweepMotion.crossfade : SweepMotion.layout) {
+                disk = DiskGauge(
+                    freeBytes: Int64(stats.availableBytes),
+                    totalBytes: Int64(stats.totalBytes),
+                    usedFraction: Double(stats.totalBytes - stats.availableBytes) / Double(stats.totalBytes),
+                    volumeName: stats.volumeName
+                )
+            }
+        }
         .onChange(of: scan.phase) { _, newPhase in
             syncDisplayPhase()
             if newPhase == .results { orphanFind.refresh() }
@@ -207,30 +239,64 @@ struct SmartScanScreen: View {
     /// doc: this call site never sits inside an `if`/`switch` keyed on `displayPhase`, so it is
     /// never torn down and remounted by a phase change — only `heroDiameter`/`heroRingState`/the
     /// counter's own inputs move, and they move on ordinary animatable state.
-    private var heroRing: some View {
-        ScanRing(state: heroRingState, diameter: heroDiameter, progress: scan.progress) {
-            // Idle shows an empty ring (no glyph): the invitation is the Scan button below.
-            if displayPhase != .idle {
-                HeroByteCounter(
-                    // Safe-tier bytes only once the ring lands (PLAN §6b): the counter settles
-                    // to the number that is both the hero total and the clean scope, not the raw
-                    // scan total scanning was showing a moment before.
-                    byteCount: isSettled ? scan.safeBytes : scan.claimedBytes,
-                    size: scanRingDiameter * 0.235,
-                    label: isSettled ? (scan.wasCancelled ? "Found so far" : "Ready to clean") : nil,
-                    caption: isSettled ? scan.safeResultsCaption : scan.scanningCaption
-                )
-                .scaleEffect(heroCounterScale)
-            }
+    /// The one number the hero shows per phase. Idle is the disk gauge's free space — the ring
+    /// finally says something before a scan runs; scanning is the raw claimed total; settled is
+    /// safe-tier bytes only (PLAN §6b): the counter lands on the number that is both the hero
+    /// total and the clean scope, not the raw scan total scanning was showing a moment before.
+    /// One call site, parameters only, same continuity rule as the ring itself — starting a scan
+    /// rolls the free-space figure down to the climbing claimed total on the counter's own
+    /// spring, never a remount.
+    private var heroCounterBytes: Int64 {
+        if displayPhase == .idle { return disk?.freeBytes ?? 0 }
+        return isSettled ? scan.safeBytes : scan.claimedBytes
+    }
+
+    private var heroCounterLabel: String? {
+        if displayPhase == .idle { return "Free" }
+        return isSettled ? (scan.wasCancelled ? "Found so far" : "Ready to clean") : nil
+    }
+
+    private var heroCounterCaption: String? {
+        if displayPhase == .idle {
+            guard let disk else { return nil }
+            return "of \(SweepFormat.bytes(disk.totalBytes)) \u{00B7} \(disk.volumeName)"
         }
-        // A soft accent bloom behind the ring for depth (Palette v2 volume-raise); skipped while
-        // idle so an untouched screen stays completely calm.
+        return isSettled ? scan.safeResultsCaption : scan.scanningCaption
+    }
+
+    private var heroRing: some View {
+        ScanRing(
+            state: heroRingState,
+            diameter: heroDiameter,
+            progress: scan.progress,
+            // The idle ring is a live gauge of the volume the scan would clean, not an empty
+            // track (user-directed: the untouched hero read as "a dud... nothing the user can
+            // understand"). Passed only at idle so the scan arc's own 0→1 story stays untouched.
+            idleFraction: displayPhase == .idle ? disk?.usedFraction : nil
+        ) {
+            // Hidden (not absent) until the gauge lands, so the counter never remounts across
+            // the idle→scanning edge — see the type doc's one-call-site rule.
+            HeroByteCounter(
+                byteCount: heroCounterBytes,
+                size: scanRingDiameter * 0.235,
+                label: heroCounterLabel,
+                caption: heroCounterCaption
+            )
+            .scaleEffect(heroCounterScale)
+            .opacity(displayPhase == .idle && disk == nil ? 0 : 1)
+        }
+        // Two ambient layers behind the ring, both hue-family-only (no second color story):
+        // the aurora — two big soft radial washes drifting on a slow autoreversing cycle — and
+        // the accent bloom, which breathes at idle and holds steady once real progress owns the
+        // motion. The aurora fades out at results so the cards land on a calm ground.
         .background {
-            if displayPhase != .idle {
-                Circle()
-                    .fill(SweepTokens.heroGlow)
-                    .frame(width: heroDiameter * 1.5, height: heroDiameter * 1.5)
-                    .allowsHitTesting(false)
+            ZStack {
+                AuroraBackdrop(drifting: !isResults && animationsEnabled && !reduceMotion)
+                    .opacity(isResults ? 0 : 1)
+                HeroBloom(
+                    diameter: heroDiameter * 1.5,
+                    breathing: displayPhase == .idle && animationsEnabled && !reduceMotion
+                )
             }
         }
     }
@@ -251,18 +317,62 @@ struct SmartScanScreen: View {
         }
     }
 
+    /// The idle invitation (user-directed rebuild: the old empty-ring-plus-button hero "looks
+    /// like a dud"). Now: the gauge ring above says what the disk holds, the hero CTA carries the
+    /// gradient, the coverage chips say in module color what a scan actually looks at, and the
+    /// recall line says what the last one found. All of it is true content, none of it padding.
     private var idleBelow: some View {
         VStack(spacing: 0) {
             Spacer().frame(height: SweepTokens.s6)
             Button("Scan") { scan.start() }
-                .buttonStyle(.sweepPrimary)
+                .buttonStyle(.sweepHero)
                 .keyboardShortcut(.defaultAction)
-            Spacer().frame(height: SweepTokens.s3)
+            Spacer().frame(height: SweepTokens.s3 + 2)
             Text("Reads your caches, logs and developer junk. Nothing is deleted.")
                 .font(SweepFont.screenSubtitle)
                 .foregroundStyle(.secondary)
+            Spacer().frame(height: SweepTokens.s6)
+            idleCoverage
+            if let recall = scan.lastScanRecall, displayPhase == .idle {
+                Spacer().frame(height: SweepTokens.s4 + 4)
+                lastScanLine(recall)
+            }
         }
         .padding(.horizontal, SweepTokens.s5)
+    }
+
+    /// What Smart Scan covers, as three module-hued chips — the same wayfinding colors the
+    /// sidebar teaches, so "Caches & logs is the blue module, Developer junk the lavender one"
+    /// reads before the first scan ever runs.
+    private static let coverage: [(symbol: String, title: String, caption: String)] = [
+        ("bubbles.and.sparkles", "Caches & logs", "App and system leftovers"),
+        ("chevron.left.forwardslash.chevron.right", "Developer junk", "Old builds and caches"),
+        ("app.dashed", "App leftovers", "Files from deleted apps"),
+    ]
+
+    private var idleCoverage: some View {
+        HStack(spacing: SweepTokens.s3) {
+            ForEach(Array(Self.coverage.enumerated()), id: \.offset) { index, entry in
+                CoverageChip(symbol: entry.symbol, title: entry.title, caption: entry.caption)
+                    .staggeredEntrance(index)
+            }
+        }
+    }
+
+    private static let recallFormatter: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .full
+        return formatter
+    }()
+
+    private func lastScanLine(_ recall: ScanModel.LastScanRecall) -> some View {
+        HStack(spacing: SweepTokens.s1 + 2) {
+            Image(systemName: "clock.arrow.circlepath")
+                .font(.system(size: 12, weight: .medium))
+            Text("Last scan found \(SweepFormat.bytes(recall.safeBytes)) ready to clean \u{00B7} \(Self.recallFormatter.localizedString(for: recall.finishedAt, relativeTo: .now))")
+                .font(SweepFont.caption)
+        }
+        .foregroundStyle(.tertiary)
     }
 
     private var scanningBelow: some View {
@@ -290,8 +400,8 @@ struct SmartScanScreen: View {
             if scan.summaryGroups.isEmpty {
                 InventoryEmptyState(
                     symbol: "checkmark.circle",
-                    title: "You're all clear",
-                    message: "Nothing under the roots this build can read needs attention right now."
+                    title: "Nothing to clean",
+                    message: "Nothing in the folders Sweep can read needs attention right now."
                 )
                 .frame(height: 160)
             } else {
@@ -299,7 +409,7 @@ struct SmartScanScreen: View {
                     InventoryEmptyState(
                         symbol: "checkmark.circle",
                         title: "Nothing safe to clean automatically",
-                        message: "Everything found is worth a second look first — see Needs review below."
+                        message: "Everything found needs a closer look first. See Needs review below."
                     )
                     .frame(height: 120)
                 } else {
@@ -425,10 +535,10 @@ struct SmartScanScreen: View {
                 Button("Clean") { startClean() }
                     .buttonStyle(.sweepPrimary(minWidth: 108))
                     .disabled(!CleanAdapter.isEnabled || scan.safeSummaryGroups.isEmpty)
-                    .help(CleanAdapter.isEnabled ? "Move the safe-tier items to Trash" : "Cleaning arrives at Gate 1")
-                    .accessibilityHint(CleanAdapter.isEnabled ? "" : "Disabled. Cleaning arrives at Gate 1.")
+                    .help(CleanAdapter.isEnabled ? "Move the safe-tier items to Trash" : "Cleaning is not available in this build")
+                    .accessibilityHint(CleanAdapter.isEnabled ? "" : "Disabled. Cleaning is not available in this build.")
                 if !CleanAdapter.isEnabled {
-                    GateNotice("Cleaning arrives at Gate 1")
+                    GateNotice("Cleaning is not available in this build")
                 }
                 Spacer(minLength: SweepTokens.s3)
                 if !scan.ruleGroups.isEmpty {
@@ -473,6 +583,139 @@ struct SmartScanScreen: View {
                 .buttonStyle(.sweepQuiet)
         }
         .padding(SweepTokens.s5)
+    }
+}
+
+// MARK: - Ambient hero layers (idle volume-raise)
+
+/// The accent halo behind the hero ring. While `breathing` it swells and dims on a slow
+/// autoreversing ease — ambient, sub-perceptual-speed motion, the idle screen's pulse; otherwise
+/// it holds the same static bloom scanning and results always had. The repeating animation is
+/// keyed off `swell` and replaced with an instant one on stop, so occlusion
+/// (`sweepAnimationsEnabled`) genuinely halts the render-thread work rather than hiding it.
+private struct HeroBloom: View {
+    let diameter: CGFloat
+    let breathing: Bool
+
+    @State private var swell = false
+    /// Read so appearance flips re-evaluate this body: `SweepTokens.adaptive` colors resolve at
+    /// body-run time and are not themselves live-reactive (see the token's doc) — without a
+    /// tracked `colorScheme` dependency, a subtree with no changing state keeps its launch
+    /// appearance. Same mechanism `SectionCard` relies on.
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        Circle()
+            .fill(SweepTokens.heroGlow)
+            .frame(width: diameter, height: diameter)
+            .scaleEffect(breathing ? (swell ? 1.08 : 0.94) : 1)
+            // The bloom carries a touch more presence on a dark ground, where 14% accent barely
+            // registers against near-black.
+            .opacity((breathing ? (swell ? 1 : 0.55) : 1) * (colorScheme == .dark ? 1 : 0.9))
+            .allowsHitTesting(false)
+            .onAppear { sync() }
+            .onChange(of: breathing) { _, _ in sync() }
+    }
+
+    private func sync() {
+        if breathing {
+            withAnimation(.easeInOut(duration: 3.4).repeatForever(autoreverses: true)) { swell = true }
+        } else {
+            // Replacing the repeatForever with a zero-duration animation is what cancels it.
+            withAnimation(.linear(duration: 0)) { swell = false }
+        }
+    }
+}
+
+/// Two large, soft radial washes — accent and its violet neighbour — drifting slowly behind the
+/// hero on an autoreversing cycle. Radial gradients that fade to clear, not blurred shapes: the
+/// wash look with zero per-frame blur cost. Same hue family as everything else kinetic; at these
+/// opacities it tints the ground rather than competing with the ring.
+private struct AuroraBackdrop: View {
+    let drifting: Bool
+
+    @State private var drift = false
+    /// Tracked appearance dependency — see `HeroBloom`. Also real tuning: the washes need a few
+    /// more points of opacity to register on the dark ground.
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        let strength = colorScheme == .dark ? 1.25 : 1.0
+        ZStack {
+            RadialGradient(
+                colors: [SweepTokens.accent.opacity(0.14 * strength), .clear],
+                center: .center, startRadius: 12, endRadius: 250
+            )
+            .frame(width: 520, height: 520)
+            .offset(x: drift ? -170 : -100, y: drift ? -70 : -140)
+
+            RadialGradient(
+                colors: [SweepTokens.accentViolet.opacity(0.12 * strength), .clear],
+                center: .center, startRadius: 12, endRadius: 270
+            )
+            .frame(width: 560, height: 560)
+            .offset(x: drift ? 180 : 110, y: drift ? 90 : 150)
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+        .onAppear { sync() }
+        .onChange(of: drifting) { _, _ in sync() }
+    }
+
+    private func sync() {
+        if drifting {
+            withAnimation(.easeInOut(duration: 11).repeatForever(autoreverses: true)) { drift = true }
+        } else {
+            withAnimation(.linear(duration: 0)) { drift = false }
+        }
+    }
+}
+
+/// One "what a scan covers" chip: module icon in its hue, title, plain-language one-liner, with
+/// the app's standard hover lift. A card the user can read, not a decoration.
+private struct CoverageChip: View {
+    let symbol: String
+    let title: String
+    let caption: String
+
+    @State private var hovering = false
+    /// Tracked appearance dependency — see `HeroBloom`. This was the visible failure: chips with
+    /// no changing state rendered their launch appearance's card color into the other appearance.
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        HStack(spacing: SweepTokens.s3) {
+            ModuleIcon(symbol: symbol, diameter: 34)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.primary)
+                Text(caption)
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(.secondary)
+            }
+            .lineLimit(1)
+        }
+        .padding(.vertical, SweepTokens.s3)
+        .padding(.horizontal, SweepTokens.s4)
+        .background {
+            RoundedRectangle(cornerRadius: SweepTokens.cornerRadius, style: .continuous)
+                .fill(SweepTokens.cardBackground)
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: SweepTokens.cornerRadius, style: .continuous)
+                .strokeBorder(SweepTokens.hairline, lineWidth: 1)
+        }
+        .shadow(
+            // Hue-tinted lift, `ModuleIcon`'s treatment at card scale — a touch stronger on the
+            // dark ground where a soft glow is doing all the separation work.
+            color: (SweepModuleHue.color(forSymbol: symbol) ?? SweepTokens.accent)
+                .opacity((hovering ? 0.22 : 0.10) * (colorScheme == .dark ? 1.5 : 1)),
+            radius: hovering ? 12 : 6, y: 3
+        )
+        .scaleEffect(hovering ? 1.02 : 1)
+        .animation(SweepMotion.row, value: hovering)
+        .onHover { hovering = $0 }
     }
 }
 

@@ -240,7 +240,7 @@ struct MemoryScreen: View {
                     .padding(SweepTokens.s5)
                 }
             } else {
-                InventoryEmptyState(symbol: "memorychip", title: "Reading memory stats\u{2026}")
+                InventoryEmptyState(symbol: "memorychip", title: "Reading memory stats\u{2026}", isBusy: true)
             }
         }
         // The first snapshot lands ~2s after this screen appears, swapping the empty state for a
@@ -500,8 +500,8 @@ struct MemoryScreen: View {
         VStack(spacing: 0) {
             Divider()
             Footnote(
-                "Quitting apps is the only real memory relief. There is no purge on Apple Silicon "
-                    + "— Sweep will not fake one.",
+                "Quitting apps is the only real memory relief. macOS provides no memory purge on "
+                    + "Apple Silicon.",
                 symbol: "info.circle"
             )
             .padding(.horizontal, SweepTokens.s5)

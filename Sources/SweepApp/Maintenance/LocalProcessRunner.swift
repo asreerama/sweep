@@ -1,7 +1,10 @@
 import Foundation
 
-/// Minimal fixed-absolute-path runner for the one user-level command Maintenance needs directly
-/// (`dscacheutil -flushcache`) — never a shell, never `sudo`. Same bounded-pipe/timeout shape as
+/// Minimal fixed-absolute-path runner for the user-level commands this target needs directly
+/// (`dscacheutil -flushcache` for Maintenance, `launchctl list` for Startup Items) — never a
+/// shell, never `sudo`. Shared between those two call sites because they are in the same target;
+/// the per-call-site re-implementations elsewhere exist to avoid crossing a package boundary, not
+/// to avoid reuse. Same bounded-pipe/timeout shape as
 /// `BrewProcessRunner` (this target) and `SweepUninstall.PkgutilReceipts.ProcessRunner`, trimmed
 /// to this one caller rather than shared — see either of those two for why this codebase
 /// re-implements this pattern per call site instead of importing it across a target boundary.

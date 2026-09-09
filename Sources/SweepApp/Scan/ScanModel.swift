@@ -72,6 +72,32 @@ final class ScanModel {
     var hasResults: Bool { phase == .results && !summaryGroups.isEmpty }
     var isScanning: Bool { phase == .scanning }
 
+    /// Home the scan resolves against — exposed so the idle hero can gauge the same volume the
+    /// scan would actually clean (fixture homes included), without any view learning a path of
+    /// its own.
+    var homeURL: URL { environment.home }
+
+    // MARK: - Last-scan recall (idle hero)
+
+    /// What the last completed scan of this home found, persisted so the idle screen has
+    /// something true to say before the first scan of a session. Same per-home keying discipline
+    /// as `fileCountKey`; only a finished, non-cancelled scan writes it.
+    struct LastScanRecall: Equatable {
+        let safeBytes: Int64
+        let finishedAt: Date
+    }
+
+    var lastScanRecall: LastScanRecall? {
+        let defaults = UserDefaults.standard
+        let bytes = defaults.object(forKey: Self.lastSafeBytesKey(for: environment.home)) as? Int64
+        let stamp = defaults.double(forKey: Self.lastFinishedAtKey(for: environment.home))
+        guard let bytes, bytes > 0, stamp > 0 else { return nil }
+        return LastScanRecall(safeBytes: bytes, finishedAt: Date(timeIntervalSince1970: stamp))
+    }
+
+    private static func lastSafeBytesKey(for home: URL) -> String { "sweep.scan.lastSafeBytes:" + home.path }
+    private static func lastFinishedAtKey(for home: URL) -> String { "sweep.scan.lastFinishedAt:" + home.path }
+
     // MARK: - Smart Scan safe-tier scope (PLAN §6b)
     //
     // `summaryGroups` are per rule-*category* (System Junk, Developer, ...) and mix every tier
@@ -206,6 +232,12 @@ final class ScanModel {
         // baseline, making the next bar race to 100% and stall.
         if !outcome.cancelled, outcome.filesExamined > 0 {
             UserDefaults.standard.set(outcome.filesExamined, forKey: Self.fileCountKey(for: environment.home))
+        }
+        // Teach the idle hero what this scan found (recall line + a first number to show next
+        // session). `summaryGroups` is already assigned above, so `safeBytes` is this outcome's.
+        if !outcome.cancelled {
+            UserDefaults.standard.set(safeBytes, forKey: Self.lastSafeBytesKey(for: environment.home))
+            UserDefaults.standard.set(Date.now.timeIntervalSince1970, forKey: Self.lastFinishedAtKey(for: environment.home))
         }
         selection = .safeDefaults(in: outcome.ruleGroups)
         catalog = outcome.catalog

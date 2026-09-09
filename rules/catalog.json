@@ -85,7 +85,7 @@
       "tier": "safe",
       "action": "trash",
       "undo": "trashRestore",
-      "rationale": "Crash report files can be safely removed; archived in Apple servers."
+      "rationale": "Crash report files can be safely removed; copies are archived on Apple servers."
     },
     {
       "id": "system-junk-diagnostic-logs",
@@ -143,7 +143,7 @@
       "tier": "caution",
       "action": "trash",
       "undo": "regenerated",
-      "rationale": "Symbols repopulate on next device connect, but no unusedness check exists yet; caution until an installed-runtime predicate ships."
+      "rationale": "Device symbols repopulate the next time you connect a device. Marked caution because Sweep cannot yet tell which symbol sets are still in use."
     },
     {
       "id": "xcode-simulators",

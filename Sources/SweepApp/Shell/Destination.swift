@@ -85,16 +85,16 @@ enum Destination: String, Hashable, Identifiable, CaseIterable {
         case .largeFiles: "Volume scan with size and age filters."
         case .memory: "Live pressure, compressor stats and the apps holding the memory."
         case .maintenance: "DNS flush, Spotlight reindex, APFS snapshot thinning."
-        case .startupItems: "Login items and background services, with reveal and deep links."
+        case .startupItems: "What starts behind your back, which app installed it, and what it\u{2019}s doing right now."
         case .uninstaller: "Full app removal with auditable ownership evidence per leftover."
         case .developer: "Per-environment caches with live sizes. Nothing is ever auto-selected."
         case .homebrew: "Formulae, casks, outdated packages and cache, previewed before anything runs."
         case .appLipo: "Trim Intel-only code from universal apps. Apple-signed apps are never touched."
         case .plugins: "Spotlight importers, Quick Look, audio units and app extensions \u{2014} and what installed them."
         case .packages: "Installer receipts recorded by macOS \u{2014} what got installed, when, and where. Read-only."
-        case .fileSearch: "Find any file by name, sorted by what it costs you."
+        case .fileSearch: "Find any file by name, sorted by size."
         case .listStress: "Debug harness: 10,000 synthetic rows through the shipping inventory list."
-        case .cleanFlowPreview: "Debug harness: confirm / progress / report states, ahead of the Gate 1 flip."
+        case .cleanFlowPreview: "Debug harness: confirm, progress and report states, before live cleaning is enabled."
         }
     }
 }
